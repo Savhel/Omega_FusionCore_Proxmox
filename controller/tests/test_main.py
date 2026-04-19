@@ -28,15 +28,20 @@ def make_vm(vm_id: int = 101, gpu_vram_budget_mib: int = 0) -> VmState:
     )
 
 
-def make_node(node_id: str, vcpu_free: int) -> NodeState:
+def make_node(
+    node_id: str,
+    vcpu_free: int,
+    gpu_total_vram_mib: int = 0,
+    gpu_free_vram_mib: int = 0,
+) -> NodeState:
     return NodeState(
         node_id=node_id,
         mem_total_kb=16 * 1024 * 1024,
         mem_available_kb=12 * 1024 * 1024,
         vcpu_total=12,
         vcpu_free=vcpu_free,
-        gpu_total_vram_mib=0,
-        gpu_free_vram_mib=0,
+        gpu_total_vram_mib=gpu_total_vram_mib,
+        gpu_free_vram_mib=gpu_free_vram_mib,
         local_vms=[],
     )
 
@@ -385,3 +390,88 @@ def test_reconcile_skips_gpu_update_when_vcpu_migration_is_pending(monkeypatch):
     )
 
     assert gpu_calls == []
+
+
+def test_ensure_vm_gpu_placement_migrates_to_less_loaded_gpu_node(monkeypatch):
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append((url, json))
+        return FakeResponse({"status": "ok"})
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+
+    vm = make_vm(101, gpu_vram_budget_mib=512)
+    source = make_node("node-a", vcpu_free=4, gpu_total_vram_mib=8192, gpu_free_vram_mib=512)
+    source.proxmox_node_name = "pve1"
+    source.local_vms = [vm]
+    target = make_node("node-b", vcpu_free=6, gpu_total_vram_mib=8192, gpu_free_vram_mib=4096)
+    target.proxmox_node_name = "pve2"
+
+    assert main._ensure_vm_gpu_placement(
+        source_node="node-a",
+        source_url="http://node-a:9300",
+        node_urls={"node-a": "http://node-a:9300", "node-b": "http://node-b:9300"},
+        vm=vm,
+        node_states={"node-a": source, "node-b": target},
+        required_vcpus=2,
+        gpu_budget_mib=2048,
+        last_gpu_migrations={},
+        now=0.0,
+        dry_run=False,
+    ) is True
+
+    assert calls == [
+        (
+            "http://node-a:9300/control/migrate",
+            {"vm_id": 101, "target": "pve2", "type": "live"},
+        )
+    ]
+
+
+def test_ensure_vm_gpu_placement_creates_space_by_evicting_resident_vm(monkeypatch):
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append((url, json))
+        return FakeResponse({"status": "ok"})
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+
+    requester = make_vm(101, gpu_vram_budget_mib=512)
+    resident = make_vm(202, gpu_vram_budget_mib=2048)
+
+    source = make_node("node-a", vcpu_free=4, gpu_total_vram_mib=8192, gpu_free_vram_mib=512)
+    source.proxmox_node_name = "pve1"
+    source.local_vms = [requester]
+
+    target = make_node("node-b", vcpu_free=6, gpu_total_vram_mib=8192, gpu_free_vram_mib=2048)
+    target.proxmox_node_name = "pve2"
+    target.local_vms = [resident]
+
+    alternate = make_node("node-c", vcpu_free=6, gpu_total_vram_mib=8192, gpu_free_vram_mib=2048)
+    alternate.proxmox_node_name = "pve3"
+
+    assert main._ensure_vm_gpu_placement(
+        source_node="node-a",
+        source_url="http://node-a:9300",
+        node_urls={
+            "node-a": "http://node-a:9300",
+            "node-b": "http://node-b:9300",
+            "node-c": "http://node-c:9300",
+        },
+        vm=requester,
+        node_states={"node-a": source, "node-b": target, "node-c": alternate},
+        required_vcpus=2,
+        gpu_budget_mib=4096,
+        last_gpu_migrations={},
+        now=0.0,
+        dry_run=False,
+    ) is True
+
+    assert calls == [
+        (
+            "http://node-b:9300/control/migrate",
+            {"vm_id": 202, "target": "pve3", "type": "live"},
+        )
+    ]

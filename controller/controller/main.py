@@ -71,6 +71,9 @@ def setup_logging(level: str = "INFO", fmt: str = "console") -> None:
 
 log = structlog.get_logger()
 
+GPU_MIGRATION_COOLDOWN_SECS = 120.0
+GPU_LOAD_IMPROVEMENT_PCT = 10.0
+
 # ─── Groupe CLI principal ──────────────────────────────────────────────────────
 
 @click.group()
@@ -457,11 +460,14 @@ def _reconcile_cluster_resources(
     vcpu_pool: ClusterVcpuPoolPlanner,
     last_vcpu_migrations: Dict[int, float],
     dry_run: bool,
+    last_gpu_migrations: Optional[Dict[int, float]] = None,
 ) -> None:
     cluster = _build_cluster_state(node_states, node_urls)
     pending_vcpu_profiles: List[Tuple[int, str, str, VmState, dict, int, dict]] = []
     pool_vms: List[VcpuPoolVm] = []
     now = time.time()
+    if last_gpu_migrations is None:
+        last_gpu_migrations = {}
 
     for node_id, node_state in node_states.items():
         source_url = node_urls[node_id]
@@ -484,6 +490,30 @@ def _reconcile_cluster_resources(
             config = proxmox.get_vm_config(proxmox_node_name, vm.vm_id)
             metadata = proxmox.parse_omega_metadata(config)
             gpu_budget = metadata.get("gpu_vram_mib", 0) or 0
+            current_state = next(
+                (
+                    entry for entry in vcpu_status.get("vm_states", [])
+                    if entry.get("vm_id") == vm.vm_id
+                ),
+                None,
+            )
+            current_vcpus = int(current_state.get("current_vcpus", 0)) if current_state else 0
+            desired_profile = _normalize_vcpu_profile(metadata)
+            required_vcpus = desired_profile[0] if desired_profile is not None else max(1, current_vcpus)
+
+            if gpu_budget > 0 and _ensure_vm_gpu_placement(
+                source_node=node_id,
+                source_url=source_url,
+                node_urls=node_urls,
+                vm=vm,
+                node_states=node_states,
+                required_vcpus=required_vcpus,
+                gpu_budget_mib=gpu_budget,
+                last_gpu_migrations=last_gpu_migrations,
+                now=now,
+                dry_run=dry_run,
+            ):
+                continue
 
             pending_vcpu_profiles.append((
                 _vcpu_profile_deficit(vm.vm_id, metadata, vcpu_status),
@@ -498,14 +528,6 @@ def _reconcile_cluster_resources(
             if profile is None:
                 continue
             desired_min, desired_max = profile
-            current_state = next(
-                (
-                    entry for entry in vcpu_status.get("vm_states", [])
-                    if entry.get("vm_id") == vm.vm_id
-                ),
-                None,
-            )
-            current_vcpus = int(current_state.get("current_vcpus", 0)) if current_state else 0
             pool_vms.append(VcpuPoolVm(
                 vmid=vm.vm_id,
                 node_id=node_id,
@@ -698,6 +720,272 @@ def _best_partial_reconciliation_target(
         reverse=True,
     )
     return candidates[0].node_id
+
+
+def _gpu_candidate_target(
+    source_node: str,
+    vm: VmState,
+    node_states: Dict[str, MigNodeState],
+    required_vcpus: int,
+    gpu_budget_mib: int,
+) -> Optional[str]:
+    source_state = node_states[source_node]
+    candidates = [
+        state
+        for node_id, state in node_states.items()
+        if node_id != source_node
+        and state.gpu_total_vram_mib > 0
+        and _target_can_host_vm(state, vm, required_vcpus, gpu_budget_mib)
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda state: (
+            state.gpu_used_pct,
+            -state.gpu_free_vram_mib,
+            state.vcpu_used_pct,
+            state.ram_used_pct,
+        )
+    )
+    best = candidates[0]
+    if (
+        source_state.gpu_total_vram_mib == 0
+        or source_state.gpu_free_vram_mib < gpu_budget_mib
+        or source_state.gpu_used_pct - best.gpu_used_pct >= GPU_LOAD_IMPROVEMENT_PCT
+    ):
+        return best.node_id
+    return None
+
+
+def _best_gpu_eviction_target(
+    source_node: str,
+    vm: VmState,
+    node_states: Dict[str, MigNodeState],
+    blocked_nodes: set[str],
+) -> Optional[str]:
+    candidates = [
+        state
+        for node_id, state in node_states.items()
+        if node_id not in blocked_nodes
+        and node_id != source_node
+        and state.gpu_total_vram_mib > 0
+        and _target_can_host_vm(state, vm, 1, vm.gpu_vram_budget_mib)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda state: (
+            state.gpu_used_pct,
+            -state.gpu_free_vram_mib,
+            state.vcpu_used_pct,
+            state.ram_used_pct,
+        )
+    )
+    return candidates[0].node_id
+
+
+def _find_gpu_space_creation_plan(
+    source_node: str,
+    vm: VmState,
+    node_states: Dict[str, MigNodeState],
+    required_vcpus: int,
+    gpu_budget_mib: int,
+    last_gpu_migrations: Dict[int, float],
+    now: float,
+) -> Optional[Tuple[str, List[Tuple[VmState, str]]]]:
+    source_state = node_states[source_node]
+    candidates = [
+        state
+        for node_id, state in node_states.items()
+        if node_id != source_node
+        and state.gpu_total_vram_mib >= gpu_budget_mib
+        and state.mem_available_kb >= vm.max_mem_mib * 1024
+        and state.vcpu_free >= required_vcpus
+    ]
+    candidates.sort(
+        key=lambda state: (
+            state.gpu_used_pct,
+            -state.gpu_free_vram_mib,
+            state.vcpu_used_pct,
+            state.ram_used_pct,
+        )
+    )
+
+    for target in candidates:
+        improvement = source_state.gpu_used_pct - target.gpu_used_pct
+        if (
+            source_state.gpu_total_vram_mib > 0
+            and source_state.gpu_free_vram_mib >= gpu_budget_mib
+            and improvement < GPU_LOAD_IMPROVEMENT_PCT
+        ):
+            continue
+
+        needed_free = gpu_budget_mib - target.gpu_free_vram_mib
+        if needed_free <= 0:
+            return (target.node_id, [])
+
+        movable: List[Tuple[int, VmState, str]] = []
+        for resident in target.local_vms:
+            if resident.vm_id == vm.vm_id or resident.gpu_vram_budget_mib <= 0:
+                continue
+            last_resident_migration = last_gpu_migrations.get(resident.vm_id)
+            if (
+                last_resident_migration is not None
+                and now - last_resident_migration < GPU_MIGRATION_COOLDOWN_SECS
+            ):
+                continue
+            eviction_target = _best_gpu_eviction_target(
+                source_node=target.node_id,
+                vm=resident,
+                node_states=node_states,
+                blocked_nodes={target.node_id},
+            )
+            if eviction_target is None:
+                continue
+            movable.append((resident.gpu_vram_budget_mib, resident, eviction_target))
+
+        movable.sort(key=lambda item: (-item[0], item[1].vm_id))
+        selected: List[Tuple[VmState, str]] = []
+        freed = 0
+        for budget, resident, eviction_target in movable:
+            selected.append((resident, eviction_target))
+            freed += budget
+            if freed >= needed_free:
+                return (target.node_id, selected)
+
+    return None
+
+
+def _start_auto_migration(
+    source_url: str,
+    node_states: Dict[str, MigNodeState],
+    source_node: str,
+    vm: VmState,
+    target: str,
+    detail: str,
+    tracker: Dict[int, float],
+    now: float,
+    dry_run: bool,
+) -> bool:
+    proxmox_target = _proxmox_target_name(node_states, target)
+    log.warning(
+        detail,
+        vm_id=vm.vm_id,
+        source=source_node,
+        target=target,
+        proxmox_target=proxmox_target,
+    )
+    if dry_run:
+        return True
+
+    payload = {
+        "vm_id": vm.vm_id,
+        "target": proxmox_target,
+        "type": "live" if vm.status == "running" else "cold",
+    }
+    try:
+        resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
+        resp.raise_for_status()
+        tracker[vm.vm_id] = now
+        return True
+    except requests.RequestException as exc:
+        log.error("échec migration automatique", vm_id=vm.vm_id, source=source_node, error=str(exc))
+        return False
+
+
+def _ensure_vm_gpu_placement(
+    source_node: str,
+    source_url: str,
+    node_urls: Dict[str, str],
+    vm: VmState,
+    node_states: Dict[str, MigNodeState],
+    required_vcpus: int,
+    gpu_budget_mib: int,
+    last_gpu_migrations: Dict[int, float],
+    now: float,
+    dry_run: bool,
+) -> bool:
+    if gpu_budget_mib <= 0:
+        return False
+
+    last_vm_migration = last_gpu_migrations.get(vm.vm_id)
+    if (
+        last_vm_migration is not None
+        and now - last_vm_migration < GPU_MIGRATION_COOLDOWN_SECS
+    ):
+        return False
+
+    direct_target = _gpu_candidate_target(
+        source_node=source_node,
+        vm=vm,
+        node_states=node_states,
+        required_vcpus=required_vcpus,
+        gpu_budget_mib=gpu_budget_mib,
+    )
+    if direct_target:
+        return _start_auto_migration(
+            source_url=source_url,
+            node_states=node_states,
+            source_node=source_node,
+            vm=vm,
+            target=direct_target,
+            detail="rééquilibrage automatique GPU vers le nœud le moins chargé",
+            tracker=last_gpu_migrations,
+            now=now,
+            dry_run=dry_run,
+        )
+
+    plan = _find_gpu_space_creation_plan(
+        source_node=source_node,
+        vm=vm,
+        node_states=node_states,
+        required_vcpus=required_vcpus,
+        gpu_budget_mib=gpu_budget_mib,
+        last_gpu_migrations=last_gpu_migrations,
+        now=now,
+    )
+    if plan is None:
+        return False
+
+    target_node, evictions = plan
+    if not evictions:
+        return _start_auto_migration(
+            source_url=source_url,
+            node_states=node_states,
+            source_node=source_node,
+            vm=vm,
+            target=target_node,
+            detail="rééquilibrage automatique GPU",
+            tracker=last_gpu_migrations,
+            now=now,
+            dry_run=dry_run,
+        )
+
+    for resident, eviction_target in evictions:
+        resident_source_node = next(
+            (node_id for node_id, state in node_states.items() if resident in state.local_vms),
+            None,
+        )
+        if resident_source_node is None:
+            log.error("source inconnue pour évacuation GPU", vm_id=resident.vm_id)
+            return False
+        resident_source_url = node_urls[resident_source_node]
+        migrated = _start_auto_migration(
+            source_url=resident_source_url,
+            node_states=node_states,
+            source_node=resident_source_node,
+            vm=resident,
+            target=eviction_target,
+            detail="création automatique d'espace GPU par évacuation d'une autre VM",
+            tracker=last_gpu_migrations,
+            now=now,
+            dry_run=dry_run,
+        )
+        if migrated:
+            return True
+
+    return False
 
 
 def _proxmox_target_name(node_states: Dict[str, MigNodeState], target_node: str) -> str:
