@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
+from .rust_policy import call_policy
 
 # ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -220,6 +221,72 @@ class MigrationPolicy:
         Analyse tous les nœuds et retourne les migrations recommandées,
         triées par urgence décroissante.
         """
+        rust_candidates = call_policy(
+            "evaluate-migrations",
+            {
+                "thresholds": {
+                    "ram_high_pct": self.thresholds.ram_high_pct,
+                    "ram_critical_pct": self.thresholds.ram_critical_pct,
+                    "vcpu_throttle_trigger": self.thresholds.vcpu_throttle_trigger,
+                    "vcpu_saturation_pct": self.thresholds.vcpu_saturation_pct,
+                    "remote_paging_pct": self.thresholds.remote_paging_pct,
+                    "gpu_high_pct": self.thresholds.gpu_high_pct,
+                    "idle_cpu_pct": self.thresholds.idle_cpu_pct,
+                    "idle_duration_secs": self.thresholds.idle_duration_secs,
+                    "target_max_ram_pct": self.thresholds.target_max_ram_pct,
+                    "target_max_vcpu_pct": self.thresholds.target_max_vcpu_pct,
+                },
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "mem_total_kb": node.mem_total_kb,
+                        "mem_available_kb": node.mem_available_kb,
+                        "vcpu_total": node.vcpu_total,
+                        "vcpu_free": node.vcpu_free,
+                        "gpu_total_vram_mib": node.gpu_total_vram_mib,
+                        "gpu_free_vram_mib": node.gpu_free_vram_mib,
+                        "local_vms": [
+                            {
+                                "vm_id": vm.vm_id,
+                                "status": vm.status,
+                                "max_mem_mib": vm.max_mem_mib,
+                                "rss_kb": vm.rss_kb,
+                                "remote_pages": vm.remote_pages,
+                                "avg_cpu_pct": vm.avg_cpu_pct,
+                                "throttle_ratio": vm.throttle_ratio,
+                                "gpu_vram_budget_mib": vm.gpu_vram_budget_mib,
+                                "idle_duration_secs": vm.idle_duration_secs() if vm.idle_since is not None else None,
+                            }
+                            for vm in node.local_vms
+                        ],
+                    }
+                    for node in node_states.values()
+                ],
+            },
+        )
+        if rust_candidates is not None:
+            return [
+                MigrationCandidate(
+                    vm=VmState(
+                        vm_id=item["vm"]["vm_id"],
+                        status=item["vm"]["status"],
+                        max_mem_mib=item["vm"]["max_mem_mib"],
+                        rss_kb=item["vm"].get("rss_kb", 0),
+                        remote_pages=item["vm"].get("remote_pages", 0),
+                        avg_cpu_pct=item["vm"].get("avg_cpu_pct", 0.0),
+                        throttle_ratio=item["vm"].get("throttle_ratio", 0.0),
+                        gpu_vram_budget_mib=item["vm"].get("gpu_vram_budget_mib", 0),
+                    ),
+                    source=item["source"],
+                    target=item["target"],
+                    mtype=MigrationType(item["mtype"]),
+                    reason=MigrationReason(item["reason"]),
+                    urgency=item.get("urgency", 0),
+                    detail=item.get("detail", ""),
+                )
+                for item in rust_candidates
+            ]
+
         candidates: List[MigrationCandidate] = []
         t = self.thresholds
 
@@ -318,6 +385,38 @@ class MigrationPolicy:
         API publique pour choisir le type de migration d'une VM spécifique.
         Utilisée par l'admin ou le controller pour une décision manuelle.
         """
+        rust_type = call_policy(
+            "pick-migration-type",
+            {
+                "thresholds": {
+                    "ram_high_pct": self.thresholds.ram_high_pct,
+                    "ram_critical_pct": self.thresholds.ram_critical_pct,
+                    "vcpu_throttle_trigger": self.thresholds.vcpu_throttle_trigger,
+                    "vcpu_saturation_pct": self.thresholds.vcpu_saturation_pct,
+                    "remote_paging_pct": self.thresholds.remote_paging_pct,
+                    "gpu_high_pct": self.thresholds.gpu_high_pct,
+                    "idle_cpu_pct": self.thresholds.idle_cpu_pct,
+                    "idle_duration_secs": self.thresholds.idle_duration_secs,
+                    "target_max_ram_pct": self.thresholds.target_max_ram_pct,
+                    "target_max_vcpu_pct": self.thresholds.target_max_vcpu_pct,
+                },
+                "vm": {
+                    "vm_id": vm.vm_id,
+                    "status": vm.status,
+                    "max_mem_mib": vm.max_mem_mib,
+                    "rss_kb": vm.rss_kb,
+                    "remote_pages": vm.remote_pages,
+                    "avg_cpu_pct": vm.avg_cpu_pct,
+                    "throttle_ratio": vm.throttle_ratio,
+                    "gpu_vram_budget_mib": vm.gpu_vram_budget_mib,
+                    "idle_duration_secs": vm.idle_duration_secs() if vm.idle_since is not None else None,
+                },
+                "node_ram_pct": node_ram_pct,
+            },
+        )
+        if rust_type is not None:
+            return MigrationType(rust_type)
+
         critical = node_ram_pct >= self.thresholds.ram_critical_pct
         return self._pick_type(vm, critical=critical)
 

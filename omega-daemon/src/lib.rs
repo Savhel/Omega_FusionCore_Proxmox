@@ -10,6 +10,7 @@ pub mod gpu_multiplexer; // Multiplexeur GPU bas niveau (une instance par nœud)
 pub mod gpu_protocol; // Protocole binaire VM ↔ daemon GPU
 pub mod gpu_runtime; // État GPU synchrone exposable via les APIs HTTP
 pub mod node_state;
+pub mod policy_engine;
 pub mod qmp_vcpu; // vCPU hotplug réel via QMP (device_add / device_del)
 pub mod quota; // garantie de non-dépassement mémoire par VM
 pub mod store_server;

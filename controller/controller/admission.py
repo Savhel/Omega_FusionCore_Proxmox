@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .cluster import ClusterState, NodeInfo, VmEntry
+from .rust_policy import call_policy
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,45 @@ class AdmissionController:
 
         Retourne une `AdmissionDecision` avec le placement et les budgets.
         """
+        rust_decision = call_policy(
+            "admit",
+            {
+                "config": {
+                    "safety_margin": self.safety_margin,
+                    "prefer_local": self.prefer_local,
+                    "min_remote_node_free": self.min_remote_node_free,
+                },
+                "cluster": {
+                    "nodes": [
+                        {
+                            "node_id": node.node_id,
+                            "mem_total_kb": node.mem_total_kb,
+                            "mem_available_kb": node.mem_available_kb,
+                            "reachable": node.reachable,
+                            "local_vms": [
+                                {
+                                    "vmid": entry.vmid,
+                                    "max_mem_mib": entry.max_mem_mib,
+                                }
+                                for entry in node.local_vms
+                            ],
+                        }
+                        for node in cluster.nodes
+                    ]
+                },
+                "vm": {
+                    "vmid": vm.vmid,
+                    "max_mem_mib": vm.max_mem_mib,
+                    "name": vm.name,
+                    "vcpus": vm.vcpus,
+                    "preferred_node": vm.preferred_node,
+                    "forbidden_nodes": vm.forbidden_nodes,
+                },
+            },
+        )
+        if rust_decision is not None:
+            return AdmissionDecision(**rust_decision)
+
         reachable = cluster.reachable_nodes
         if not reachable:
             return AdmissionDecision(
@@ -323,6 +363,48 @@ class AdmissionController:
         Les VMs sont évaluées dans l'ordre : une VM admise "réserve" sa RAM,
         ce qui réduit la capacité disponible pour les suivantes.
         """
+        rust_decisions = call_policy(
+            "admit-batch",
+            {
+                "config": {
+                    "safety_margin": self.safety_margin,
+                    "prefer_local": self.prefer_local,
+                    "min_remote_node_free": self.min_remote_node_free,
+                },
+                "cluster": {
+                    "nodes": [
+                        {
+                            "node_id": node.node_id,
+                            "mem_total_kb": node.mem_total_kb,
+                            "mem_available_kb": node.mem_available_kb,
+                            "reachable": node.reachable,
+                            "local_vms": [
+                                {
+                                    "vmid": entry.vmid,
+                                    "max_mem_mib": entry.max_mem_mib,
+                                }
+                                for entry in node.local_vms
+                            ],
+                        }
+                        for node in cluster.nodes
+                    ]
+                },
+                "vms": [
+                    {
+                        "vmid": vm.vmid,
+                        "max_mem_mib": vm.max_mem_mib,
+                        "name": vm.name,
+                        "vcpus": vm.vcpus,
+                        "preferred_node": vm.preferred_node,
+                        "forbidden_nodes": vm.forbidden_nodes,
+                    }
+                    for vm in vms
+                ],
+            },
+        )
+        if rust_decisions is not None:
+            return [AdmissionDecision(**decision) for decision in rust_decisions]
+
         decisions   = []
         # Simule les réservations en mémoire (sans modifier le cluster réel)
         reservations: dict[str, int] = {}  # node_id → Mio réservé
