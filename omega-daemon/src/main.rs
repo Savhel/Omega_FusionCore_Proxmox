@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
             );
 
             loop {
-                let local_vms = tracker.local_vms_snapshot();
+                let local_vms = tracker.local_running_vms_snapshot();
                 let local_ids: HashSet<u32> = local_vms.iter().map(|vm| vm.vmid).collect();
 
                 for vm_state in state.vcpu_scheduler.vm_snapshot() {

@@ -197,6 +197,17 @@ impl VmTracker {
         self.local_vms.lock().unwrap().values().cloned().collect()
     }
 
+    /// Retourne uniquement les VMs locales réellement en cours d'exécution.
+    pub fn local_running_vms_snapshot(&self) -> Vec<LocalVm> {
+        self.local_vms
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|vm| vm.status == VmStatus::Running)
+            .cloned()
+            .collect()
+    }
+
     /// Retourne les VMs locales candidates à la migration.
     ///
     /// Une VM est candidate si ses pages distantes dépassent `threshold_pages`.
@@ -228,6 +239,7 @@ fn read_proc_rss(pid: u32) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn make_tracker() -> VmTracker {
         VmTracker::new(
@@ -272,5 +284,40 @@ mod tests {
             status: VmStatus::Running,
         };
         assert!((vm.remote_pct() - 10.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_running_snapshot_filters_stopped_vms() {
+        let t = make_tracker();
+        let mut vms = HashMap::new();
+        vms.insert(
+            100,
+            LocalVm {
+                vmid: 100,
+                pid: Some(1234),
+                max_mem_mib: 1024,
+                rss_kb: 0,
+                local_stored_pages: 0,
+                remote_pages: 0,
+                status: VmStatus::Running,
+            },
+        );
+        vms.insert(
+            200,
+            LocalVm {
+                vmid: 200,
+                pid: None,
+                max_mem_mib: 1024,
+                rss_kb: 0,
+                local_stored_pages: 0,
+                remote_pages: 0,
+                status: VmStatus::Stopped,
+            },
+        );
+        *t.local_vms.lock().unwrap() = vms;
+
+        let running = t.local_running_vms_snapshot();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].vmid, 100);
     }
 }
