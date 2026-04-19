@@ -61,6 +61,15 @@ pub struct VcpuEntry {
     pub qom_path: String,
 }
 
+#[derive(Debug, Clone)]
+struct HotpluggableCpuSlot {
+    qom_path: Option<String>,
+    cpu_type: String,
+    socket_id: i64,
+    core_id: i64,
+    thread_id: i64,
+}
+
 /// Résultat d'une opération hotplug.
 #[derive(Debug, Clone)]
 pub enum HotplugResult {
@@ -193,6 +202,43 @@ impl QmpVcpuClient {
         })
     }
 
+    fn query_hotpluggable_cpus(&self) -> Result<Vec<HotpluggableCpuSlot>> {
+        if !self.is_available() {
+            bail!("socket QMP absente pour vmid={}", self.vm_id);
+        }
+
+        let (mut stream, mut reader) = self.connect()?;
+        self.handshake(&mut stream, &mut reader)?;
+
+        self.send(&mut stream, &json!({"execute": "query-hotpluggable-cpus"}))?;
+        let resp = self.recv(&mut reader)?;
+
+        if let Some(err) = resp.get("error") {
+            bail!("query-hotpluggable-cpus échoué : {:?}", err);
+        }
+
+        let mut slots = Vec::new();
+        for entry in resp["return"].as_array().cloned().unwrap_or_default() {
+            let props = entry.get("props").cloned().unwrap_or_else(|| json!({}));
+            slots.push(HotpluggableCpuSlot {
+                qom_path: entry
+                    .get("qom-path")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                cpu_type: entry
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("host-x86_64-cpu")
+                    .to_string(),
+                socket_id: props.get("socket-id").and_then(|v| v.as_i64()).unwrap_or(0),
+                core_id: props.get("core-id").and_then(|v| v.as_i64()).unwrap_or(0),
+                thread_id: props.get("thread-id").and_then(|v| v.as_i64()).unwrap_or(0),
+            });
+        }
+
+        Ok(slots)
+    }
+
     /// Ajoute un vCPU à chaud (hotplug +1).
     ///
     /// QEMU doit avoir été démarré avec `-smp maxcpus=N` où N > vCPUs actuels.
@@ -223,17 +269,22 @@ impl QmpVcpuClient {
             });
         }
 
-        // Trouver le prochain vCPU hors-ligne à brancher
-        let next_offline = info.cpus.iter().find(|c| !c.online).map(|c| c.index);
+        // Trouver le prochain slot CPU hors-ligne réellement hotpluggable.
+        let hotpluggable = match self.query_hotpluggable_cpus() {
+            Ok(slots) => slots,
+            Err(e) => {
+                return Ok(HotplugResult::Unavailable {
+                    reason: e.to_string(),
+                })
+            }
+        };
 
-        let Some(cpu_index) = next_offline else {
-            // Tous les slots configurés sont en ligne mais on n'a pas atteint max_vcpus
-            // → QEMU n'a pas été démarré avec suffisamment de maxcpus
+        let Some(cpu_slot) = hotpluggable.iter().find(|slot| slot.qom_path.is_none()) else {
             warn!(
                 vm_id = self.vm_id,
                 online = info.online_count,
                 max_vcpus = max_vcpus,
-                "aucun slot CPU hors-ligne — démarrer la VM avec -smp maxcpus={}",
+                "aucun slot CPU hotpluggable hors-ligne — démarrer la VM avec -smp maxcpus={}",
                 max_vcpus
             );
             return Ok(HotplugResult::NoSlots {
@@ -251,11 +302,11 @@ impl QmpVcpuClient {
             &json!({
                 "execute": "device_add",
                 "arguments": {
-                    "driver": "host-x86_64-cpu",
-                    "id":     format!("cpu-{}", cpu_index),
-                    "socket-id": 0,
-                    "core-id":   cpu_index,
-                    "thread-id": 0
+                    "driver": cpu_slot.cpu_type,
+                    "id":     format!("cpu-{}-{}-{}", cpu_slot.socket_id, cpu_slot.core_id, cpu_slot.thread_id),
+                    "socket-id": cpu_slot.socket_id,
+                    "core-id":   cpu_slot.core_id,
+                    "thread-id": cpu_slot.thread_id
                 }
             }),
         )?;
@@ -272,7 +323,10 @@ impl QmpVcpuClient {
         let new_count = info.online_count + 1;
         info!(
             vm_id = self.vm_id,
-            cpu_index = cpu_index,
+            socket_id = cpu_slot.socket_id,
+            core_id = cpu_slot.core_id,
+            thread_id = cpu_slot.thread_id,
+            cpu_type = %cpu_slot.cpu_type,
             new_count = new_count,
             "vCPU hotplugged via QMP"
         );
