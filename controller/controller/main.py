@@ -386,6 +386,7 @@ def _fetch_cluster_state(node_urls: Dict[str, str]) -> Dict[str, MigNodeState]:
                 node_id          = node_id,
                 mem_total_kb     = mem_total_kb,
                 mem_available_kb = mem_available_kb,
+                proxmox_node_name = node_data.get("node_id", node_id),
                 vcpu_total       = vcpu_total,
                 vcpu_free        = vcpu_free,
                 gpu_total_vram_mib = gpu_data.get("total_vram_mib", 0),
@@ -457,7 +458,8 @@ def _reconcile_cluster_resources(
                     dry_run=dry_run,
                 )
 
-            config = proxmox.get_vm_config(node_id, vm.vm_id)
+            proxmox_node_name = node_state.proxmox_node_name or node_id
+            config = proxmox.get_vm_config(proxmox_node_name, vm.vm_id)
             metadata = proxmox.parse_omega_metadata(config)
             gpu_budget = metadata.get("gpu_vram_mib", 0) or 0
             if gpu_budget > 0 and vm.gpu_vram_budget_mib != gpu_budget:

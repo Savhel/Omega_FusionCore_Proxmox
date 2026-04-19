@@ -61,6 +61,7 @@ class NodeState:
     node_id:          str
     mem_total_kb:     int
     mem_available_kb: int
+    proxmox_node_name: str     = ""
     vcpu_total:       int       = 24
     vcpu_free:        int       = 24
     gpu_total_vram_mib: int     = 0

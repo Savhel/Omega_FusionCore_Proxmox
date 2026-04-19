@@ -41,6 +41,40 @@ def make_node(node_id: str, vcpu_free: int) -> NodeState:
     )
 
 
+def test_reconcile_uses_real_proxmox_node_name(monkeypatch):
+    proxmox_calls = []
+
+    class FakeAdmission:
+        pass
+
+    class FakeProxmox:
+        def get_vm_config(self, node, vmid):
+            proxmox_calls.append((node, vmid))
+            return {}
+
+        def parse_omega_metadata(self, config):
+            return config
+
+    monkeypatch.setattr(main, "_fetch_vm_quota", lambda source_url, vm_id: {"quota": "ok"})
+    monkeypatch.setattr(main, "_ensure_vm_gpu_budget", lambda **kwargs: None)
+    monkeypatch.setattr(main, "_ensure_vm_vcpu_profile", lambda **kwargs: None)
+
+    vm = make_vm()
+    node = make_node("node-a", vcpu_free=2)
+    node.proxmox_node_name = "pve"
+    node.local_vms = [vm]
+
+    main._reconcile_cluster_resources(
+        node_urls={"node-a": "http://node-a:9300"},
+        node_states={"node-a": node},
+        admission=FakeAdmission(),
+        proxmox=FakeProxmox(),
+        dry_run=False,
+    )
+
+    assert proxmox_calls == [("pve", 101)]
+
+
 def test_ensure_vm_vcpu_profile_posts_profile_update(monkeypatch):
     calls = []
 
