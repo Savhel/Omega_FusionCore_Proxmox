@@ -447,9 +447,11 @@ def _reconcile_cluster_resources(
     dry_run: bool,
 ) -> None:
     cluster = _build_cluster_state(node_states, node_urls)
+    pending_vcpu_profiles: List[Tuple[int, str, str, VmState, dict, int, dict]] = []
 
     for node_id, node_state in node_states.items():
         source_url = node_urls[node_id]
+        vcpu_status = _fetch_vcpu_status(source_url) or {}
         for vm in node_state.local_vms:
             quota = _fetch_vm_quota(source_url, vm.vm_id)
             if quota is None:
@@ -468,24 +470,46 @@ def _reconcile_cluster_resources(
             config = proxmox.get_vm_config(proxmox_node_name, vm.vm_id)
             metadata = proxmox.parse_omega_metadata(config)
             gpu_budget = metadata.get("gpu_vram_mib", 0) or 0
-            if gpu_budget > 0 and vm.gpu_vram_budget_mib != gpu_budget:
-                _ensure_vm_gpu_budget(
-                    source_url=source_url,
-                    vm_id=vm.vm_id,
-                    gpu_budget_mib=gpu_budget,
-                    dry_run=dry_run,
-                )
 
-            if _ensure_vm_vcpu_profile(
-                source_node=node_id,
+            pending_vcpu_profiles.append((
+                _vcpu_profile_deficit(vm.vm_id, metadata, vcpu_status),
+                node_id,
+                source_url,
+                vm,
+                metadata,
+                gpu_budget or vm.gpu_vram_budget_mib,
+                vcpu_status,
+            ))
+
+    pending_vcpu_profiles.sort(key=lambda item: (item[0], item[3].vm_id))
+    for (
+        _deficit,
+        source_node,
+        source_url,
+        vm,
+        metadata,
+        gpu_budget_mib,
+        vcpu_status,
+    ) in pending_vcpu_profiles:
+        migration_started = _ensure_vm_vcpu_profile(
+            source_node=source_node,
+            source_url=source_url,
+            vm=vm,
+            metadata=metadata,
+            node_states=node_states,
+            gpu_budget_mib=gpu_budget_mib,
+            vcpu_status=vcpu_status,
+            dry_run=dry_run,
+        )
+        if migration_started:
+            continue
+        if gpu_budget_mib > 0 and vm.gpu_vram_budget_mib != gpu_budget_mib:
+            _ensure_vm_gpu_budget(
                 source_url=source_url,
-                vm=vm,
-                metadata=metadata,
-                node_states=node_states,
-                gpu_budget_mib=gpu_budget or vm.gpu_vram_budget_mib,
+                vm_id=vm.vm_id,
+                gpu_budget_mib=gpu_budget_mib,
                 dry_run=dry_run,
-            ):
-                continue
+            )
 
 
 def _fetch_vm_quota(source_url: str, vm_id: int) -> Optional[dict]:
@@ -527,6 +551,23 @@ def _normalize_vcpu_profile(metadata: dict) -> Optional[Tuple[int, int]]:
     return desired_min, desired_max
 
 
+def _vcpu_profile_deficit(vm_id: int, metadata: dict, vcpu_status: dict) -> int:
+    profile = _normalize_vcpu_profile(metadata)
+    if profile is None:
+        return 0
+
+    desired_min, _desired_max = profile
+    current_state = next(
+        (
+            entry for entry in vcpu_status.get("vm_states", [])
+            if entry.get("vm_id") == vm_id
+        ),
+        None,
+    )
+    current_vcpus = int(current_state.get("current_vcpus", 0)) if current_state else 0
+    return max(0, desired_min - current_vcpus)
+
+
 def _target_can_host_vm(
     node_state: MigNodeState,
     vm: VmState,
@@ -561,6 +602,36 @@ def _best_reconciliation_target(
     candidates.sort(
         key=lambda state: (
             state.vcpu_free,
+            state.mem_available_kb,
+            state.gpu_free_vram_mib,
+        ),
+        reverse=True,
+    )
+    return candidates[0].node_id
+
+
+def _best_partial_reconciliation_target(
+    source_node: str,
+    vm: VmState,
+    node_states: Dict[str, MigNodeState],
+    current_vcpus: int,
+    gpu_budget_mib: int,
+) -> Optional[str]:
+    source_state = node_states[source_node]
+    required_vcpus = max(1, current_vcpus)
+    candidates = [
+        state
+        for node_id, state in node_states.items()
+        if node_id != source_node
+        and _target_can_host_vm(state, vm, required_vcpus, gpu_budget_mib)
+        and state.vcpu_free > source_state.vcpu_free
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda state: (
+            state.vcpu_free - source_state.vcpu_free,
             state.mem_available_kb,
             state.gpu_free_vram_mib,
         ),
@@ -671,6 +742,7 @@ def _ensure_vm_vcpu_profile(
     metadata: dict,
     node_states: Dict[str, MigNodeState],
     gpu_budget_mib: int,
+    vcpu_status: dict,
     dry_run: bool,
 ) -> bool:
     profile = _normalize_vcpu_profile(metadata)
@@ -678,7 +750,6 @@ def _ensure_vm_vcpu_profile(
         return False
 
     desired_min, desired_max = profile
-    vcpu_status = _fetch_vcpu_status(source_url) or {}
     current_state = next(
         (
             entry for entry in vcpu_status.get("vm_states", [])
@@ -704,13 +775,26 @@ def _ensure_vm_vcpu_profile(
             required_vcpus=desired_min,
             gpu_budget_mib=gpu_budget_mib,
         )
+        resolution = "full_fit"
+        if not target:
+            target = _best_partial_reconciliation_target(
+                source_node=source_node,
+                vm=vm,
+                node_states=node_states,
+                current_vcpus=current_vcpus,
+                gpu_budget_mib=gpu_budget_mib,
+            )
+            resolution = "partial_fit"
+
         if not target:
             log.warning(
-                "profil vCPU automatique impossible",
+                "profil vCPU en déficit, VM conservée en attente",
                 vm_id=vm.vm_id,
                 source=source_node,
-                min_vcpus=desired_min,
-                max_vcpus=desired_max,
+                current_vcpus=current_vcpus,
+                desired_min=desired_min,
+                desired_max=desired_max,
+                cpu_deficit=required_extra,
             )
             return False
 
@@ -721,6 +805,9 @@ def _ensure_vm_vcpu_profile(
             source=source_node,
             target=target,
             proxmox_target=proxmox_target,
+            resolution=resolution,
+            current_vcpus=current_vcpus,
+            cpu_deficit=required_extra,
             min_vcpus=desired_min,
             max_vcpus=desired_max,
         )
