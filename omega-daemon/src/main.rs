@@ -19,6 +19,7 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -155,6 +156,7 @@ async fn main() -> Result<()> {
         let tracker = vm_tracker.clone();
         let interval = Duration::from_millis(cfg.cpu_monitor_interval_ms.max(100));
         let qmp_dir = cfg.qemu_pid_dir.clone();
+        let qemu_conf_dir = cfg.qemu_conf_dir.clone();
 
         tokio::spawn(async move {
             let cpu_ctrl = CgroupCpuController::new();
@@ -177,7 +179,7 @@ async fn main() -> Result<()> {
                 }
 
                 for vm in &local_vms {
-                    ensure_vm_registered(&state, &hotplug, &cpu_ctrl, vm.vmid);
+                    ensure_vm_registered(&state, &hotplug, &cpu_ctrl, &qemu_conf_dir, vm.vmid);
 
                     let now = Instant::now();
                     if let Some(stat) = cpu_ctrl.read_cpu_stat(vm.vmid) {
@@ -409,21 +411,24 @@ fn ensure_vm_registered(
     state: &Arc<NodeState>,
     hotplug: &VcpuHotplugManager,
     cpu_ctrl: &CgroupCpuController,
+    conf_dir: &str,
     vm_id: u32,
 ) {
     if state.vcpu_scheduler.has_vm(vm_id) {
         return;
     }
 
-    let (min_vcpus, max_vcpus) = hotplug
-        .vcpu_info(vm_id)
-        .map(|info| {
-            (
-                info.online_count.max(1),
-                info.total_count.max(info.online_count).max(1),
-            )
-        })
-        .unwrap_or((1, 1));
+    let qmp_vcpus = hotplug.vcpu_info(vm_id);
+    let online_vcpus = qmp_vcpus
+        .as_ref()
+        .map(|info| info.online_count.max(1))
+        .unwrap_or(1);
+
+    let (conf_min_vcpus, conf_max_vcpus) = read_vm_cpu_profile(conf_dir, vm_id).unwrap_or((1, 1));
+    let min_vcpus = online_vcpus.max(conf_min_vcpus).max(1);
+    let max_vcpus = qmp_vcpus
+        .map(|info| info.total_count.max(conf_max_vcpus).max(min_vcpus))
+        .unwrap_or(conf_max_vcpus.max(min_vcpus));
 
     match state.vcpu_scheduler.admit_vm(vm_id, min_vcpus, max_vcpus) {
         omega_daemon::vcpu_scheduler::VcpuDecision::Allocated { .. } => {
@@ -441,6 +446,29 @@ fn ensure_vm_registered(
         }
         _ => {}
     }
+}
+
+fn read_vm_cpu_profile(conf_dir: &str, vm_id: u32) -> Option<(usize, usize)> {
+    let conf_file = format!("{}/{}.conf", conf_dir, vm_id);
+    let content = fs::read_to_string(conf_file).ok()?;
+
+    let mut sockets = 1usize;
+    let mut cores = 1usize;
+    let mut boot_vcpus: Option<usize> = None;
+
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("sockets:") {
+            sockets = rest.trim().parse::<usize>().ok().filter(|v| *v > 0).unwrap_or(1);
+        } else if let Some(rest) = line.strip_prefix("cores:") {
+            cores = rest.trim().parse::<usize>().ok().filter(|v| *v > 0).unwrap_or(1);
+        } else if let Some(rest) = line.strip_prefix("vcpus:") {
+            boot_vcpus = rest.trim().parse::<usize>().ok().filter(|v| *v > 0);
+        }
+    }
+
+    let max_vcpus = sockets.saturating_mul(cores).max(1);
+    let min_vcpus = boot_vcpus.unwrap_or(max_vcpus).clamp(1, max_vcpus);
+    Some((min_vcpus, max_vcpus))
 }
 
 fn apply_hotplug_if_possible(
