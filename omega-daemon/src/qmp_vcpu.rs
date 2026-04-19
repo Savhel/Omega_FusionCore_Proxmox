@@ -43,35 +43,35 @@ use tracing::{debug, info, warn};
 /// État vCPU d'une VM tel que rapporté par QEMU.
 #[derive(Debug, Clone)]
 pub struct QmpVcpuInfo {
-    pub vm_id:        u32,
+    pub vm_id: u32,
     /// Nombre de vCPUs actuellement actifs
     pub online_count: usize,
     /// Nombre total de vCPUs configurés (y compris hors-ligne)
-    pub total_count:  usize,
+    pub total_count: usize,
     /// Détails par vCPU
-    pub cpus:         Vec<VcpuEntry>,
+    pub cpus: Vec<VcpuEntry>,
 }
 
 /// Informations sur un vCPU individuel.
 #[derive(Debug, Clone)]
 pub struct VcpuEntry {
-    pub index:     usize,
-    pub online:    bool,
+    pub index: usize,
+    pub online: bool,
     pub thread_id: Option<u64>,
-    pub qom_path:  String,
+    pub qom_path: String,
 }
 
 /// Résultat d'une opération hotplug.
 #[derive(Debug, Clone)]
 pub enum HotplugResult {
     /// vCPU ajouté avec succès — nouveau total
-    Added   { new_count: usize },
+    Added { new_count: usize },
     /// vCPU retiré avec succès — nouveau total
     Removed { new_count: usize },
     /// Impossible : la VM n'a pas de slots hotplug disponibles
     NoSlots { current: usize, max: usize },
     /// Impossible : déjà au minimum
-    AtMin   { current: usize, min: usize },
+    AtMin { current: usize, min: usize },
     /// VM inaccessible (arrêtée ou QMP indisponible)
     Unavailable { reason: String },
 }
@@ -80,9 +80,9 @@ pub enum HotplugResult {
 
 /// Client QMP dédié au contrôle des vCPUs.
 pub struct QmpVcpuClient {
-    vm_id:    u32,
+    vm_id: u32,
     sock_path: PathBuf,
-    timeout:  Duration,
+    timeout: Duration,
 }
 
 impl QmpVcpuClient {
@@ -91,7 +91,7 @@ impl QmpVcpuClient {
         Self {
             vm_id,
             sock_path: dir.join(format!("{}.qmp", vm_id)),
-            timeout:   Duration::from_secs(5),
+            timeout: Duration::from_secs(5),
         }
     }
 
@@ -117,11 +117,7 @@ impl QmpVcpuClient {
         Ok((stream, reader))
     }
 
-    fn handshake(
-        &self,
-        stream: &mut UnixStream,
-        reader: &mut BufReader<UnixStream>,
-    ) -> Result<()> {
+    fn handshake(&self, stream: &mut UnixStream, reader: &mut BufReader<UnixStream>) -> Result<()> {
         // Lire le greeting
         let mut greeting = String::new();
         reader.read_line(&mut greeting)?;
@@ -167,27 +163,25 @@ impl QmpVcpuClient {
             bail!("query-cpus-fast échoué : {:?}", err);
         }
 
-        let cpus_json = resp["return"].as_array()
-            .cloned()
-            .unwrap_or_default();
+        let cpus_json = resp["return"].as_array().cloned().unwrap_or_default();
 
         let mut cpus = Vec::new();
         for (idx, cpu) in cpus_json.iter().enumerate() {
             cpus.push(VcpuEntry {
-                index:     idx,
-                online:    cpu["online"].as_bool().unwrap_or(false),
+                index: idx,
+                online: cpu["online"].as_bool().unwrap_or(false),
                 thread_id: cpu["thread-id"].as_u64(),
-                qom_path:  cpu["qom-path"].as_str().unwrap_or("").to_string(),
+                qom_path: cpu["qom-path"].as_str().unwrap_or("").to_string(),
             });
         }
 
         let online_count = cpus.iter().filter(|c| c.online).count();
-        let total_count  = cpus.len();
+        let total_count = cpus.len();
 
         debug!(
-            vm_id  = self.vm_id,
+            vm_id = self.vm_id,
             online = online_count,
-            total  = total_count,
+            total = total_count,
             "vCPUs queryés"
         );
 
@@ -214,35 +208,37 @@ impl QmpVcpuClient {
 
         // Lire l'état courant
         let info = match self.query_cpus() {
-            Ok(i)  => i,
-            Err(e) => return Ok(HotplugResult::Unavailable { reason: e.to_string() }),
+            Ok(i) => i,
+            Err(e) => {
+                return Ok(HotplugResult::Unavailable {
+                    reason: e.to_string(),
+                })
+            }
         };
 
         if info.online_count >= max_vcpus {
             return Ok(HotplugResult::NoSlots {
                 current: info.online_count,
-                max:     max_vcpus,
+                max: max_vcpus,
             });
         }
 
         // Trouver le prochain vCPU hors-ligne à brancher
-        let next_offline = info.cpus.iter()
-            .find(|c| !c.online)
-            .map(|c| c.index);
+        let next_offline = info.cpus.iter().find(|c| !c.online).map(|c| c.index);
 
         let Some(cpu_index) = next_offline else {
             // Tous les slots configurés sont en ligne mais on n'a pas atteint max_vcpus
             // → QEMU n'a pas été démarré avec suffisamment de maxcpus
             warn!(
-                vm_id     = self.vm_id,
-                online    = info.online_count,
+                vm_id = self.vm_id,
+                online = info.online_count,
                 max_vcpus = max_vcpus,
                 "aucun slot CPU hors-ligne — démarrer la VM avec -smp maxcpus={}",
                 max_vcpus
             );
             return Ok(HotplugResult::NoSlots {
                 current: info.online_count,
-                max:     max_vcpus,
+                max: max_vcpus,
             });
         };
 
@@ -250,16 +246,19 @@ impl QmpVcpuClient {
         let (mut stream, mut reader) = self.connect()?;
         self.handshake(&mut stream, &mut reader)?;
 
-        self.send(&mut stream, &json!({
-            "execute": "device_add",
-            "arguments": {
-                "driver": "host-x86_64-cpu",
-                "id":     format!("cpu-{}", cpu_index),
-                "socket-id": 0,
-                "core-id":   cpu_index,
-                "thread-id": 0
-            }
-        }))?;
+        self.send(
+            &mut stream,
+            &json!({
+                "execute": "device_add",
+                "arguments": {
+                    "driver": "host-x86_64-cpu",
+                    "id":     format!("cpu-{}", cpu_index),
+                    "socket-id": 0,
+                    "core-id":   cpu_index,
+                    "thread-id": 0
+                }
+            }),
+        )?;
 
         let resp = self.recv(&mut reader)?;
 
@@ -272,7 +271,7 @@ impl QmpVcpuClient {
 
         let new_count = info.online_count + 1;
         info!(
-            vm_id     = self.vm_id,
+            vm_id = self.vm_id,
             cpu_index = cpu_index,
             new_count = new_count,
             "vCPU hotplugged via QMP"
@@ -292,24 +291,33 @@ impl QmpVcpuClient {
         }
 
         let info = match self.query_cpus() {
-            Ok(i)  => i,
-            Err(e) => return Ok(HotplugResult::Unavailable { reason: e.to_string() }),
+            Ok(i) => i,
+            Err(e) => {
+                return Ok(HotplugResult::Unavailable {
+                    reason: e.to_string(),
+                })
+            }
         };
 
         if info.online_count <= min_vcpus {
             return Ok(HotplugResult::AtMin {
                 current: info.online_count,
-                min:     min_vcpus,
+                min: min_vcpus,
             });
         }
 
         // Retirer le vCPU avec l'index le plus élevé (LIFO)
-        let last_online = info.cpus.iter()
+        let last_online = info
+            .cpus
+            .iter()
             .filter(|c| c.online)
             .max_by_key(|c| c.index);
 
         let Some(cpu) = last_online else {
-            return Ok(HotplugResult::AtMin { current: 0, min: min_vcpus });
+            return Ok(HotplugResult::AtMin {
+                current: 0,
+                min: min_vcpus,
+            });
         };
 
         let cpu_id = format!("cpu-{}", cpu.index);
@@ -317,10 +325,13 @@ impl QmpVcpuClient {
         let (mut stream, mut reader) = self.connect()?;
         self.handshake(&mut stream, &mut reader)?;
 
-        self.send(&mut stream, &json!({
-            "execute": "device_del",
-            "arguments": { "id": cpu_id }
-        }))?;
+        self.send(
+            &mut stream,
+            &json!({
+                "execute": "device_del",
+                "arguments": { "id": cpu_id }
+            }),
+        )?;
 
         let resp = self.recv(&mut reader)?;
 
@@ -354,27 +365,40 @@ pub struct VcpuHotplugManager {
 
 impl VcpuHotplugManager {
     pub fn new(qmp_dir: impl Into<PathBuf>) -> Self {
-        Self { qmp_dir: qmp_dir.into() }
+        Self {
+            qmp_dir: qmp_dir.into(),
+        }
     }
 
     /// Applique un hotplug +1 vCPU à une VM via QMP.
     pub fn add_vcpu(&self, vm_id: u32, min_vcpus: usize, max_vcpus: usize) -> HotplugResult {
         let client = QmpVcpuClient::new(vm_id, &self.qmp_dir);
-        client.hotplug_add(min_vcpus, max_vcpus)
-            .unwrap_or_else(|e| HotplugResult::Unavailable { reason: e.to_string() })
+        client
+            .hotplug_add(min_vcpus, max_vcpus)
+            .unwrap_or_else(|e| HotplugResult::Unavailable {
+                reason: e.to_string(),
+            })
     }
 
     /// Applique un hot-unplug -1 vCPU à une VM via QMP.
     pub fn remove_vcpu(&self, vm_id: u32, min_vcpus: usize) -> HotplugResult {
         let client = QmpVcpuClient::new(vm_id, &self.qmp_dir);
-        client.hotplug_remove(min_vcpus)
-            .unwrap_or_else(|e| HotplugResult::Unavailable { reason: e.to_string() })
+        client
+            .hotplug_remove(min_vcpus)
+            .unwrap_or_else(|e| HotplugResult::Unavailable {
+                reason: e.to_string(),
+            })
     }
 
     /// Lit le nombre de vCPUs en ligne d'une VM.
     pub fn online_vcpu_count(&self, vm_id: u32) -> Option<usize> {
         let client = QmpVcpuClient::new(vm_id, &self.qmp_dir);
         client.query_cpus().ok().map(|i| i.online_count)
+    }
+
+    pub fn vcpu_info(&self, vm_id: u32) -> Option<QmpVcpuInfo> {
+        let client = QmpVcpuClient::new(vm_id, &self.qmp_dir);
+        client.query_cpus().ok()
     }
 }
 
@@ -430,16 +454,18 @@ mod tests {
     #[test]
     fn test_hotplug_result_variants() {
         // Vérifier que toutes les variantes sont constructibles et matchables
-        let r1 = HotplugResult::Added   { new_count: 3 };
+        let r1 = HotplugResult::Added { new_count: 3 };
         let r2 = HotplugResult::Removed { new_count: 1 };
         let r3 = HotplugResult::NoSlots { current: 4, max: 4 };
-        let r4 = HotplugResult::AtMin   { current: 1, min: 1 };
-        let r5 = HotplugResult::Unavailable { reason: "test".into() };
+        let r4 = HotplugResult::AtMin { current: 1, min: 1 };
+        let r5 = HotplugResult::Unavailable {
+            reason: "test".into(),
+        };
 
-        assert!(matches!(r1, HotplugResult::Added   { new_count: 3 }));
+        assert!(matches!(r1, HotplugResult::Added { new_count: 3 }));
         assert!(matches!(r2, HotplugResult::Removed { new_count: 1 }));
         assert!(matches!(r3, HotplugResult::NoSlots { current: 4, max: 4 }));
-        assert!(matches!(r4, HotplugResult::AtMin   { current: 1, min: 1 }));
+        assert!(matches!(r4, HotplugResult::AtMin { current: 1, min: 1 }));
         assert!(matches!(r5, HotplugResult::Unavailable { .. }));
     }
 }

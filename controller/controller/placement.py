@@ -97,6 +97,15 @@ class PlacementEngine:
         """RAM nécessaire sur le nœud cible (VM max + marge de sécurité)."""
         return int(vm.max_mem_mib * (1.0 + self.safety_margin))
 
+    def _gpu_ok(self, node: NodeInfo, vm: VmEntry) -> bool:
+        return (
+            vm.gpu_vram_budget_mib == 0
+            or (
+                node.gpu_enabled
+                and node.gpu_free_vram_mib >= vm.gpu_vram_budget_mib
+            )
+        )
+
     def find_target(
         self,
         cluster:     ClusterState,
@@ -114,6 +123,7 @@ class PlacementEngine:
             n for n in cluster.reachable_nodes
             if n.node_id != source_node
             and n.mem_free_mib >= required
+            and self._gpu_ok(n, vm)
         ]
 
         if not candidates:
@@ -177,6 +187,10 @@ class PlacementEngine:
         required   = self.required_free_mib(vm)
         excess_pct = (target.mem_free_mib - required) / max(required, 1)
         confidence = min(1.0, 0.7 + excess_pct * 0.3)
+        gpu_note = (
+            f"GPU requis {vm.gpu_vram_budget_mib} Mio, "
+            if vm.gpu_vram_budget_mib else ""
+        )
 
         return PlacementDecision(
             vmid             = vm.vmid,
@@ -191,7 +205,7 @@ class PlacementEngine:
             reason           = (
                 f"nœud {target.node_id} : {target.mem_free_mib} Mio libre "
                 f"(requis {required} Mio, {vm.remote_pages} pages distantes, "
-                f"stratégie {self.strategy.value})"
+                f"{gpu_note}stratégie {self.strategy.value})"
             ),
         )
 

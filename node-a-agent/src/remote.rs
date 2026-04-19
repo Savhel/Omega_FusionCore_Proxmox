@@ -23,14 +23,18 @@ use node_bc_store::protocol::{Message, Opcode, PAGE_SIZE};
 
 /// Une connexion persistante vers un store.
 struct StoreConn {
-    addr:    String,
-    stream:  Option<BufStream<TcpStream>>,
+    addr: String,
+    stream: Option<BufStream<TcpStream>>,
     timeout: Duration,
 }
 
 impl StoreConn {
     fn new(addr: String, timeout: Duration) -> Self {
-        Self { addr, stream: None, timeout }
+        Self {
+            addr,
+            stream: None,
+            timeout,
+        }
     }
 
     /// Assure qu'une connexion TCP est établie (reconnexion automatique).
@@ -84,7 +88,7 @@ impl StoreConn {
         let read_result = timeout(self.timeout, Message::read_from(stream)).await;
         match read_result {
             Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e))   => {
+            Ok(Err(e)) => {
                 self.disconnect();
                 Err(e.into())
             }
@@ -126,12 +130,20 @@ impl RemoteStorePool {
     /// Envoie une page vers le store approprié (PUT_PAGE).
     pub async fn put_page(&self, vm_id: u32, page_id: u64, data: Vec<u8>) -> Result<()> {
         if data.len() != PAGE_SIZE {
-            bail!("put_page : taille incorrecte {} (attendu {})", data.len(), PAGE_SIZE);
+            bail!(
+                "put_page : taille incorrecte {} (attendu {})",
+                data.len(),
+                PAGE_SIZE
+            );
         }
 
         let idx = self.store_index(page_id);
         let req = Message::put_page(vm_id, page_id, data);
-        let resp = self.stores[idx].lock().await.send_recv(req).await
+        let resp = self.stores[idx]
+            .lock()
+            .await
+            .send_recv(req)
+            .await
             .with_context(|| format!("PUT_PAGE vm={vm_id} page={page_id} vers store[{idx}]"))?;
 
         match resp.opcode {
@@ -153,13 +165,20 @@ impl RemoteStorePool {
     pub async fn get_page(&self, vm_id: u32, page_id: u64) -> Result<Option<Vec<u8>>> {
         let idx = self.store_index(page_id);
         let req = Message::get_page(vm_id, page_id);
-        let resp = self.stores[idx].lock().await.send_recv(req).await
+        let resp = self.stores[idx]
+            .lock()
+            .await
+            .send_recv(req)
+            .await
             .with_context(|| format!("GET_PAGE vm={vm_id} page={page_id} depuis store[{idx}]"))?;
 
         match resp.opcode {
             Opcode::Ok => {
                 if resp.payload.len() != PAGE_SIZE {
-                    bail!("GET_PAGE : réponse avec taille incorrecte {}", resp.payload.len());
+                    bail!(
+                        "GET_PAGE : réponse avec taille incorrecte {}",
+                        resp.payload.len()
+                    );
                 }
                 debug!(vm_id, page_id, store_idx = idx, "GET_PAGE hit");
                 Ok(Some(resp.payload))
@@ -180,13 +199,17 @@ impl RemoteStorePool {
     pub async fn delete_page(&self, vm_id: u32, page_id: u64) -> Result<bool> {
         let idx = self.store_index(page_id);
         let req = Message::delete_page(vm_id, page_id);
-        let resp = self.stores[idx].lock().await.send_recv(req).await
+        let resp = self.stores[idx]
+            .lock()
+            .await
+            .send_recv(req)
+            .await
             .with_context(|| format!("DELETE_PAGE vm={vm_id} page={page_id}"))?;
 
         match resp.opcode {
-            Opcode::Ok       => Ok(true),
+            Opcode::Ok => Ok(true),
             Opcode::NotFound => Ok(false),
-            Opcode::Error    => {
+            Opcode::Error => {
                 let msg = String::from_utf8_lossy(&resp.payload);
                 bail!("DELETE_PAGE erreur store : {msg}");
             }
@@ -203,10 +226,16 @@ impl RemoteStorePool {
     pub async fn put_page_replica(&self, vm_id: u32, page_id: u64, data: Vec<u8>) -> Result<()> {
         let idx = self.replica_index(page_id);
         let req = Message::put_page(vm_id, page_id, data);
-        let resp = self.stores[idx].lock().await.send_recv(req).await
-            .with_context(|| format!("PUT_PAGE_REPLICA vm={vm_id} page={page_id} vers store[{idx}]"))?;
+        let resp = self.stores[idx]
+            .lock()
+            .await
+            .send_recv(req)
+            .await
+            .with_context(|| {
+                format!("PUT_PAGE_REPLICA vm={vm_id} page={page_id} vers store[{idx}]")
+            })?;
         match resp.opcode {
-            Opcode::Ok    => Ok(()),
+            Opcode::Ok => Ok(()),
             Opcode::Error => {
                 let msg = String::from_utf8_lossy(&resp.payload);
                 bail!("PUT_PAGE réplica refusé : {msg}");
@@ -219,12 +248,18 @@ impl RemoteStorePool {
     pub async fn get_page_replica(&self, vm_id: u32, page_id: u64) -> Result<Option<Vec<u8>>> {
         let idx = self.replica_index(page_id);
         let req = Message::get_page(vm_id, page_id);
-        let resp = self.stores[idx].lock().await.send_recv(req).await
-            .with_context(|| format!("GET_PAGE_REPLICA vm={vm_id} page={page_id} depuis store[{idx}]"))?;
+        let resp = self.stores[idx]
+            .lock()
+            .await
+            .send_recv(req)
+            .await
+            .with_context(|| {
+                format!("GET_PAGE_REPLICA vm={vm_id} page={page_id} depuis store[{idx}]")
+            })?;
         match resp.opcode {
-            Opcode::Ok       => Ok(Some(resp.payload)),
+            Opcode::Ok => Ok(Some(resp.payload)),
             Opcode::NotFound => Ok(None),
-            Opcode::Error    => {
+            Opcode::Error => {
                 let msg = String::from_utf8_lossy(&resp.payload);
                 bail!("GET_PAGE réplica erreur : {msg}");
             }
@@ -236,10 +271,14 @@ impl RemoteStorePool {
     pub async fn delete_page_replica(&self, vm_id: u32, page_id: u64) -> Result<bool> {
         let idx = self.replica_index(page_id);
         let req = Message::delete_page(vm_id, page_id);
-        let resp = self.stores[idx].lock().await.send_recv(req).await
+        let resp = self.stores[idx]
+            .lock()
+            .await
+            .send_recv(req)
+            .await
             .with_context(|| format!("DELETE_PAGE_REPLICA vm={vm_id} page={page_id}"))?;
         match resp.opcode {
-            Opcode::Ok       => Ok(true),
+            Opcode::Ok => Ok(true),
             Opcode::NotFound => Ok(false),
             op => bail!("DELETE_PAGE réplica réponse inattendue : {op:?}"),
         }
@@ -249,7 +288,9 @@ impl RemoteStorePool {
     pub async fn ping_all(&self) -> Vec<(usize, bool)> {
         let mut results = Vec::new();
         for (idx, store) in self.stores.iter().enumerate() {
-            let ok = store.lock().await
+            let ok = store
+                .lock()
+                .await
                 .send_recv(Message::ping())
                 .await
                 .map(|r| matches!(r.opcode, Opcode::Pong))

@@ -42,12 +42,12 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use sled::{Db, IVec};
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
 use crate::metrics::StoreMetrics;
 use crate::protocol::PAGE_SIZE;
@@ -70,19 +70,19 @@ pub enum SyncMode {
 #[derive(Debug, Clone)]
 pub struct PersistentStoreConfig {
     /// Répertoire de la base sled (créé si absent)
-    pub db_path:       PathBuf,
+    pub db_path: PathBuf,
     /// Nombre maximum de pages maintenues en cache chaud (RAM)
     pub max_hot_pages: usize,
     /// Politique de sync disque
-    pub sync_mode:     SyncMode,
+    pub sync_mode: SyncMode,
 }
 
 impl Default for PersistentStoreConfig {
     fn default() -> Self {
         Self {
-            db_path:       PathBuf::from("/var/lib/omega-store"),
-            max_hot_pages: 65_536,       // 256 Mio
-            sync_mode:     SyncMode::PerBatch(64),
+            db_path: PathBuf::from("/var/lib/omega-store"),
+            max_hot_pages: 65_536, // 256 Mio
+            sync_mode: SyncMode::PerBatch(64),
         }
     }
 }
@@ -97,8 +97,10 @@ fn encode_key(key: &PageKey) -> [u8; 12] {
 }
 
 fn decode_key(raw: &[u8]) -> Option<PageKey> {
-    if raw.len() != 12 { return None; }
-    let vm_id   = u32::from_be_bytes(raw[0..4].try_into().ok()?);
+    if raw.len() != 12 {
+        return None;
+    }
+    let vm_id = u32::from_be_bytes(raw[0..4].try_into().ok()?);
     let page_id = u64::from_be_bytes(raw[4..12].try_into().ok()?);
     Some(PageKey::new(vm_id, page_id))
 }
@@ -113,13 +115,13 @@ fn vm_prefix(vm_id: u32) -> [u8; 4] {
 /// Store de pages persistant : cache RAM + journal sled.
 pub struct PersistentPageStore {
     /// Cache chaud — pages fréquemment accédées
-    hot_cache:     DashMap<PageKey, Arc<[u8]>>,
+    hot_cache: DashMap<PageKey, Arc<[u8]>>,
     /// Base sled — journal durable sur disque
-    db:            Db,
+    db: Db,
     /// Configuration
-    cfg:           PersistentStoreConfig,
+    cfg: PersistentStoreConfig,
     /// Métriques partagées
-    metrics:       Arc<StoreMetrics>,
+    metrics: Arc<StoreMetrics>,
     /// Compteur d'écritures (pour SyncMode::PerBatch)
     write_counter: std::sync::atomic::AtomicU64,
 }
@@ -133,12 +135,12 @@ impl PersistentPageStore {
 
         let db = sled::Config::new()
             .path(&cfg.db_path)
-            .cache_capacity(256 * 1024 * 1024)  // 256 Mio cache sled interne
-            .flush_every_ms(Some(1000))          // flush asynchrone toutes les 1s
+            .cache_capacity(256 * 1024 * 1024) // 256 Mio cache sled interne
+            .flush_every_ms(Some(1000)) // flush asynchrone toutes les 1s
             .open()?;
 
         let store = Self {
-            hot_cache:     DashMap::new(),
+            hot_cache: DashMap::new(),
             db,
             cfg,
             metrics,
@@ -160,7 +162,9 @@ impl PersistentPageStore {
     pub fn put(&self, key: PageKey, data: Vec<u8>) -> Result<bool, String> {
         if data.len() != PAGE_SIZE {
             return Err(format!(
-                "taille incorrecte : {} octets (attendu {})", data.len(), PAGE_SIZE
+                "taille incorrecte : {} octets (attendu {})",
+                data.len(),
+                PAGE_SIZE
             ));
         }
 
@@ -185,8 +189,12 @@ impl PersistentPageStore {
         // Sync disque selon la politique
         let writes = self.write_counter.fetch_add(1, Ordering::Relaxed);
         match self.cfg.sync_mode {
-            SyncMode::Always => { let _ = self.db.flush(); }
-            SyncMode::PerBatch(n) if writes.is_multiple_of(n) => { let _ = self.db.flush(); }
+            SyncMode::Always => {
+                let _ = self.db.flush();
+            }
+            SyncMode::PerBatch(n) if writes.is_multiple_of(n) => {
+                let _ = self.db.flush();
+            }
             _ => {}
         }
 
@@ -218,7 +226,11 @@ impl PersistentPageStore {
                 let arc_data: Arc<[u8]> = data.clone().into();
                 self.hot_cache.insert(key.clone(), arc_data);
                 self.metrics.hit_count.fetch_add(1, Ordering::Relaxed);
-                debug!(vm_id = key.vm_id, page_id = key.page_id, "hit sled (accès froid)");
+                debug!(
+                    vm_id = key.vm_id,
+                    page_id = key.page_id,
+                    "hit sled (accès froid)"
+                );
                 Some(data)
             }
             Ok(None) => {
@@ -251,7 +263,8 @@ impl PersistentPageStore {
     /// Utilise `scan_prefix` pour trouver toutes les pages sans scanner toute la base.
     pub fn delete_vm(&self, vm_id: u32) -> usize {
         let prefix = vm_prefix(vm_id);
-        let keys: Vec<IVec> = self.db
+        let keys: Vec<IVec> = self
+            .db
             .scan_prefix(prefix)
             .filter_map(|r| r.ok().map(|(k, _)| k))
             .collect();
@@ -266,10 +279,16 @@ impl PersistentPageStore {
         }
 
         if count > 0 {
-            self.metrics.pages_stored.fetch_sub(count as u64, Ordering::Relaxed);
+            self.metrics
+                .pages_stored
+                .fetch_sub(count as u64, Ordering::Relaxed);
         }
 
-        info!(vm_id, deleted = count, "pages VM supprimées du store persistant");
+        info!(
+            vm_id,
+            deleted = count,
+            "pages VM supprimées du store persistant"
+        );
         count
     }
 
@@ -301,7 +320,9 @@ impl PersistentPageStore {
 
         // Charger jusqu'à max_hot_pages pages dans le cache
         for result in self.db.iter() {
-            if count >= self.cfg.max_hot_pages { break; }
+            if count >= self.cfg.max_hot_pages {
+                break;
+            }
             if let Ok((raw_key, raw_val)) = result {
                 if let Some(key) = decode_key(&raw_key) {
                     let arc_data: Arc<[u8]> = raw_val.to_vec().into();
@@ -312,11 +333,13 @@ impl PersistentPageStore {
         }
 
         // Mettre à jour le compteur de pages stockées
-        self.metrics.pages_stored.store(total_on_disk as u64, Ordering::Relaxed);
+        self.metrics
+            .pages_stored
+            .store(total_on_disk as u64, Ordering::Relaxed);
 
         info!(
             restored_to_cache = count,
-            remaining_cold    = total_on_disk.saturating_sub(count),
+            remaining_cold = total_on_disk.saturating_sub(count),
             "cache chaud restauré"
         );
         count
@@ -331,7 +354,8 @@ impl PersistentPageStore {
         let mut evicted = 0usize;
 
         // Collecter des clés à retirer (on ne peut pas modifier pendant l'itération)
-        let to_remove: Vec<PageKey> = self.hot_cache
+        let to_remove: Vec<PageKey> = self
+            .hot_cache
             .iter()
             .take(target_evict)
             .map(|e| e.key().clone())
@@ -356,9 +380,9 @@ mod tests {
     fn make_store() -> (PersistentPageStore, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = PersistentStoreConfig {
-            db_path:       dir.path().to_path_buf(),
+            db_path: dir.path().to_path_buf(),
             max_hot_pages: 16,
-            sync_mode:     SyncMode::Always,
+            sync_mode: SyncMode::Always,
         };
         let metrics = Arc::new(StoreMetrics::default());
         let store = PersistentPageStore::open(cfg, metrics).unwrap();
@@ -368,7 +392,7 @@ mod tests {
     #[test]
     fn test_put_get_roundtrip() {
         let (store, _dir) = make_store();
-        let key  = PageKey::new(1, 42);
+        let key = PageKey::new(1, 42);
         let data = vec![0xABu8; PAGE_SIZE];
 
         assert_eq!(store.put(key.clone(), data.clone()), Ok(false));
@@ -379,7 +403,7 @@ mod tests {
     #[test]
     fn test_persistence_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let key  = PageKey::new(7, 999);
+        let key = PageKey::new(7, 999);
         let data = vec![0xCDu8; PAGE_SIZE];
 
         {
@@ -411,10 +435,14 @@ mod tests {
 
         // Insérer 5 pages pour vm 42 et 2 pour vm 99
         for i in 0..5 {
-            store.put(PageKey::new(vm_id, i), vec![0u8; PAGE_SIZE]).unwrap();
+            store
+                .put(PageKey::new(vm_id, i), vec![0u8; PAGE_SIZE])
+                .unwrap();
         }
         for i in 0..2 {
-            store.put(PageKey::new(99, i), vec![1u8; PAGE_SIZE]).unwrap();
+            store
+                .put(PageKey::new(99, i), vec![1u8; PAGE_SIZE])
+                .unwrap();
         }
 
         assert_eq!(store.delete_vm(vm_id), 5);
@@ -441,7 +469,10 @@ mod tests {
         // La lecture doit passer par sled et remettre en cache
         let got = store.get(&key);
         assert!(got.is_some());
-        assert!(store.hot_cache.contains_key(&key), "doit être rechargé dans le cache");
+        assert!(
+            store.hot_cache.contains_key(&key),
+            "doit être rechargé dans le cache"
+        );
     }
 
     #[test]

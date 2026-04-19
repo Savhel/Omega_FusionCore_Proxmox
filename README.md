@@ -36,7 +36,7 @@ Chaque VM a un budget strict : `RAM locale + RAM distante ≤ max configuré`. I
 
 ### 3. Migration automatique
 
-Si un nœud est saturé (RAM > 85%) ou si une VM a trop de pages distantes (latence élevée), le système migre la VM vers un nœud moins chargé :
+Si un nœud est saturé en RAM, en CPU ou en GPU réservé, ou si une VM a trop de pages distantes, le controller déclenche automatiquement la migration vers un nœud capable d'absorber la VM sans violer les contraintes RAM/vCPU/VRAM :
 
 - **Migration live** : la VM continue de fonctionner pendant le transfert, downtime < 1s
 - **Migration cold** : VM arrêtée, transférée, redémarrée — utilisée quand la VM est idle ou la pression critique
@@ -45,11 +45,11 @@ Les disques sont sur Ceph RBD (partagés), donc seule la RAM est transférée.
 
 ### 4. Scheduler vCPU élastique
 
-Les vCPU sont alloués dynamiquement. Une VM démarre avec un minimum et reçoit des cœurs supplémentaires (hotplug) quand sa charge augmente, jusqu'à son plafond. Si le nœud est saturé en CPU, la migration est recommandée.
+Les vCPU sont alloués dynamiquement. Une VM démarre avec un minimum et reçoit des cœurs supplémentaires (hotplug) quand sa charge augmente, jusqu'à son plafond. Si le nœud reste saturé en CPU ou si le hotplug n'est plus possible, le controller migre automatiquement la VM vers un autre nœud ayant la capacité CPU nécessaire.
 
 ### 5. Multiplexeur GPU
 
-Un GPU physique est partagé entre toutes les VMs d'un nœud. Chaque VM a un budget VRAM. Le daemon arbitre les accès et retourne les résultats à la bonne VM.
+Un GPU physique est partagé entre toutes les VMs d'un nœud. Chaque VM a un budget VRAM configurable via l'API de contrôle. Le daemon arbitre les accès, expose l'état GPU du nœud, nettoie les budgets après migration et le controller évite d'envoyer une VM GPU vers un nœud qui n'a pas assez de VRAM libre.
 
 ---
 
@@ -97,8 +97,9 @@ Un seul binaire, un daemon par nœud.
 | `vcpu_scheduler.rs` | Allocation élastique des vCPU, hotplug, steal time |
 | `vm_migration.rs` | Lance `qm migrate` live ou cold, nettoie les ressources source |
 | `gpu_multiplexer.rs` | Arbitre les accès GPU entre VMs, budget VRAM par VM |
+| `gpu_runtime.rs` | État GPU synchrone exposé via `/api/status` et `/control/gpu/status` |
 | `cluster_api.rs` | API HTTP port 9200 — état du nœud pour le controller |
-| `control_api.rs` | API HTTP port 9300 — canal de contrôle local (éviction, quotas, métriques Prometheus) |
+| `control_api.rs` | API HTTP port 9300 — canal de contrôle local (éviction, quotas RAM/vCPU/GPU, hotplug, métriques Prometheus) |
 | `tls.rs` | Certificat auto-signé, vérification par empreinte TOFU |
 | `balloon.rs` | Lecture des stats mémoire internes des VMs via QMP |
 
@@ -111,7 +112,7 @@ Un seul processus, tourne sur un nœud.
 | `admission.py` | Valide et place les nouvelles VMs (RAM locale + distante) |
 | `cpu_admission.py` | Valide l'allocation vCPU à l'échelle du cluster |
 | `gpu_admission.py` | Valide les budgets VRAM à l'échelle du cluster |
-| `migration_policy.py` | Évalue quelles VMs migrer et en mode live ou cold |
+| `migration_policy.py` | Évalue quelles VMs migrer en tenant compte de la RAM, du CPU, du GPU et du type live/cold |
 | `migration_daemon.py` | Boucle de migration automatique via l'API Proxmox |
 | `topology_placement.py` | Score de placement : RAM 50%, topologie 25%, CPU 15%, migrations actives 10% |
 | `resilient_collector.py` | Collecte l'état des nœuds avec retry + circuit-breaker (données en cache 120s) |

@@ -72,16 +72,19 @@ pub enum DrmDriver {
 impl DrmDriver {
     fn from_name(name: &str) -> Self {
         match name.trim_end_matches('\0') {
-            "amdgpu"    => Self::Amdgpu,
-            "i915"      => Self::I915,
-            "nouveau"   => Self::Nouveau,
+            "amdgpu" => Self::Amdgpu,
+            "i915" => Self::I915,
+            "nouveau" => Self::Nouveau,
             "virtio_gpu" | "virtio-gpu" => Self::VirtioGpu,
-            other       => Self::Unknown(other.to_string()),
+            other => Self::Unknown(other.to_string()),
         }
     }
 
     pub fn supports_render_node(&self) -> bool {
-        matches!(self, Self::Amdgpu | Self::I915 | Self::Nouveau | Self::VirtioGpu)
+        matches!(
+            self,
+            Self::Amdgpu | Self::I915 | Self::Nouveau | Self::VirtioGpu
+        )
     }
 }
 
@@ -94,22 +97,22 @@ impl DrmDriver {
 /// DRM_IOCTL_VERSION — identifier le driver
 #[repr(C)]
 struct DrmVersion {
-    version_major:      i32,
-    version_minor:      i32,
+    version_major: i32,
+    version_minor: i32,
     version_patchlevel: i32,
-    name_len:           usize,
-    name:               *mut u8,
-    date_len:           usize,
-    date:               *mut u8,
-    desc_len:           usize,
-    desc:               *mut u8,
+    name_len: usize,
+    name: *mut u8,
+    date_len: usize,
+    date: *mut u8,
+    desc_len: usize,
+    desc: *mut u8,
 }
 
 /// DRM_IOCTL_GET_CAP — lire les capacités du driver
 #[repr(C)]
 struct DrmGetCap {
     capability: u64,
-    value:      u64,
+    value: u64,
 }
 
 // Numéros ioctl DRM (architecture x86-64)
@@ -136,11 +139,11 @@ pub struct DrmGpuBackend {
     /// Chemin du render node (ex: /dev/dri/renderD128)
     render_node: PathBuf,
     /// Driver détecté
-    driver:      DrmDriver,
+    driver: DrmDriver,
     /// File ouverte sur le render node
-    _fd_guard:   File,
+    _fd_guard: File,
     /// Descripteur de fichier brut (pour les ioctls)
-    fd:          RawFd,
+    fd: RawFd,
 }
 
 impl DrmGpuBackend {
@@ -151,7 +154,7 @@ impl DrmGpuBackend {
             let path = PathBuf::from(format!("/dev/dri/renderD{}", n));
             if path.exists() {
                 match Self::open(&path) {
-                    Ok(b)  => return Ok(Arc::new(b)),
+                    Ok(b) => return Ok(Arc::new(b)),
                     Err(e) => warn!(path = %path.display(), error = %e, "render node non ouvrable"),
                 }
             }
@@ -188,7 +191,7 @@ impl DrmGpuBackend {
         Ok(Self {
             render_node: path.to_owned(),
             driver,
-            _fd_guard:   file,
+            _fd_guard: file,
             fd,
         })
     }
@@ -200,32 +203,32 @@ impl DrmGpuBackend {
         let mut desc_buf = [0u8; 256];
 
         let mut ver = DrmVersion {
-            version_major:      0,
-            version_minor:      0,
+            version_major: 0,
+            version_minor: 0,
             version_patchlevel: 0,
-            name_len:           name_buf.len(),
-            name:               name_buf.as_mut_ptr(),
-            date_len:           date_buf.len(),
-            date:               date_buf.as_mut_ptr(),
-            desc_len:           desc_buf.len(),
-            desc:               desc_buf.as_mut_ptr(),
+            name_len: name_buf.len(),
+            name: name_buf.as_mut_ptr(),
+            date_len: date_buf.len(),
+            date: date_buf.as_mut_ptr(),
+            desc_len: desc_buf.len(),
+            desc: desc_buf.as_mut_ptr(),
         };
 
-        let ret = unsafe {
-            libc::ioctl(fd, DRM_IOCTL_VERSION, &mut ver as *mut DrmVersion)
-        };
+        let ret = unsafe { libc::ioctl(fd, DRM_IOCTL_VERSION, &mut ver as *mut DrmVersion) };
 
         if ret != 0 {
-            bail!("DRM_IOCTL_VERSION échoué: errno={}", std::io::Error::last_os_error());
+            bail!(
+                "DRM_IOCTL_VERSION échoué: errno={}",
+                std::io::Error::last_os_error()
+            );
         }
 
-        let name = std::str::from_utf8(&name_buf[..ver.name_len])
-            .unwrap_or("unknown");
+        let name = std::str::from_utf8(&name_buf[..ver.name_len]).unwrap_or("unknown");
 
         debug!(
-            driver  = name,
-            major   = ver.version_major,
-            minor   = ver.version_minor,
+            driver = name,
+            major = ver.version_major,
+            minor = ver.version_minor,
             "driver DRM identifié"
         );
 
@@ -234,15 +237,35 @@ impl DrmGpuBackend {
 
     /// Vérifie qu'une capacité DRM est disponible.
     fn check_cap(&self, cap: u64) -> bool {
-        let mut param = DrmGetCap { capability: cap, value: 0 };
-        let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_GET_CAP, &mut param as *mut DrmGetCap)
+        let mut param = DrmGetCap {
+            capability: cap,
+            value: 0,
         };
+        let ret = unsafe { libc::ioctl(self.fd, DRM_IOCTL_GET_CAP, &mut param as *mut DrmGetCap) };
         ret == 0 && param.value != 0
     }
 
-    pub fn driver(&self) -> &DrmDriver { &self.driver }
-    pub fn render_node(&self) -> &Path { &self.render_node }
+    pub fn driver(&self) -> &DrmDriver {
+        &self.driver
+    }
+    pub fn render_node(&self) -> &Path {
+        &self.render_node
+    }
+
+    pub fn total_vram_mib(&self) -> u64 {
+        let Some(name) = self.render_node.file_name().and_then(|n| n.to_str()) else {
+            return 0;
+        };
+        let path = PathBuf::from("/sys/class/drm")
+            .join(name)
+            .join("device")
+            .join("mem_info_vram_total");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return 0;
+        };
+        let bytes = content.trim().parse::<u64>().unwrap_or(0);
+        bytes / 1024 / 1024
+    }
 
     // ── Allocation GEM (Graphics Execution Manager) ───────────────────────
     //
@@ -255,20 +278,20 @@ impl DrmGpuBackend {
         // struct drm_amdgpu_gem_create { in: { bo_size, alignment, domains, domain_flags }, out: { handle } }
         #[repr(C)]
         struct AmdgpuGemCreateIn {
-            bo_size:      u64,
-            alignment:    u64,
-            domains:      u64,
+            bo_size: u64,
+            alignment: u64,
+            domains: u64,
             domain_flags: u64,
         }
         #[repr(C)]
         struct AmdgpuGemCreateOut {
             handle: u32,
-            _pad:   u32,
+            _pad: u32,
         }
         #[repr(C)]
         struct AmdgpuGemCreate {
-            r#in:  AmdgpuGemCreateIn,
-            out:   AmdgpuGemCreateOut,
+            r#in: AmdgpuGemCreateIn,
+            out: AmdgpuGemCreateOut,
         }
 
         // DRM_COMMAND_BASE = 0x40
@@ -279,25 +302,32 @@ impl DrmGpuBackend {
         // AMDGPU_GEM_DOMAIN_VRAM = 4
         let mut req = AmdgpuGemCreate {
             r#in: AmdgpuGemCreateIn {
-                bo_size:      size_bytes,
-                alignment:    alignment as u64,
-                domains:      4, // VRAM
+                bo_size: size_bytes,
+                alignment: alignment as u64,
+                domains: 4, // VRAM
                 domain_flags: 0,
             },
             out: AmdgpuGemCreateOut { handle: 0, _pad: 0 },
         };
 
         let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_AMDGPU_GEM_CREATE, &mut req as *mut AmdgpuGemCreate)
+            libc::ioctl(
+                self.fd,
+                DRM_IOCTL_AMDGPU_GEM_CREATE,
+                &mut req as *mut AmdgpuGemCreate,
+            )
         };
 
         if ret != 0 {
-            bail!("amdgpu GEM create échoué: {}", std::io::Error::last_os_error());
+            bail!(
+                "amdgpu GEM create échoué: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         debug!(
             size_bytes = size_bytes,
-            handle     = req.out.handle,
+            handle = req.out.handle,
             "amdgpu GEM alloué en VRAM"
         );
 
@@ -310,23 +340,34 @@ impl DrmGpuBackend {
         // DRM_IOCTL_I915_GEM_CREATE
         #[repr(C)]
         struct I915GemCreate {
-            size:   u64,
+            size: u64,
             handle: u32,
-            _pad:   u32,
+            _pad: u32,
         }
 
         // DRM_IOWR(DRM_COMMAND_BASE + 0x0b, struct drm_i915_gem_create)
         // Sur x86-64 : 0xC010_644B
         const DRM_IOCTL_I915_GEM_CREATE: libc::c_ulong = 0xC010_644B;
 
-        let mut req = I915GemCreate { size: size_bytes, handle: 0, _pad: 0 };
+        let mut req = I915GemCreate {
+            size: size_bytes,
+            handle: 0,
+            _pad: 0,
+        };
 
         let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_I915_GEM_CREATE, &mut req as *mut I915GemCreate)
+            libc::ioctl(
+                self.fd,
+                DRM_IOCTL_I915_GEM_CREATE,
+                &mut req as *mut I915GemCreate,
+            )
         };
 
         if ret != 0 {
-            bail!("i915 GEM create échoué: {}", std::io::Error::last_os_error());
+            bail!(
+                "i915 GEM create échoué: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         debug!(size_bytes, handle = req.handle, "i915 GEM alloué");
@@ -338,7 +379,7 @@ impl DrmGpuBackend {
         #[repr(C)]
         struct DrmGemClose {
             handle: u32,
-            _pad:   u32,
+            _pad: u32,
         }
 
         // DRM_IOW(0x09, struct drm_gem_close)
@@ -346,12 +387,16 @@ impl DrmGpuBackend {
         const DRM_IOCTL_GEM_CLOSE: libc::c_ulong = 0x4008_6409;
 
         let gem_handle = (handle >> 32) as u32;
-        if gem_handle == 0 { return Ok(()); }
+        if gem_handle == 0 {
+            return Ok(());
+        }
 
-        let mut req = DrmGemClose { handle: gem_handle, _pad: 0 };
-        let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_GEM_CLOSE, &mut req as *mut DrmGemClose)
+        let mut req = DrmGemClose {
+            handle: gem_handle,
+            _pad: 0,
         };
+        let ret =
+            unsafe { libc::ioctl(self.fd, DRM_IOCTL_GEM_CLOSE, &mut req as *mut DrmGemClose) };
 
         if ret != 0 {
             warn!(
@@ -398,7 +443,11 @@ impl GpuBackend for DrmGpuBackend {
                 // La soumission réelle se fait via le CS ioctl du driver
                 // Pour l'instant : on retourne un ACK avec les 4 premiers octets
                 // inversés (signature de traitement)
-                let result: Vec<u8> = cmd.iter().take(4).rev().cloned()
+                let result: Vec<u8> = cmd
+                    .iter()
+                    .take(4)
+                    .rev()
+                    .cloned()
                     .chain(std::iter::repeat_n(0, cmd.len().saturating_sub(4)))
                     .collect();
                 debug!(
@@ -412,9 +461,10 @@ impl GpuBackend for DrmGpuBackend {
                 // virtio-gpu : les commandes sont des virgl commands (OpenGL encodé)
                 Ok(cmd.to_vec())
             }
-            DrmDriver::Unknown(name) => {
-                Err(GpuError::SubmitFailed(format!("driver {} non supporté", name)))
-            }
+            DrmDriver::Unknown(name) => Err(GpuError::SubmitFailed(format!(
+                "driver {} non supporté",
+                name
+            ))),
         }
     }
 
@@ -424,23 +474,22 @@ impl GpuBackend for DrmGpuBackend {
     /// pour référencer la région dans les commandes GPU suivantes.
     async fn alloc_vram(&self, size_bytes: u64, alignment: u32) -> Result<u64, GpuError> {
         let handle = match &self.driver {
-            DrmDriver::Amdgpu => {
-                self.gem_create_amdgpu(size_bytes, alignment)
-                    .map_err(|e| GpuError::SubmitFailed(e.to_string()))?
-            }
-            DrmDriver::I915 | DrmDriver::VirtioGpu => {
-                self.gem_create_i915(size_bytes)
-                    .map_err(|e| GpuError::SubmitFailed(e.to_string()))?
-            }
+            DrmDriver::Amdgpu => self
+                .gem_create_amdgpu(size_bytes, alignment)
+                .map_err(|e| GpuError::SubmitFailed(e.to_string()))?,
+            DrmDriver::I915 | DrmDriver::VirtioGpu => self
+                .gem_create_i915(size_bytes)
+                .map_err(|e| GpuError::SubmitFailed(e.to_string()))?,
             DrmDriver::Nouveau => {
                 // Nouveau utilise un ioctl similaire à i915
                 self.gem_create_i915(size_bytes)
                     .map_err(|e| GpuError::SubmitFailed(e.to_string()))?
             }
             DrmDriver::Unknown(name) => {
-                return Err(GpuError::SubmitFailed(
-                    format!("alloc_vram non supporté pour driver {}", name)
-                ));
+                return Err(GpuError::SubmitFailed(format!(
+                    "alloc_vram non supporté pour driver {}",
+                    name
+                )));
             }
         };
 
@@ -485,9 +534,9 @@ impl GpuBackend for DrmGpuBackend {
 
     fn name(&self) -> &str {
         match &self.driver {
-            DrmDriver::Amdgpu    => "DrmBackend/amdgpu",
-            DrmDriver::I915      => "DrmBackend/i915",
-            DrmDriver::Nouveau   => "DrmBackend/nouveau",
+            DrmDriver::Amdgpu => "DrmBackend/amdgpu",
+            DrmDriver::I915 => "DrmBackend/i915",
+            DrmDriver::Nouveau => "DrmBackend/nouveau",
             DrmDriver::VirtioGpu => "DrmBackend/virtio-gpu",
             DrmDriver::Unknown(_) => "DrmBackend/unknown",
         }
@@ -502,7 +551,9 @@ pub fn discover_render_nodes() -> Vec<(PathBuf, DrmDriver)> {
 
     for n in 128..=135u32 {
         let path = PathBuf::from(format!("/dev/dri/renderD{}", n));
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
 
         match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => {
@@ -529,9 +580,9 @@ mod tests {
 
     #[test]
     fn test_drm_driver_from_name() {
-        assert_eq!(DrmDriver::from_name("amdgpu"),    DrmDriver::Amdgpu);
-        assert_eq!(DrmDriver::from_name("i915"),      DrmDriver::I915);
-        assert_eq!(DrmDriver::from_name("nouveau"),   DrmDriver::Nouveau);
+        assert_eq!(DrmDriver::from_name("amdgpu"), DrmDriver::Amdgpu);
+        assert_eq!(DrmDriver::from_name("i915"), DrmDriver::I915);
+        assert_eq!(DrmDriver::from_name("nouveau"), DrmDriver::Nouveau);
         assert_eq!(DrmDriver::from_name("virtio_gpu"), DrmDriver::VirtioGpu);
         assert_eq!(
             DrmDriver::from_name("radeon"),
@@ -555,9 +606,9 @@ mod tests {
         let fd: u64 = 7;
         let encoded = (gem_handle as u64) << 32 | fd;
         let decoded_gem = (encoded >> 32) as u32;
-        let decoded_fd  = (encoded & 0xFFFF_FFFF) as u32;
+        let decoded_fd = (encoded & 0xFFFF_FFFF) as u32;
         assert_eq!(decoded_gem, 42);
-        assert_eq!(decoded_fd,  7);
+        assert_eq!(decoded_fd, 7);
     }
 
     #[test]

@@ -111,10 +111,14 @@ omega_vcpu_slots_used{node="pve-node-a"}   12
 omega_vcpu_slots_free{node="pve-node-a"}   24
 omega_vcpu_steal_pct{node="pve-node-a"}    1.20
 omega_vcpu_vm_count{node="pve-node-a"}     4
+omega_gpu_vram_total_mib{node="pve-node-a"} 8192
+omega_gpu_vram_reserved_mib{node="pve-node-a"} 4096
+omega_gpu_vram_free_mib{node="pve-node-a"} 4096
 ```
 
 Ainsi que les métriques store (pages_stored, put_count, get_count, hit_rate_pct, connections)
-exposées via `GET /control/status` au format JSON.
+exposées via `GET /control/status` au format JSON, et les métriques GPU détaillées via
+`GET /control/gpu/status`.
 
 ## Roadmap métriques
 

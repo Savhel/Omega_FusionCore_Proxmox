@@ -24,7 +24,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 
 use node_a_agent::config::Config;
 use node_a_agent::memory::{MemoryRegion, PAGE_SIZE};
@@ -37,12 +37,16 @@ async fn main() -> Result<()> {
     let cfg = Config::parse();
 
     // ------------------------------------------------------------------ logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
 
     match cfg.log_format.as_str() {
-        "json" => fmt().json().with_env_filter(filter).with_current_span(false).init(),
-        _      => fmt().with_env_filter(filter).with_target(false).init(),
+        "json" => fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_current_span(false)
+            .init(),
+        _ => fmt().with_env_filter(filter).with_target(false).init(),
     }
 
     info!(
@@ -74,7 +78,11 @@ async fn main() -> Result<()> {
     if stores_ok == 0 {
         bail!("aucun store disponible — vérifiez que node-bc-store tourne sur B et C");
     }
-    info!(stores_ok = stores_ok, total = cfg.stores.len(), "stores disponibles");
+    info!(
+        stores_ok = stores_ok,
+        total = cfg.stores.len(),
+        "stores disponibles"
+    );
 
     // ------------------------------------------------------------------ runtime Tokio (handle pour block_on depuis threads)
     let tokio_handle = tokio::runtime::Handle::current();
@@ -104,7 +112,7 @@ async fn main() -> Result<()> {
 
     // ------------------------------------------------------------------ thread handler uffd
     let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let region_start  = region.base_ptr() as u64;
+    let region_start = region.base_ptr() as u64;
 
     // Le handler est un closure qui appelle region.fetch_page()
     let region_for_handler = region.clone();
@@ -124,9 +132,9 @@ async fn main() -> Result<()> {
 
     // ------------------------------------------------------------------ exécution selon le mode
     match cfg.mode.as_str() {
-        "demo"   => run_demo(&region, &cfg, &metrics, &store).await?,
+        "demo" => run_demo(&region, &cfg, &metrics, &store).await?,
         "daemon" => run_daemon(&shutdown_flag).await,
-        m        => bail!("mode inconnu : {m} (valides : demo, daemon)"),
+        m => bail!("mode inconnu : {m} (valides : demo, daemon)"),
     }
 
     // ------------------------------------------------------------------ arrêt propre
@@ -141,12 +149,12 @@ async fn main() -> Result<()> {
 
     let snap = metrics.snapshot();
     info!(
-        faults        = snap.fault_count,
-        served        = snap.fault_served,
-        errors        = snap.fault_errors,
-        evicted       = snap.pages_evicted,
-        fetched       = snap.pages_fetched,
-        zeros         = snap.fetch_zeros,
+        faults = snap.fault_count,
+        served = snap.fault_served,
+        errors = snap.fault_errors,
+        evicted = snap.pages_evicted,
+        fetched = snap.pages_fetched,
+        zeros = snap.fetch_zeros,
         "métriques finales"
     );
 
@@ -155,18 +163,21 @@ async fn main() -> Result<()> {
 
 /// Scénario de démonstration et validation.
 async fn run_demo(
-    region:  &Arc<MemoryRegion>,
-    _cfg:    &Config,
+    region: &Arc<MemoryRegion>,
+    _cfg: &Config,
     metrics: &Arc<AgentMetrics>,
-    _store:  &Arc<RemoteStorePool>,
+    _store: &Arc<RemoteStorePool>,
 ) -> Result<()> {
-    let num_pages   = region.num_pages;
-    let demo_pages  = num_pages.min(64); // on travaille sur 64 pages max pour le demo
+    let num_pages = region.num_pages;
+    let demo_pages = num_pages.min(64); // on travaille sur 64 pages max pour le demo
 
     info!(demo_pages, "=== début du scénario de démonstration ===");
 
     // ------------------------------------------------------------------ 1. Écriture de valeurs connues
-    info!("étape 1/4 : écriture des valeurs initiales dans {} pages", demo_pages);
+    info!(
+        "étape 1/4 : écriture des valeurs initiales dans {} pages",
+        demo_pages
+    );
     for page_id in 0..demo_pages as u64 {
         let mut data = [0u8; PAGE_SIZE];
         // Signature reconnaissable : les 8 premiers octets encodent page_id
@@ -175,7 +186,8 @@ async fn run_demo(
         for i in 8..PAGE_SIZE {
             data[i] = ((page_id as u8).wrapping_add(i as u8)) & 0xFF;
         }
-        region.write_page_local(page_id, &data)
+        region
+            .write_page_local(page_id, &data)
             .with_context(|| format!("écriture page {page_id}"))?;
     }
     info!("étape 1/4 : ok");
@@ -185,13 +197,14 @@ async fn run_demo(
     let t0 = Instant::now();
     let mut evicted = 0u64;
     for page_id in (0..demo_pages as u64).step_by(2) {
-        region.evict_page(page_id)
+        region
+            .evict_page(page_id)
             .with_context(|| format!("éviction page {page_id}"))?;
         evicted += 1;
     }
     let evict_ms = t0.elapsed().as_millis();
     info!(
-        evicted   = evicted,
+        evicted = evicted,
         elapsed_ms = evict_ms,
         throughput_kbps = evicted * 4 * 1000 / evict_ms.max(1) as u64,
         "étape 2/4 : ok"
@@ -205,21 +218,17 @@ async fn run_demo(
     for page_id in 0..demo_pages as u64 {
         // Lecture via un pointeur direct dans la région — déclenche une page fault
         // si la page a été évinvée (MADV_DONTNEED → absent → uffd intercepte)
-        let ptr = unsafe {
-            (region.base_ptr() as *const u8).add(page_id as usize * PAGE_SIZE)
-        };
+        let ptr = unsafe { (region.base_ptr() as *const u8).add(page_id as usize * PAGE_SIZE) };
 
         // Lecture des 8 premiers octets (signature page_id)
-        let read_page_id = unsafe {
-            u64::from_be_bytes(*(ptr as *const [u8; 8]))
-        };
+        let read_page_id = unsafe { u64::from_be_bytes(*(ptr as *const [u8; 8])) };
 
         // Vérification de l'intégrité
         if read_page_id != page_id {
             error!(
-                page_id      = page_id,
-                got_page_id  = read_page_id,
-                was_remote   = page_id % 2 == 0,
+                page_id = page_id,
+                got_page_id = read_page_id,
+                was_remote = page_id % 2 == 0,
                 "ERREUR INTÉGRITÉ : données corrompues !"
             );
             errors += 1;
@@ -240,9 +249,9 @@ async fn run_demo(
 
     let read_ms = t1.elapsed().as_millis();
     info!(
-        pages      = demo_pages,
+        pages = demo_pages,
         elapsed_ms = read_ms,
-        errors     = errors,
+        errors = errors,
         "étape 3/4 : lecture terminée"
     );
 
@@ -250,12 +259,12 @@ async fn run_demo(
     let snap = metrics.snapshot();
     info!("étape 4/4 : résultats");
     info!(
-        pages_evicted  = snap.pages_evicted,
-        faults_caught  = snap.fault_count,
-        faults_served  = snap.fault_served,
-        faults_errors  = snap.fault_errors,
-        fetch_zeros    = snap.fetch_zeros,
-        integrity_ok   = errors == 0,
+        pages_evicted = snap.pages_evicted,
+        faults_caught = snap.fault_count,
+        faults_served = snap.fault_served,
+        faults_errors = snap.fault_errors,
+        fetch_zeros = snap.fetch_zeros,
+        integrity_ok = errors == 0,
         "=== fin du scénario de démonstration ==="
     );
 

@@ -41,21 +41,21 @@ use tracing::{debug, info, warn};
 /// Statistiques CPU lues depuis `cpu.stat` du cgroup de la VM.
 #[derive(Debug, Clone, Default)]
 pub struct VmCpuStat {
-    pub vm_id:           u32,
+    pub vm_id: u32,
     /// Temps CPU total consommé (µs)
-    pub usage_usec:      u64,
+    pub usage_usec: u64,
     /// Temps CPU en espace utilisateur (µs)
-    pub user_usec:       u64,
+    pub user_usec: u64,
     /// Temps CPU en espace système (µs)
-    pub system_usec:     u64,
+    pub system_usec: u64,
     /// Nombre de périodes de quota
-    pub nr_periods:      u64,
+    pub nr_periods: u64,
     /// Nombre de périodes où le quota a été atteint (throttling)
-    pub nr_throttled:    u64,
+    pub nr_throttled: u64,
     /// Temps total throttlé (µs) — indicateur clé de saturation CPU
-    pub throttled_usec:  u64,
+    pub throttled_usec: u64,
     /// Utilisation CPU calculée depuis le dernier appel (0.0–100.0 × nb_cpus)
-    pub usage_pct:       f64,
+    pub usage_pct: f64,
 }
 
 impl VmCpuStat {
@@ -66,7 +66,9 @@ impl VmCpuStat {
 
     /// Taux de throttling (0.0–1.0)
     pub fn throttle_ratio(&self) -> f64 {
-        if self.nr_periods == 0 { return 0.0; }
+        if self.nr_periods == 0 {
+            return 0.0;
+        }
         self.nr_throttled as f64 / self.nr_periods as f64
     }
 }
@@ -92,7 +94,7 @@ impl VmCpuConfig {
         Self {
             vm_id,
             weight: 100,
-            quota:  None,
+            quota: None,
             cpuset: None,
         }
     }
@@ -102,7 +104,7 @@ impl VmCpuConfig {
     /// Exemple : `capped_at_vcpus(4)` → quota = "4000000 1000000"
     pub fn capped_at_vcpus(mut self, num_vcpus: usize) -> Self {
         let period_usec: u64 = 1_000_000; // 1 seconde
-        let quota_usec:  u64 = num_vcpus as u64 * period_usec;
+        let quota_usec: u64 = num_vcpus as u64 * period_usec;
         self.quota = Some((quota_usec, period_usec));
         self
     }
@@ -131,12 +133,16 @@ pub struct CgroupCpuController {
 
 impl CgroupCpuController {
     pub fn new() -> Self {
-        Self { cgroup_root: PathBuf::from("/sys/fs/cgroup") }
+        Self {
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+        }
     }
 
     /// Pour les tests — permet d'injecter un répertoire temporaire.
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
-        Self { cgroup_root: root.into() }
+        Self {
+            cgroup_root: root.into(),
+        }
     }
 
     // ── Découverte du cgroup d'une VM ─────────────────────────────────────
@@ -165,7 +171,8 @@ impl CgroupCpuController {
         }
 
         // Fallback : chemin direct Proxmox qemu-server
-        let direct = self.cgroup_root
+        let direct = self
+            .cgroup_root
             .join("system.slice")
             .join(format!("qemu-server@{}.service", vm_id));
         if direct.exists() {
@@ -178,7 +185,9 @@ impl CgroupCpuController {
     /// Liste tous les vmids pour lesquels un cgroup est actif.
     pub fn list_active_vms(&self) -> Vec<u32> {
         let machine_slice = self.cgroup_root.join("machine.slice");
-        let Ok(entries) = fs::read_dir(&machine_slice) else { return vec![]; };
+        let Ok(entries) = fs::read_dir(&machine_slice) else {
+            return vec![];
+        };
 
         let mut vmids = Vec::new();
         for entry in entries.flatten() {
@@ -187,7 +196,8 @@ impl CgroupCpuController {
                 // Extraire le vmid depuis le nom
                 for part in name.split('-') {
                     if let Ok(id) = part.parse::<u32>() {
-                        if id > 100 { // vmids Proxmox commencent à 100
+                        if id > 100 {
+                            // vmids Proxmox commencent à 100
                             vmids.push(id);
                             break;
                         }
@@ -207,27 +217,30 @@ impl CgroupCpuController {
         let cgroup = self.find_vm_cgroup(vm_id)?;
         let content = fs::read_to_string(cgroup.join("cpu.stat")).ok()?;
 
-        let mut stat = VmCpuStat { vm_id, ..Default::default() };
+        let mut stat = VmCpuStat {
+            vm_id,
+            ..Default::default()
+        };
 
         for line in content.lines() {
             let mut parts = line.split_whitespace();
             let key = parts.next().unwrap_or("");
             let val: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             match key {
-                "usage_usec"     => stat.usage_usec     = val,
-                "user_usec"      => stat.user_usec       = val,
-                "system_usec"    => stat.system_usec     = val,
-                "nr_periods"     => stat.nr_periods      = val,
-                "nr_throttled"   => stat.nr_throttled    = val,
-                "throttled_usec" => stat.throttled_usec  = val,
+                "usage_usec" => stat.usage_usec = val,
+                "user_usec" => stat.user_usec = val,
+                "system_usec" => stat.system_usec = val,
+                "nr_periods" => stat.nr_periods = val,
+                "nr_throttled" => stat.nr_throttled = val,
+                "throttled_usec" => stat.throttled_usec = val,
                 _ => {}
             }
         }
 
         debug!(
             vm_id,
-            usage_usec     = stat.usage_usec,
-            nr_throttled   = stat.nr_throttled,
+            usage_usec = stat.usage_usec,
+            nr_throttled = stat.nr_throttled,
             throttled_usec = stat.throttled_usec,
             "cpu.stat lu"
         );
@@ -252,7 +265,7 @@ impl CgroupCpuController {
             return None; // illimité
         }
         let mut parts = content.split_whitespace();
-        let quota:  u64 = parts.next()?.parse().ok()?;
+        let quota: u64 = parts.next()?.parse().ok()?;
         let period: u64 = parts.next()?.parse().ok()?;
         Some((quota, period))
     }
@@ -265,11 +278,12 @@ impl CgroupCpuController {
     /// elle écrit dans les fichiers cgroup pour que le kernel applique
     /// les contraintes directement sur le processus QEMU.
     pub fn apply(&self, config: &VmCpuConfig) -> Result<()> {
-        let cgroup = self.find_vm_cgroup(config.vm_id)
-            .with_context(|| format!(
+        let cgroup = self.find_vm_cgroup(config.vm_id).with_context(|| {
+            format!(
                 "cgroup introuvable pour la VM {} — la VM est-elle démarrée ?",
                 config.vm_id
-            ))?;
+            )
+        })?;
 
         // ── 1. cpu.weight ─────────────────────────────────────────────────
         let weight_path = cgroup.join("cpu.weight");
@@ -277,7 +291,7 @@ impl CgroupCpuController {
             .with_context(|| format!("écriture cpu.weight VM {}", config.vm_id))?;
 
         info!(
-            vm_id  = config.vm_id,
+            vm_id = config.vm_id,
             weight = config.weight,
             "cpu.weight appliqué"
         );
@@ -286,7 +300,7 @@ impl CgroupCpuController {
         let max_path = cgroup.join("cpu.max");
         let max_content = match config.quota {
             Some((quota, period)) => format!("{} {}", quota, period),
-            None                  => "max 1000000".to_string(),
+            None => "max 1000000".to_string(),
         };
         fs::write(&max_path, &max_content)
             .with_context(|| format!("écriture cpu.max VM {}", config.vm_id))?;
@@ -332,11 +346,13 @@ impl CgroupCpuController {
     /// `stat_before` et `stat_after` doivent être lus avec un intervalle
     /// de temps connu (`elapsed_usec`).
     pub fn compute_usage_pct(
-        stat_before:  &VmCpuStat,
-        stat_after:   &VmCpuStat,
+        stat_before: &VmCpuStat,
+        stat_after: &VmCpuStat,
         elapsed_usec: u64,
     ) -> f64 {
-        if elapsed_usec == 0 { return 0.0; }
+        if elapsed_usec == 0 {
+            return 0.0;
+        }
         let delta_usec = stat_after.usage_usec.saturating_sub(stat_before.usage_usec);
         (delta_usec as f64 / elapsed_usec as f64) * 100.0
     }
@@ -347,24 +363,35 @@ impl CgroupCpuController {
     /// les VMs de ce nœud (utile seulement si ce nœud est lui-même une VM).
     /// Sur une machine physique, le steal time vient des processus hôte.
     pub fn read_node_steal_pct() -> f64 {
-        let Ok(content) = fs::read_to_string("/proc/stat") else { return 0.0; };
-        let Some(line) = content.lines().find(|l| l.starts_with("cpu ")) else { return 0.0; };
+        let Ok(content) = fs::read_to_string("/proc/stat") else {
+            return 0.0;
+        };
+        let Some(line) = content.lines().find(|l| l.starts_with("cpu ")) else {
+            return 0.0;
+        };
 
-        let fields: Vec<u64> = line.split_whitespace()
+        let fields: Vec<u64> = line
+            .split_whitespace()
             .skip(1)
             .filter_map(|s| s.parse().ok())
             .collect();
 
-        if fields.len() < 8 { return 0.0; }
+        if fields.len() < 8 {
+            return 0.0;
+        }
         let total = fields.iter().sum::<u64>();
         let steal = fields[7];
-        if total == 0 { return 0.0; }
+        if total == 0 {
+            return 0.0;
+        }
         (steal as f64 / total as f64) * 100.0
     }
 }
 
 impl Default for CgroupCpuController {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -378,14 +405,17 @@ mod tests {
 
     fn make_vm_cgroup(root: &Path, vm_id: u32) -> PathBuf {
         // Simuler la structure cgroup Proxmox
-        let scope = root.join("machine.slice")
+        let scope = root
+            .join("machine.slice")
             .join(format!("machine-qemu-{}-pve.scope", vm_id));
         fs::create_dir_all(&scope).unwrap();
 
         // Créer les fichiers cgroup avec des valeurs par défaut
         fs::write(scope.join("cpu.weight"), "100\n").unwrap();
         fs::write(scope.join("cpu.max"), "max 1000000\n").unwrap();
-        fs::write(scope.join("cpu.stat"), "\
+        fs::write(
+            scope.join("cpu.stat"),
+            "\
 usage_usec 5000000\n\
 user_usec 3000000\n\
 system_usec 2000000\n\
@@ -393,7 +423,9 @@ nr_periods 50\n\
 nr_throttled 3\n\
 throttled_usec 150000\n\
 nr_burst_periods 0\n\
-burst_usec 0\n").unwrap();
+burst_usec 0\n",
+        )
+        .unwrap();
         fs::write(scope.join("cpuset.cpus"), "0-3\n").unwrap();
 
         scope
@@ -415,18 +447,19 @@ burst_usec 0\n").unwrap();
         make_vm_cgroup(tmp.path(), 102);
         let ctrl = CgroupCpuController::with_root(tmp.path());
         let stat = ctrl.read_cpu_stat(102).expect("stat non lue");
-        assert_eq!(stat.usage_usec,    5_000_000);
-        assert_eq!(stat.user_usec,     3_000_000);
-        assert_eq!(stat.system_usec,   2_000_000);
-        assert_eq!(stat.nr_periods,    50);
-        assert_eq!(stat.nr_throttled,  3);
+        assert_eq!(stat.usage_usec, 5_000_000);
+        assert_eq!(stat.user_usec, 3_000_000);
+        assert_eq!(stat.system_usec, 2_000_000);
+        assert_eq!(stat.nr_periods, 50);
+        assert_eq!(stat.nr_throttled, 3);
         assert_eq!(stat.throttled_usec, 150_000);
     }
 
     #[test]
     fn test_is_throttled() {
         let stat = VmCpuStat {
-            nr_periods: 10, nr_throttled: 2,
+            nr_periods: 10,
+            nr_throttled: 2,
             ..Default::default()
         };
         assert!(stat.is_throttled());
@@ -457,7 +490,7 @@ burst_usec 0\n").unwrap();
         ctrl.apply(&config).unwrap();
 
         let (quota, period) = ctrl.read_max(104).unwrap();
-        assert_eq!(quota,  2_000_000); // 2 × 1_000_000
+        assert_eq!(quota, 2_000_000); // 2 × 1_000_000
         assert_eq!(period, 1_000_000);
     }
 
@@ -483,7 +516,9 @@ burst_usec 0\n").unwrap();
         let config = VmCpuConfig::new(106).pinned_to("0-1");
         ctrl.apply(&config).unwrap();
 
-        let scope = tmp.path().join("machine.slice")
+        let scope = tmp
+            .path()
+            .join("machine.slice")
             .join("machine-qemu-106-pve.scope");
         let cpuset = fs::read_to_string(scope.join("cpuset.cpus")).unwrap();
         assert_eq!(cpuset.trim(), "0-1");
@@ -491,8 +526,14 @@ burst_usec 0\n").unwrap();
 
     #[test]
     fn test_compute_usage_pct() {
-        let before = VmCpuStat { usage_usec: 0,          ..Default::default() };
-        let after  = VmCpuStat { usage_usec: 2_000_000,  ..Default::default() };
+        let before = VmCpuStat {
+            usage_usec: 0,
+            ..Default::default()
+        };
+        let after = VmCpuStat {
+            usage_usec: 2_000_000,
+            ..Default::default()
+        };
         // Sur 4 secondes = 4_000_000 µs → 50% d'un cœur
         let pct = CgroupCpuController::compute_usage_pct(&before, &after, 4_000_000);
         assert!((pct - 50.0).abs() < 0.1);

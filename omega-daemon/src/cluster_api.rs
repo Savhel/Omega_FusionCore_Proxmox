@@ -30,16 +30,16 @@ use node_bc_store::store::PageKey;
 /// Construit le routeur axum.
 pub fn build_router(state: Arc<NodeState>) -> Router {
     Router::new()
-        .route("/api/health",        get(health))
-        .route("/api/status",        get(node_status))
-        .route("/api/pages",         get(pages_list))
-        .route("/api/pages/:vmid",   delete(delete_vm_pages))
+        .route("/api/health", get(health))
+        .route("/api/status", get(node_status))
+        .route("/api/pages", get(pages_list))
+        .route("/api/pages/:vmid", delete(delete_vm_pages))
         .with_state(state)
 }
 
 /// Lance le serveur HTTP sur l'adresse configurée.
 pub async fn run_api_server(state: Arc<NodeState>, addr: String) -> anyhow::Result<()> {
-    let app      = build_router(state);
+    let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(addr = %addr, "API HTTP cluster démarrée");
     axum::serve(listener, app).await?;
@@ -62,13 +62,16 @@ async fn node_status(State(state): State<Arc<NodeState>>) -> Json<Value> {
 /// GET /api/pages — pages stockées sur ce nœud, par vm_id
 async fn pages_list(State(state): State<Arc<NodeState>>) -> Json<Value> {
     let pages = state.pages_per_vm();
-    let entries: Vec<Value> = pages.iter().map(|(vmid, count)| {
-        json!({
-            "vmid":         vmid,
-            "pages_stored": count,
-            "mem_kb":       count * 4,
+    let entries: Vec<Value> = pages
+        .iter()
+        .map(|(vmid, count)| {
+            json!({
+                "vmid":         vmid,
+                "pages_stored": count,
+                "mem_kb":       count * 4,
+            })
         })
-    }).collect();
+        .collect();
     Json(json!({"pages": entries, "node_id": state.node_id}))
 }
 
@@ -102,9 +105,12 @@ async fn delete_vm_pages(
 
     info!(vmid, deleted, "pages VM supprimées post-migration");
 
-    (StatusCode::OK, Json(json!({
-        "vmid":    vmid,
-        "deleted": deleted,
-        "node_id": state.node_id,
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "vmid":    vmid,
+            "deleted": deleted,
+            "node_id": state.node_id,
+        })),
+    )
 }

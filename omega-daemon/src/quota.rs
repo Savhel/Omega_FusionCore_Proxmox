@@ -52,19 +52,19 @@ pub const PAGE_SIZE_BYTES: u64 = 4096;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmQuota {
     /// VMID Proxmox
-    pub vm_id:            u32,
+    pub vm_id: u32,
     /// RAM totale demandée par la VM (Mio)
-    pub max_mem_mib:      u64,
+    pub max_mem_mib: u64,
     /// Pages locales (sur le nœud hôte) — budget alloué au démarrage
     pub local_budget_mib: u64,
     /// Pages distantes — budget maximum autorisé (Mio)
     pub remote_budget_mib: u64,
     /// Pages distantes actuellement consommées (Mio, mis à jour en temps réel)
-    pub remote_used_mib:  u64,
+    pub remote_used_mib: u64,
     /// Timestamp de création du quota (Unix secondes)
-    pub created_at:       u64,
+    pub created_at: u64,
     /// Timestamp de dernière mise à jour
-    pub updated_at:       u64,
+    pub updated_at: u64,
 }
 
 impl VmQuota {
@@ -82,8 +82,8 @@ impl VmQuota {
             local_budget_mib,
             remote_budget_mib,
             remote_used_mib: 0,
-            created_at:      now,
-            updated_at:      now,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -99,7 +99,8 @@ impl VmQuota {
 
     /// Reste de pages distantes disponibles.
     pub fn remaining_remote_pages(&self) -> u64 {
-        self.max_remote_pages().saturating_sub(self.used_remote_pages())
+        self.max_remote_pages()
+            .saturating_sub(self.used_remote_pages())
     }
 
     /// Pourcentage du budget remote consommé (0.0 – 100.0).
@@ -120,19 +121,19 @@ impl VmQuota {
     /// Quand le balloon réduit la RAM guest à `balloon_actual_mib`,
     /// le budget remote peut augmenter en conséquence.
     pub fn adjust_for_balloon(&mut self, balloon_actual_mib: u64) {
-        let new_local  = balloon_actual_mib.min(self.max_mem_mib);
+        let new_local = balloon_actual_mib.min(self.max_mem_mib);
         let new_remote = self.max_mem_mib.saturating_sub(new_local);
 
         if new_remote != self.remote_budget_mib {
             info!(
-                vm_id             = self.vm_id,
+                vm_id = self.vm_id,
                 old_remote_budget = self.remote_budget_mib,
                 new_remote_budget = new_remote,
-                balloon_mib       = balloon_actual_mib,
+                balloon_mib = balloon_actual_mib,
                 "quota remote ajusté suite à balloon"
             );
             self.remote_budget_mib = new_remote;
-            self.local_budget_mib  = new_local;
+            self.local_budget_mib = new_local;
             self.updated_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -149,7 +150,11 @@ pub enum QuotaCheck {
     /// La page peut être stockée.
     Allowed,
     /// La VM a atteint son quota distant — refus.
-    Exceeded { vm_id: u32, used_mib: u64, budget_mib: u64 },
+    Exceeded {
+        vm_id: u32,
+        used_mib: u64,
+        budget_mib: u64,
+    },
     /// Aucun quota défini pour cette VM — comportement par défaut (autoriser).
     NoQuota,
 }
@@ -170,7 +175,9 @@ pub struct QuotaRegistry {
 
 impl Default for QuotaRegistry {
     fn default() -> Self {
-        Self { quotas: RwLock::new(HashMap::new()) }
+        Self {
+            quotas: RwLock::new(HashMap::new()),
+        }
     }
 }
 
@@ -182,9 +189,9 @@ impl QuotaRegistry {
     /// Enregistre ou remplace le quota d'une VM.
     pub fn set(&self, quota: VmQuota) {
         info!(
-            vm_id             = quota.vm_id,
-            max_mem_mib       = quota.max_mem_mib,
-            local_budget_mib  = quota.local_budget_mib,
+            vm_id = quota.vm_id,
+            max_mem_mib = quota.max_mem_mib,
+            local_budget_mib = quota.local_budget_mib,
             remote_budget_mib = quota.remote_budget_mib,
             "quota VM configuré"
         );
@@ -211,14 +218,14 @@ impl QuotaRegistry {
         if quota.remote_used_mib + extra_mib > quota.remote_budget_mib {
             warn!(
                 vm_id,
-                used_mib   = quota.remote_used_mib,
+                used_mib = quota.remote_used_mib,
                 budget_mib = quota.remote_budget_mib,
                 extra_mib,
                 "PUT_PAGE refusé — quota distant atteint"
             );
             return QuotaCheck::Exceeded {
                 vm_id,
-                used_mib:   quota.remote_used_mib,
+                used_mib: quota.remote_used_mib,
                 budget_mib: quota.remote_budget_mib,
             };
         }
@@ -278,17 +285,19 @@ impl QuotaRegistry {
     pub fn summary(&self) -> QuotaSummary {
         let guard = self.quotas.read().unwrap();
         let total_budget: u64 = guard.values().map(|q| q.remote_budget_mib).sum();
-        let total_used:   u64 = guard.values().map(|q| q.remote_used_mib).sum();
-        let full_vms:     u32 = guard.values().filter(|q| q.is_remote_full()).count() as u32;
+        let total_used: u64 = guard.values().map(|q| q.remote_used_mib).sum();
+        let full_vms: u32 = guard.values().filter(|q| q.is_remote_full()).count() as u32;
 
         QuotaSummary {
-            vm_count:           guard.len() as u32,
-            total_budget_mib:   total_budget,
-            total_used_mib:     total_used,
-            vms_at_quota:       full_vms,
-            usage_pct:          if total_budget > 0 {
+            vm_count: guard.len() as u32,
+            total_budget_mib: total_budget,
+            total_used_mib: total_used,
+            vms_at_quota: full_vms,
+            usage_pct: if total_budget > 0 {
                 (total_used as f64 / total_budget as f64) * 100.0
-            } else { 0.0 },
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -296,11 +305,11 @@ impl QuotaRegistry {
 /// Résumé global des quotas pour les métriques.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaSummary {
-    pub vm_count:         u32,
+    pub vm_count: u32,
     pub total_budget_mib: u64,
-    pub total_used_mib:   u64,
-    pub vms_at_quota:     u32,
-    pub usage_pct:        f64,
+    pub total_used_mib: u64,
+    pub vms_at_quota: u32,
+    pub usage_pct: f64,
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -315,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_remote_budget_is_difference() {
-        let q = make_quota(1, 10_240, 8_192);  // 10 Gio max, 8 Gio local
+        let q = make_quota(1, 10_240, 8_192); // 10 Gio max, 8 Gio local
         assert_eq!(q.remote_budget_mib, 2_048); // 2 Gio remote
     }
 
@@ -329,7 +338,7 @@ mod tests {
     #[test]
     fn test_check_put_allowed_when_under_budget() {
         let reg = QuotaRegistry::new();
-        reg.set(make_quota(1, 10_240, 8_192));  // 2 Gio remote budget
+        reg.set(make_quota(1, 10_240, 8_192)); // 2 Gio remote budget
         assert_eq!(reg.check_put(1, 4096), QuotaCheck::Allowed);
     }
 
@@ -337,7 +346,7 @@ mod tests {
     fn test_check_put_exceeded_when_over_budget() {
         let reg = QuotaRegistry::new();
         let mut q = make_quota(1, 10_240, 8_192);
-        q.remote_used_mib = 2_048;   // déjà au max
+        q.remote_used_mib = 2_048; // déjà au max
         reg.set(q);
 
         let result = reg.check_put(1, 4096);
@@ -369,7 +378,7 @@ mod tests {
         q.remote_used_mib = 100;
         reg.set(q);
 
-        reg.record_delete(1, 50 * 1024 * 1024);  // libérer 50 Mio
+        reg.record_delete(1, 50 * 1024 * 1024); // libérer 50 Mio
         let q = reg.get(1).unwrap();
         assert!(q.remote_used_mib <= 100);
     }
@@ -388,13 +397,13 @@ mod tests {
     #[test]
     fn test_balloon_adjustment_increases_remote_budget() {
         let reg = QuotaRegistry::new();
-        reg.set(make_quota(1, 10_240, 8_192));  // remote = 2 Gio
+        reg.set(make_quota(1, 10_240, 8_192)); // remote = 2 Gio
 
         // Le balloon réduit la RAM guest à 6 Gio → remote peut monter à 4 Gio
         reg.apply_balloon_update(1, 6_144);
         let q = reg.get(1).unwrap();
         assert_eq!(q.remote_budget_mib, 4_096);
-        assert_eq!(q.local_budget_mib,  6_144);
+        assert_eq!(q.local_budget_mib, 6_144);
     }
 
     #[test]
@@ -403,9 +412,9 @@ mod tests {
         reg.set(make_quota(1, 10_240, 8_192));
 
         // Balloon plus grand que max_mem → ne peut pas créer de budget remote > max
-        reg.apply_balloon_update(1, 12_000);  // impossible réellement, mais testé
+        reg.apply_balloon_update(1, 12_000); // impossible réellement, mais testé
         let q = reg.get(1).unwrap();
-        assert_eq!(q.local_budget_mib, 10_240);  // capé à max_mem
+        assert_eq!(q.local_budget_mib, 10_240); // capé à max_mem
         assert_eq!(q.remote_budget_mib, 0);
     }
 
@@ -413,8 +422,8 @@ mod tests {
     fn test_summary_counts_vms_at_quota() {
         let reg = QuotaRegistry::new();
 
-        let q1 = make_quota(1, 4_096, 4_096);   // remote = 0, donc à quota dès le début
-        let q2 = make_quota(2, 10_240, 8_192);   // 2 Gio remote disponible
+        let q1 = make_quota(1, 4_096, 4_096); // remote = 0, donc à quota dès le début
+        let q2 = make_quota(2, 10_240, 8_192); // 2 Gio remote disponible
 
         reg.set(q1);
         reg.set(q2);

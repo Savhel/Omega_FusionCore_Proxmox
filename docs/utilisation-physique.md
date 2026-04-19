@@ -386,6 +386,23 @@ lspci | grep -i vga
 
 ### 6.2 Configurer le budget VRAM par VM
 
+Le budget peut être poussé directement via l'API de contrôle, ou déclaré dans
+la configuration Proxmox de la VM pour que le controller le réconcilie
+automatiquement :
+
+```text
+description:
+  omega.gpu_vram_mib=2048
+  omega.min_vcpus=2
+  omega.max_vcpus=8
+```
+
+Ou via les tags Proxmox :
+
+```text
+omega-gpu-2048;omega-min-vcpus-2;omega-max-vcpus-8
+```
+
 ```bash
 # Exemple : pve1 a un GPU avec 8 Go de VRAM
 # VM 101 → 2 Go VRAM, VM 102 → 4 Go VRAM, VM 103 → 2 Go VRAM
@@ -417,8 +434,12 @@ Lorsque vous créez une nouvelle VM dans Proxmox, le contrôleur doit l'admettre
 
 Le contrôleur surveille l'API Proxmox et détecte automatiquement les nouvelles VMs. À la création d'une VM, il :
 1. Calcule le budget local et distant (`local + distant = max_mem`)
-2. Choisit le nœud cible (si non déjà défini par Proxmox)
+2. Choisit le nœud cible le plus adapté ou migre automatiquement la VM si elle a démarré sur un mauvais nœud
 3. Configure le quota via `/control/vm/{vmid}/quota`
+4. Réconcilie automatiquement le profil vCPU :
+   `omega.max_vcpus` si présent, sinon `sockets × cores`,
+   et `omega.min_vcpus` si présent, sinon `max_vcpus / 2`
+5. Réconcilie automatiquement le budget GPU si `omega.gpu_vram_mib` est déclaré dans la config Proxmox
 
 Pour une VM créée manuellement dans Proxmox (RAM : 8192 Mo, nœud cible : pve1) :
 

@@ -49,6 +49,7 @@ class MigrationType(str, Enum):
 class MigrationReason(str, Enum):
     MEMORY_PRESSURE      = "memory_pressure"
     CPU_SATURATION       = "cpu_saturation"
+    GPU_SATURATION       = "gpu_saturation"
     EXCESSIVE_REMOTE_PAGING = "excessive_remote_paging"
     MAINTENANCE_DRAIN    = "maintenance_drain"
     ADMIN_REQUEST        = "admin_request"
@@ -62,6 +63,8 @@ class NodeState:
     mem_available_kb: int
     vcpu_total:       int       = 24
     vcpu_free:        int       = 24
+    gpu_total_vram_mib: int     = 0
+    gpu_free_vram_mib: int      = 0
     local_vms:        List[VmState] = field(default_factory=list)
 
     @property
@@ -82,6 +85,16 @@ class NodeState:
         vcpu_free_ratio = 1.0 - self.vcpu_used_pct / 100.0
         return ram_free_ratio * 0.6 + vcpu_free_ratio * 0.4
 
+    @property
+    def gpu_used_pct(self) -> float:
+        if self.gpu_total_vram_mib == 0:
+            return 0.0
+        return (
+            (self.gpu_total_vram_mib - self.gpu_free_vram_mib)
+            / self.gpu_total_vram_mib
+            * 100.0
+        )
+
     def can_accept_vm(self, vm: "VmState") -> bool:
         """Vérifie si ce nœud peut accueillir la VM sans dépasser 80%."""
         vm_ram_kb = vm.max_mem_mib * 1024
@@ -89,7 +102,14 @@ class NodeState:
         new_avail_pct = new_avail / self.mem_total_kb * 100.0 if self.mem_total_kb else 0.0
         ram_ok  = new_avail_pct >= 20.0  # garder 20% libres
         vcpu_ok = self.vcpu_used_pct < 80.0
-        return ram_ok and vcpu_ok
+        gpu_ok = (
+            vm.gpu_vram_budget_mib == 0
+            or (
+                self.gpu_total_vram_mib > 0
+                and self.gpu_free_vram_mib >= vm.gpu_vram_budget_mib
+            )
+        )
+        return ram_ok and vcpu_ok and gpu_ok
 
 
 @dataclass
@@ -102,6 +122,7 @@ class VmState:
     remote_pages:   int          = 0
     avg_cpu_pct:    float        = 0.0
     throttle_ratio: float        = 0.0
+    gpu_vram_budget_mib: int     = 0
     idle_since:     Optional[float] = None   # timestamp monotonic depuis quand idle
 
     @property
@@ -161,6 +182,9 @@ class MigrationThresholds:
 
     # Remote paging
     remote_paging_pct: float = 60.0   # > 60% de la RAM en distant → migrer
+
+    # GPU
+    gpu_high_pct: float = 90.0
 
     # Idle detection
     idle_cpu_pct:        float = 5.0    # < 5% CPU → VM idle
@@ -242,7 +266,7 @@ class MigrationPolicy:
                 # ── 4. Saturation vCPU ─────────────────────────────────────
                 if (vm.throttle_ratio > t.vcpu_throttle_trigger
                         and node.vcpu_used_pct > t.vcpu_saturation_pct):
-                    target = self._best_target_vcpu(node_id, node_states)
+                    target = self._best_target_vcpu(node_id, vm, node_states)
                     if target:
                         candidates.append(MigrationCandidate(
                             vm=vm, source=node_id, target=target,
@@ -252,6 +276,25 @@ class MigrationPolicy:
                             detail=(
                                 f"throttle {vm.throttle_ratio:.0%}, "
                                 f"nœud {node.vcpu_used_pct:.0f}% vCPU"
+                            ),
+                        ))
+
+                # ── 5. Saturation GPU réservée ────────────────────────────
+                if (
+                    vm.gpu_vram_budget_mib > 0
+                    and node.gpu_total_vram_mib > 0
+                    and node.gpu_used_pct >= t.gpu_high_pct
+                ):
+                    target = self._best_target(node_id, vm, node_states)
+                    if target:
+                        candidates.append(MigrationCandidate(
+                            vm=vm, source=node_id, target=target,
+                            mtype=self._pick_type(vm, critical=False),
+                            reason=MigrationReason.GPU_SATURATION,
+                            urgency=1,
+                            detail=(
+                                f"GPU réservé {node.gpu_used_pct:.0f}% "
+                                f"({vm.gpu_vram_budget_mib} Mio pour la VM)"
                             ),
                         ))
 
@@ -317,12 +360,12 @@ class MigrationPolicy:
         ]
         if not eligible:
             return None
-        # Meilleur score composite (RAM × 60% + vCPU × 40%)
-        return max(eligible, key=lambda x: x[1].placement_score())[0]
+        return max(eligible, key=lambda x: self._placement_score_for_vm(x[1], vm))[0]
 
     def _best_target_vcpu(
         self,
         source_id: str,
+        vm: VmState,
         nodes: Dict[str, NodeState],
     ) -> Optional[str]:
         """Retourne le nœud avec le plus de vCPU libres."""
@@ -330,7 +373,22 @@ class MigrationPolicy:
             (nid, n) for nid, n in nodes.items()
             if nid != source_id
             and n.vcpu_used_pct < self.thresholds.target_max_vcpu_pct
+            and n.can_accept_vm(vm)
         ]
         if not eligible:
             return None
-        return max(eligible, key=lambda x: x[1].vcpu_free)[0]
+        return max(
+            eligible,
+            key=lambda x: (x[1].vcpu_free, self._placement_score_for_vm(x[1], vm)),
+        )[0]
+
+    def _placement_score_for_vm(self, node: NodeState, vm: VmState) -> float:
+        ram_free_ratio  = 1.0 - node.ram_used_pct / 100.0
+        vcpu_free_ratio = 1.0 - node.vcpu_used_pct / 100.0
+        if vm.gpu_vram_budget_mib <= 0:
+            return ram_free_ratio * 0.6 + vcpu_free_ratio * 0.4
+        gpu_free_ratio = (
+            node.gpu_free_vram_mib / node.gpu_total_vram_mib
+            if node.gpu_total_vram_mib > 0 else 0.0
+        )
+        return ram_free_ratio * 0.45 + vcpu_free_ratio * 0.35 + gpu_free_ratio * 0.20

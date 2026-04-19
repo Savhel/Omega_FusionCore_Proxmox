@@ -240,9 +240,11 @@ class ResilientCollector:
                 remote_pages   = vm.get("remote_pages", 0),
                 remote_mem_mib = vm.get("remote_mem_mib", 0),
                 status         = vm.get("status", "Unknown"),
+                gpu_vram_budget_mib = vm.get("gpu_vram_budget_mib", 0),
             )
             for vm in data.get("local_vms", [])
         ]
+        gpu = data.get("gpu") or {}
 
         return NodeInfo(
             node_id          = data.get("node_id", addr),
@@ -255,6 +257,11 @@ class ResilientCollector:
             store_used_kb    = data.get("store_used_kb", 0),
             local_vms        = vms,
             timestamp_secs   = data.get("timestamp_secs", 0),
+            gpu_enabled      = gpu.get("enabled", False),
+            gpu_total_vram_mib = gpu.get("total_vram_mib", 0),
+            gpu_free_vram_mib = gpu.get("free_vram_mib", 0),
+            gpu_reserved_vram_mib = gpu.get("reserved_vram_mib", 0),
+            gpu_backend_name = gpu.get("backend_name", ""),
             reachable        = True,
         )
 

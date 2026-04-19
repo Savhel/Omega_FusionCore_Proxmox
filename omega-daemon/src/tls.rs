@@ -58,7 +58,7 @@ use tracing::{info, warn};
 #[derive(Debug, Clone)]
 pub struct TlsPaths {
     pub cert_pem: PathBuf,
-    pub key_pem:  PathBuf,
+    pub key_pem: PathBuf,
 }
 
 impl TlsPaths {
@@ -66,7 +66,7 @@ impl TlsPaths {
         let dir = base_dir.as_ref();
         Self {
             cert_pem: dir.join("cert.pem"),
-            key_pem:  dir.join("key.pem"),
+            key_pem: dir.join("key.pem"),
         }
     }
 }
@@ -75,7 +75,7 @@ impl TlsPaths {
 pub struct TlsContext {
     /// Empreinte SHA-256 du certificat local (pour distribuer aux pairs)
     pub fingerprint: String,
-    paths:           TlsPaths,
+    paths: TlsPaths,
 }
 
 impl TlsContext {
@@ -90,13 +90,15 @@ impl TlsContext {
                 "TLS : chargement du certificat existant"
             );
         } else {
-            info!(node_id, "TLS : génération d'un nouveau certificat auto-signé");
-            Self::generate_cert(&paths, node_id)
-                .context("génération certificat TLS")?;
+            info!(
+                node_id,
+                "TLS : génération d'un nouveau certificat auto-signé"
+            );
+            Self::generate_cert(&paths, node_id).context("génération certificat TLS")?;
         }
 
-        let fingerprint = Self::compute_fingerprint(&paths.cert_pem)
-            .context("calcul empreinte certificat")?;
+        let fingerprint =
+            Self::compute_fingerprint(&paths.cert_pem).context("calcul empreinte certificat")?;
 
         info!(fingerprint = %fingerprint, "TLS prêt");
 
@@ -109,7 +111,7 @@ impl TlsContext {
     /// (l'authentification mutuelle est optionnelle en V5).
     pub fn server_config(&self) -> Result<Arc<rustls::ServerConfig>> {
         let certs = Self::load_certs(&self.paths.cert_pem)?;
-        let key   = Self::load_private_key(&self.paths.key_pem)?;
+        let key = Self::load_private_key(&self.paths.key_pem)?;
 
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -138,7 +140,7 @@ impl TlsContext {
 
         // Verifier par empreinte (TOFU)
         let verifier = FingerprintVerifier::new(trusted_fingerprints);
-        let config   = rustls::ClientConfig::builder()
+        let config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
@@ -151,27 +153,25 @@ impl TlsContext {
     fn generate_cert(paths: &TlsPaths, node_id: &str) -> Result<()> {
         use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
 
-        let mut params    = CertificateParams::default();
-        let mut dn        = DistinguishedName::new();
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, format!("omega-node-{}", node_id));
         dn.push(DnType::OrganizationName, "omega-remote-paging");
         params.distinguished_name = dn;
-        params.subject_alt_names  = vec![
-            SanType::DnsName(node_id.to_string().try_into().unwrap()),
-        ];
+        params.subject_alt_names = vec![SanType::DnsName(node_id.to_string().try_into().unwrap())];
         // Valide 10 ans
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2034, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2034, 1, 1);
 
         let key_pair = KeyPair::generate()?;
-        let cert     = params.self_signed(&key_pair)?;
+        let cert = params.self_signed(&key_pair)?;
 
         if let Some(parent) = paths.cert_pem.parent() {
             fs::create_dir_all(parent)?;
         }
 
         fs::write(&paths.cert_pem, cert.pem())?;
-        fs::write(&paths.key_pem,  key_pair.serialize_pem())?;
+        fs::write(&paths.key_pem, key_pair.serialize_pem())?;
 
         // Permissions restrictives sur la clé privée
         #[cfg(unix)]
@@ -201,13 +201,15 @@ impl TlsContext {
         // Utiliser sha2 directement n'est pas dans les dépendances — on fait
         // une empreinte simplifiée avec std (en V5 : sha2 crate)
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        cert_der.iter().for_each(|b| std::hash::Hash::hash(b, &mut hasher));
+        cert_der
+            .iter()
+            .for_each(|b| std::hash::Hash::hash(b, &mut hasher));
         let hash = hasher.finish();
         Ok(format!("{:016x}", hash))
     }
 
     fn load_certs(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-        let f    = fs::File::open(path)?;
+        let f = fs::File::open(path)?;
         let mut reader = BufReader::new(f);
         let certs = rustls_pemfile::certs(&mut reader)
             .filter_map(|r| r.ok())
@@ -216,9 +218,9 @@ impl TlsContext {
     }
 
     fn load_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-        let f      = fs::File::open(path)?;
+        let f = fs::File::open(path)?;
         let mut reader = BufReader::new(f);
-        let key    = rustls_pemfile::private_key(&mut reader)?
+        let key = rustls_pemfile::private_key(&mut reader)?
             .context("clé privée PEM absente ou invalide")?;
         Ok(key)
     }
@@ -233,11 +235,11 @@ struct NoVerifier;
 impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity:     &rustls::pki_types::CertificateDer,
-        _intermediates:  &[rustls::pki_types::CertificateDer],
-        _server_name:    &rustls::pki_types::ServerName,
-        _ocsp_response:  &[u8],
-        _now:            rustls::pki_types::UnixTime,
+        _end_entity: &rustls::pki_types::CertificateDer,
+        _intermediates: &[rustls::pki_types::CertificateDer],
+        _server_name: &rustls::pki_types::ServerName,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
@@ -245,8 +247,8 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert:    &rustls::pki_types::CertificateDer,
-        _dss:     &rustls::DigitallySignedStruct,
+        _cert: &rustls::pki_types::CertificateDer,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
@@ -254,8 +256,8 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert:    &rustls::pki_types::CertificateDer,
-        _dss:     &rustls::DigitallySignedStruct,
+        _cert: &rustls::pki_types::CertificateDer,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
@@ -282,15 +284,17 @@ impl FingerprintVerifier {
 impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
     fn verify_server_cert(
         &self,
-        end_entity:     &rustls::pki_types::CertificateDer,
+        end_entity: &rustls::pki_types::CertificateDer,
         _intermediates: &[rustls::pki_types::CertificateDer],
-        _server_name:   &rustls::pki_types::ServerName,
+        _server_name: &rustls::pki_types::ServerName,
         _ocsp_response: &[u8],
-        _now:           rustls::pki_types::UnixTime,
+        _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         // Calculer l'empreinte du certificat serveur
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        end_entity.iter().for_each(|b| std::hash::Hash::hash(b, &mut hasher));
+        end_entity
+            .iter()
+            .for_each(|b| std::hash::Hash::hash(b, &mut hasher));
         let fingerprint = format!("{:016x}", std::hash::Hasher::finish(&hasher));
 
         if self.trusted.iter().any(|fp| fp == &fingerprint) {
@@ -301,17 +305,18 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
                 trusted     = ?self.trusted,
                 "TLS : empreinte certificat serveur non reconnue"
             );
-            Err(rustls::Error::General(
-                format!("empreinte non autorisée : {}", fingerprint)
-            ))
+            Err(rustls::Error::General(format!(
+                "empreinte non autorisée : {}",
+                fingerprint
+            )))
         }
     }
 
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert:    &rustls::pki_types::CertificateDer,
-        _dss:     &rustls::DigitallySignedStruct,
+        _cert: &rustls::pki_types::CertificateDer,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
@@ -319,8 +324,8 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert:    &rustls::pki_types::CertificateDer,
-        _dss:     &rustls::DigitallySignedStruct,
+        _cert: &rustls::pki_types::CertificateDer,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
@@ -356,7 +361,9 @@ pub fn build_tls_acceptor(ctx: &TlsContext) -> Result<tokio_rustls::TlsAcceptor>
 /// Crée un `tokio_rustls::TlsConnector` avec vérification par empreinte.
 ///
 /// À utiliser dans `remote.rs` (node-a-agent) pour les connexions vers les stores.
-pub fn build_tls_connector(trusted_fingerprints: Vec<String>) -> Result<tokio_rustls::TlsConnector> {
+pub fn build_tls_connector(
+    trusted_fingerprints: Vec<String>,
+) -> Result<tokio_rustls::TlsConnector> {
     let config = TlsContext::client_config(trusted_fingerprints)?;
     Ok(tokio_rustls::TlsConnector::from(config))
 }

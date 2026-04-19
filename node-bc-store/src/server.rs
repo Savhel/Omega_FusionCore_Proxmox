@@ -4,8 +4,8 @@
 //! sont partagés via `Arc` — aucune copie, pas de verrou global.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -31,13 +31,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
 
     let metrics = Arc::new(StoreMetrics::default());
-    let store   = Arc::new(PageStore::new(metrics.clone()));
+    let store = Arc::new(PageStore::new(metrics.clone()));
 
     // Tâche d'affichage périodique des métriques
     {
         let metrics = metrics.clone();
         let interval = cfg.stats_interval;
-        let node_id  = cfg.node_id.clone();
+        let node_id = cfg.node_id.clone();
         tokio::spawn(async move {
             let mut ticker = time::interval(Duration::from_secs(interval));
             ticker.tick().await; // skip du premier tick immédiat
@@ -62,16 +62,18 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     loop {
         let (stream, peer) = listener.accept().await?;
-        let store   = store.clone();
+        let store = store.clone();
         let metrics = metrics.clone();
         let max_pages = cfg.max_pages;
-        let node_id   = cfg.node_id.clone();
+        let node_id = cfg.node_id.clone();
 
         metrics.connections.fetch_add(1, Ordering::Relaxed);
         info!(peer = %peer, "nouvelle connexion");
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, peer, store, metrics.clone(), max_pages, &node_id).await {
+            if let Err(e) =
+                handle_connection(stream, peer, store, metrics.clone(), max_pages, &node_id).await
+            {
                 // Erreurs de connexion fermée (EOF) sont normales → debug seulement
                 if is_connection_reset(&e) {
                     debug!(peer = %peer, "connexion fermée par le client");
@@ -87,19 +89,19 @@ pub async fn run(cfg: Config) -> Result<()> {
 
 /// Gère une connexion client : boucle de lecture/réponse des messages.
 async fn handle_connection(
-    mut stream:   TcpStream,
-    peer:         SocketAddr,
-    store:        Arc<PageStore>,
-    _metrics:      Arc<StoreMetrics>,
-    max_pages:    u64,
-    node_id:      &str,
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    store: Arc<PageStore>,
+    _metrics: Arc<StoreMetrics>,
+    max_pages: u64,
+    node_id: &str,
 ) -> Result<()> {
     // Split en deux moitiés pour lire et écrire sans conflit de borrow
     let (mut reader, mut writer) = stream.split();
 
     loop {
         let msg = match Message::read_from(&mut reader).await {
-            Ok(m)  => m,
+            Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e.into()),
         };
@@ -125,12 +127,7 @@ async fn handle_connection(
 ///
 /// Retourne toujours un `Message` de réponse, même en cas d'erreur métier
 /// (erreur réseau → propagée en `Err`).
-fn dispatch(
-    msg:       &Message,
-    store:     &Arc<PageStore>,
-    max_pages: u64,
-    node_id:   &str,
-) -> Message {
+fn dispatch(msg: &Message, store: &Arc<PageStore>, max_pages: u64, node_id: &str) -> Message {
     match msg.opcode {
         Opcode::Ping => Message::pong(),
 
@@ -142,7 +139,7 @@ fn dispatch(
 
             let key = PageKey::new(msg.vm_id, msg.page_id);
             match store.put(key, msg.payload.clone()) {
-                Ok(_)    => Message::ok(msg.vm_id, msg.page_id),
+                Ok(_) => Message::ok(msg.vm_id, msg.page_id),
                 Err(err) => Message::error_msg(&err),
             }
         }
@@ -151,7 +148,7 @@ fn dispatch(
             let key = PageKey::new(msg.vm_id, msg.page_id);
             match store.get(&key) {
                 Some(data) => Message::new(Opcode::Ok, msg.vm_id, msg.page_id, data),
-                None       => Message::not_found(msg.vm_id, msg.page_id),
+                None => Message::not_found(msg.vm_id, msg.page_id),
             }
         }
 
@@ -193,8 +190,8 @@ fn is_connection_reset(e: &anyhow::Error) -> bool {
         matches!(
             io_err.kind(),
             std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
         )
     } else {
         false

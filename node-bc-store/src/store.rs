@@ -6,15 +6,15 @@
 //!
 //! `DashMap` offre un sharding interne qui permet la concurrence sans verrou global.
 
-use std::sync::Arc;
-use dashmap::DashMap;
-use crate::protocol::PAGE_SIZE;
 use crate::metrics::StoreMetrics;
+use crate::protocol::PAGE_SIZE;
+use dashmap::DashMap;
+use std::sync::Arc;
 
 /// Clé unique d'une page dans le store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PageKey {
-    pub vm_id:   u32,
+    pub vm_id: u32,
     pub page_id: u64,
 }
 
@@ -28,7 +28,7 @@ impl PageKey {
 ///
 /// Conçu pour être partagé via `Arc<PageStore>` entre toutes les connexions.
 pub struct PageStore {
-    pages:   DashMap<PageKey, Box<[u8]>>,
+    pages: DashMap<PageKey, Box<[u8]>>,
     metrics: Arc<StoreMetrics>,
 }
 
@@ -47,7 +47,8 @@ impl PageStore {
         if data.len() != PAGE_SIZE {
             return Err(format!(
                 "taille incorrecte : {} octets (attendu {})",
-                data.len(), PAGE_SIZE
+                data.len(),
+                PAGE_SIZE
             ));
         }
 
@@ -57,9 +58,13 @@ impl PageStore {
         if existed {
             // Mise à jour : ne compte pas comme une nouvelle page
         } else {
-            self.metrics.pages_stored.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .pages_stored
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.metrics.put_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .put_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(existed)
     }
@@ -68,15 +73,21 @@ impl PageStore {
     ///
     /// Retourne `None` si la page n'existe pas.
     pub fn get(&self, key: &PageKey) -> Option<Vec<u8>> {
-        self.metrics.get_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .get_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         match self.pages.get(key) {
             Some(entry) => {
-                self.metrics.hit_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .hit_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(entry.value().to_vec())
             }
             None => {
-                self.metrics.miss_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .miss_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 None
             }
         }
@@ -88,8 +99,12 @@ impl PageStore {
     pub fn delete(&self, key: &PageKey) -> bool {
         let removed = self.pages.remove(key).is_some();
         if removed {
-            self.metrics.pages_stored.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            self.metrics.delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .pages_stored
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .delete_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         removed
     }
@@ -145,8 +160,8 @@ mod tests {
     #[test]
     fn test_put_get_delete() {
         let store = make_store();
-        let key   = PageKey::new(1, 100);
-        let data  = vec![0x42u8; PAGE_SIZE];
+        let key = PageKey::new(1, 100);
+        let data = vec![0x42u8; PAGE_SIZE];
 
         // Insertion
         assert_eq!(store.put(key.clone(), data.clone()), Ok(false));
@@ -174,18 +189,23 @@ mod tests {
     #[test]
     fn test_wrong_size_rejected() {
         let store = make_store();
-        let key   = PageKey::new(1, 1);
-        let bad   = vec![0u8; 1024]; // pas 4096
+        let key = PageKey::new(1, 1);
+        let bad = vec![0u8; 1024]; // pas 4096
         assert!(store.put(key, bad).is_err());
     }
 
     #[test]
     fn test_miss_increments_counter() {
         let metrics = Arc::new(StoreMetrics::default());
-        let store   = PageStore::new(metrics.clone());
-        let key     = PageKey::new(99, 999);
+        let store = PageStore::new(metrics.clone());
+        let key = PageKey::new(99, 999);
 
         assert!(store.get(&key).is_none());
-        assert_eq!(metrics.miss_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics
+                .miss_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }

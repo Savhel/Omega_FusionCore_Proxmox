@@ -18,15 +18,17 @@
 //!     --peers 192.168.1.2:9200,192.168.1.3:9200
 //! ```
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 extern crate num_cpus;
 
 use anyhow::Result;
 use clap::Parser;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 
 use node_bc_store::metrics::StoreMetrics;
 use node_bc_store::store::PageStore;
@@ -35,9 +37,14 @@ use omega_daemon::balloon::{BalloonMonitor, BalloonStats};
 use omega_daemon::cluster_api::run_api_server;
 use omega_daemon::config::Config;
 use omega_daemon::control_api::build_control_router;
+use omega_daemon::cpu_cgroup::{CgroupCpuController, VmCpuConfig, VmCpuStat};
 use omega_daemon::eviction_engine::EvictionEngine;
 use omega_daemon::fault_bus::{FaultBus, FaultBusConsumer};
+use omega_daemon::gpu_drm_backend::DrmGpuBackend;
+use omega_daemon::gpu_multiplexer::{GpuBackend, GpuMultiplexer};
+use omega_daemon::gpu_runtime::GpuRuntime;
 use omega_daemon::node_state::NodeState;
+use omega_daemon::qmp_vcpu::{HotplugResult, VcpuHotplugManager};
 use omega_daemon::store_server::run_store_server;
 use omega_daemon::tls::{TlsContext, TlsPaths};
 use omega_daemon::vm_tracker::VmTracker;
@@ -60,13 +67,14 @@ async fn main() -> Result<()> {
 
     // ─── Composants partagés ──────────────────────────────────────────────
 
-    let metrics    = Arc::new(StoreMetrics::default());
-    let store      = Arc::new(PageStore::new(metrics.clone()));
+    let metrics = Arc::new(StoreMetrics::default());
+    let store = Arc::new(PageStore::new(metrics.clone()));
     let vm_tracker = Arc::new(VmTracker::new(
         cfg.qemu_pid_dir.clone(),
         cfg.qemu_conf_dir.clone(),
     ));
     let num_pcpus = num_cpus::get();
+    let gpu_runtime = initialize_gpu_runtime(&cfg).await;
     let node_state = Arc::new(NodeState::new(
         cfg.node_id.clone(),
         cfg.store_public_addr(),
@@ -75,19 +83,23 @@ async fn main() -> Result<()> {
         metrics.clone(),
         vm_tracker.clone(),
         num_pcpus,
+        cfg.qemu_pid_dir.clone(),
+        gpu_runtime.clone(),
     ));
 
     // ─── Tâche 1 : Store TCP ──────────────────────────────────────────────
     {
-        let store      = store.clone();
-        let metrics    = metrics.clone();
+        let store = store.clone();
+        let metrics = metrics.clone();
         let vm_tracker = vm_tracker.clone();
-        let listen     = cfg.store_addr();
-        let max_pages  = cfg.max_pages;
-        let node_id    = cfg.node_id.clone();
+        let listen = cfg.store_addr();
+        let max_pages = cfg.max_pages;
+        let node_id = cfg.node_id.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = run_store_server(listen, store, metrics, vm_tracker, max_pages, node_id).await {
+            if let Err(e) =
+                run_store_server(listen, store, metrics, vm_tracker, max_pages, node_id).await
+            {
                 error!(error = %e, "store TCP terminé avec erreur");
             }
         });
@@ -95,7 +107,7 @@ async fn main() -> Result<()> {
 
     // ─── Tâche 2 : API HTTP cluster (/api/*) ─────────────────────────────
     {
-        let state    = node_state.clone();
+        let state = node_state.clone();
         let api_addr = cfg.api_addr();
 
         tokio::spawn(async move {
@@ -107,11 +119,11 @@ async fn main() -> Result<()> {
 
     // ─── Tâche 3 : Canal de contrôle HTTP (/control/*) — fix L2 ──────────
     {
-        let state        = node_state.clone();
+        let state = node_state.clone();
         let control_addr = format!("0.0.0.0:{}", cfg.api_port + 100); // port 9300
 
         tokio::spawn(async move {
-            let app      = build_control_router(state);
+            let app = build_control_router(state);
             let Ok(listener) = tokio::net::TcpListener::bind(&control_addr).await else {
                 error!(addr = %control_addr, "impossible de démarrer le canal contrôle");
                 return;
@@ -123,7 +135,7 @@ async fn main() -> Result<()> {
 
     // ─── Tâche 4 : Découverte des VMs locales (périodique) ───────────────
     if cfg.monitor_vms {
-        let tracker  = vm_tracker.clone();
+        let tracker = vm_tracker.clone();
         let interval = Duration::from_secs(15);
 
         tokio::spawn(async move {
@@ -132,6 +144,65 @@ async fn main() -> Result<()> {
                 if let Err(e) = tracker.refresh_local_vms() {
                     warn!(error = %e, "refresh VMs échoué");
                 }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    // ─── Tâche 4b : Monitoring CPU local + hotplug réel ─────────────────
+    if cfg.monitor_vms {
+        let state = node_state.clone();
+        let tracker = vm_tracker.clone();
+        let interval = Duration::from_millis(cfg.cpu_monitor_interval_ms.max(100));
+        let qmp_dir = cfg.qemu_pid_dir.clone();
+
+        tokio::spawn(async move {
+            let cpu_ctrl = CgroupCpuController::new();
+            let hotplug = VcpuHotplugManager::new(qmp_dir);
+            let mut previous: HashMap<u32, (VmCpuStat, Instant)> = HashMap::new();
+
+            info!(
+                interval_ms = interval.as_millis() as u64,
+                "monitoring CPU local actif"
+            );
+
+            loop {
+                let local_vms = tracker.local_vms_snapshot();
+                let local_ids: HashSet<u32> = local_vms.iter().map(|vm| vm.vmid).collect();
+
+                for vm_state in state.vcpu_scheduler.vm_snapshot() {
+                    if !local_ids.contains(&vm_state.vm_id) {
+                        state.vcpu_scheduler.release_vm(vm_state.vm_id);
+                    }
+                }
+
+                for vm in &local_vms {
+                    ensure_vm_registered(&state, &hotplug, &cpu_ctrl, vm.vmid);
+
+                    let now = Instant::now();
+                    if let Some(stat) = cpu_ctrl.read_cpu_stat(vm.vmid) {
+                        if let Some((before, started_at)) = previous.get(&vm.vmid) {
+                            let elapsed = started_at.elapsed().as_micros() as u64;
+                            let usage_pct =
+                                CgroupCpuController::compute_usage_pct(before, &stat, elapsed);
+                            state.vcpu_scheduler.update_from_cgroup(
+                                vm.vmid,
+                                usage_pct,
+                                stat.throttle_ratio(),
+                            );
+                        }
+                        previous.insert(vm.vmid, (stat, now));
+                    }
+                }
+
+                for vm_id in state.vcpu_scheduler.vms_needing_hotplug() {
+                    apply_hotplug_if_possible(&state, &hotplug, &cpu_ctrl, vm_id);
+                }
+
+                for (vm_id, reason) in state.vcpu_scheduler.vms_needing_migration() {
+                    warn!(vm_id, reason = %reason, "VM candidate à la migration CPU");
+                }
+
                 tokio::time::sleep(interval).await;
             }
         });
@@ -148,12 +219,11 @@ async fn main() -> Result<()> {
 
         let consumer = FaultBusConsumer::new(
             fault_bus.take_receiver().unwrap(),
-            10,   // fenêtre 10 secondes
-            5.0,  // accélération si > 5 fautes/sec
+            10,  // fenêtre 10 secondes
+            5.0, // accélération si > 5 fautes/sec
         );
 
-        let engine = EvictionEngine::new(node_state.clone(), &cfg)
-            .with_fault_bus(consumer);
+        let engine = EvictionEngine::new(node_state.clone(), &cfg).with_fault_bus(consumer);
 
         tokio::spawn(engine.run());
     }
@@ -176,14 +246,15 @@ async fn main() -> Result<()> {
 
     // ─── Tâche 6 : Balloon Monitor — V4 ──────────────────────────────────
     if cfg.monitor_vms {
-        let _qmp_dir        = cfg.qemu_pid_dir.replace("qemu-server", "qemu-server"); // même dossier
+        let _qmp_dir = cfg.qemu_pid_dir.replace("qemu-server", "qemu-server"); // même dossier
         let vm_tracker_ref = vm_tracker.clone();
-        let _threshold      = cfg.evict_threshold_pct;
+        let _threshold = cfg.evict_threshold_pct;
 
         // Le monitor balloon tourne dans un thread dédié (read QMP = bloquant)
         tokio::task::spawn_blocking(move || {
             // Découverte initiale des vmids locaux
-            let vmids: Vec<u32> = vm_tracker_ref.local_vms_snapshot()
+            let vmids: Vec<u32> = vm_tracker_ref
+                .local_vms_snapshot()
                 .iter()
                 .map(|vm| vm.vmid)
                 .collect();
@@ -198,14 +269,14 @@ async fn main() -> Result<()> {
             let monitor = BalloonMonitor::new(
                 // On utilise le répertoire QMP standard Proxmox
                 "/var/run/qemu-server".to_string(),
-                15, // poll toutes les 15s
+                15,   // poll toutes les 15s
                 20.0, // alerte si RAM libre guest < 20%
                 move |vmid: u32, stats: BalloonStats| {
                     warn!(
                         vmid,
-                        free_pct       = format!("{:.1}%", stats.free_pct()),
-                        total_mib      = stats.total_bytes / 1024 / 1024,
-                        major_faults   = stats.major_faults,
+                        free_pct = format!("{:.1}%", stats.free_pct()),
+                        total_mib = stats.total_bytes / 1024 / 1024,
+                        major_faults = stats.major_faults,
                         "BALLOON : pression mémoire guest → éviction accélérée recommandée"
                     );
                     // En V4 : le controller lira cet état via /api/status et décidera
@@ -218,9 +289,9 @@ async fn main() -> Result<()> {
 
     // ─── Tâche 7 : Stats périodiques ─────────────────────────────────────
     {
-        let state    = node_state.clone();
+        let state = node_state.clone();
         let interval = cfg.stats_interval;
-        let node_id  = cfg.node_id.clone();
+        let node_id = cfg.node_id.clone();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(interval));
@@ -240,9 +311,9 @@ async fn main() -> Result<()> {
                 for vm in &snap.local_vms {
                     if vm.remote_pages > 0 {
                         warn!(
-                            vmid          = vm.vmid,
-                            remote_pages  = vm.remote_pages,
-                            remote_mib    = vm.remote_mem_mib,
+                            vmid = vm.vmid,
+                            remote_pages = vm.remote_pages,
+                            remote_mib = vm.remote_mem_mib,
                             "VM avec pages distantes → candidat migration"
                         );
                     }
@@ -259,10 +330,165 @@ async fn main() -> Result<()> {
 }
 
 fn setup_logging(cfg: &Config) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
     match cfg.log_format.as_str() {
-        "json" => fmt().json().with_env_filter(filter).with_current_span(false).init(),
-        _      => fmt().with_env_filter(filter).with_target(false).init(),
+        "json" => fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_current_span(false)
+            .init(),
+        _ => fmt().with_env_filter(filter).with_target(false).init(),
+    }
+}
+
+async fn initialize_gpu_runtime(cfg: &Config) -> Option<Arc<GpuRuntime>> {
+    if !cfg.gpu_enabled {
+        info!("GPU désactivé par configuration");
+        return None;
+    }
+
+    let backend_result = if cfg.gpu_render_node.trim().is_empty() {
+        DrmGpuBackend::open_default()
+    } else {
+        DrmGpuBackend::open(std::path::Path::new(&cfg.gpu_render_node)).map(Arc::new)
+    };
+
+    let backend = match backend_result {
+        Ok(backend) => backend,
+        Err(e) => {
+            warn!(error = %e, "GPU indisponible — multiplexeur désactivé");
+            return None;
+        }
+    };
+
+    let total_vram_mib = if cfg.gpu_total_vram_mib > 0 {
+        cfg.gpu_total_vram_mib
+    } else {
+        backend.total_vram_mib()
+    };
+
+    let render_node = Some(backend.render_node().display().to_string());
+    let backend_name = backend.name().to_string();
+    let backend_trait: Arc<dyn GpuBackend> = backend;
+    let mux = Arc::new(GpuMultiplexer::new(
+        std::path::PathBuf::from(&cfg.gpu_socket_path),
+        backend_trait,
+    ));
+    let runtime = Arc::new(GpuRuntime::new(
+        Arc::clone(&mux),
+        backend_name,
+        render_node,
+        cfg.gpu_socket_path.clone(),
+        total_vram_mib,
+    ));
+
+    tokio::spawn({
+        let mux = Arc::clone(&mux);
+        async move {
+            if let Err(e) = mux.run().await {
+                error!(error = %e, "multiplexeur GPU terminé avec erreur");
+            }
+        }
+    });
+
+    info!(
+        socket = %cfg.gpu_socket_path,
+        total_vram_mib,
+        "multiplexeur GPU initialisé"
+    );
+
+    Some(runtime)
+}
+
+fn ensure_vm_registered(
+    state: &Arc<NodeState>,
+    hotplug: &VcpuHotplugManager,
+    cpu_ctrl: &CgroupCpuController,
+    vm_id: u32,
+) {
+    if state.vcpu_scheduler.has_vm(vm_id) {
+        return;
+    }
+
+    let (min_vcpus, max_vcpus) = hotplug
+        .vcpu_info(vm_id)
+        .map(|info| {
+            (
+                info.online_count.max(1),
+                info.total_count.max(info.online_count).max(1),
+            )
+        })
+        .unwrap_or((1, 1));
+
+    match state.vcpu_scheduler.admit_vm(vm_id, min_vcpus, max_vcpus) {
+        omega_daemon::vcpu_scheduler::VcpuDecision::Allocated { .. } => {
+            let _ = cpu_ctrl.apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(min_vcpus));
+            info!(
+                vm_id,
+                min_vcpus, max_vcpus, "VM enregistrée automatiquement dans le scheduler vCPU"
+            );
+        }
+        omega_daemon::vcpu_scheduler::VcpuDecision::MigrateRequired { reason, .. } => {
+            warn!(
+                vm_id,
+                reason, "VM locale non enregistrée dans le scheduler vCPU faute de capacité"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn apply_hotplug_if_possible(
+    state: &Arc<NodeState>,
+    hotplug: &VcpuHotplugManager,
+    cpu_ctrl: &CgroupCpuController,
+    vm_id: u32,
+) {
+    use omega_daemon::vcpu_scheduler::VcpuDecision;
+
+    let decision = state.vcpu_scheduler.try_hotplug(vm_id);
+    let VcpuDecision::Hotplugged {
+        new_count, slot, ..
+    } = decision
+    else {
+        return;
+    };
+
+    let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) else {
+        return;
+    };
+
+    match hotplug.add_vcpu(vm_id, vm_state.min_vcpus, vm_state.max_vcpus) {
+        HotplugResult::Added {
+            new_count: qmp_count,
+        } => {
+            if let Err(e) = cpu_ctrl.apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count)) {
+                warn!(vm_id, error = %e, "échec mise à jour cpu.max après hotplug");
+            }
+            info!(
+                vm_id,
+                scheduler_count = new_count,
+                qmp_count,
+                "hotplug vCPU appliqué automatiquement"
+            );
+        }
+        HotplugResult::NoSlots { current, max } => {
+            state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
+            warn!(
+                vm_id,
+                current, max, "hotplug QMP impossible — rollback scheduler, migration nécessaire"
+            );
+        }
+        HotplugResult::Unavailable { reason } => {
+            state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
+            warn!(
+                vm_id,
+                reason, "hotplug QMP indisponible — rollback scheduler"
+            );
+        }
+        HotplugResult::Removed { .. } | HotplugResult::AtMin { .. } => {
+            state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
+        }
     }
 }

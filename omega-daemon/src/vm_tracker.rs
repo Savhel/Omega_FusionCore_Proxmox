@@ -24,17 +24,17 @@ use tracing::{debug, warn};
 /// Informations sur une VM QEMU locale.
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalVm {
-    pub vmid:        u32,
-    pub pid:         Option<u32>,
+    pub vmid: u32,
+    pub pid: Option<u32>,
     /// RAM maximale configurée (Mio)
     pub max_mem_mib: u64,
     /// RAM actuellement utilisée par le process QEMU (Ko)
-    pub rss_kb:      u64,
+    pub rss_kb: u64,
     /// Nombre de pages de cette VM stockées dans ce nœud (comme store)
     pub local_stored_pages: u64,
     /// Nombre de pages de cette VM stockées sur des nœuds DISTANTS
     pub remote_pages: u64,
-    pub status:      VmStatus,
+    pub status: VmStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -72,14 +72,14 @@ pub struct VmTracker {
     /// Pages stockées localement pour chaque vm_id (compteur par store)
     pages_stored_per_vm: Arc<dashmap::DashMap<u32, u64>>,
     /// Répertoires de configuration Proxmox
-    pid_dir:  String,
+    pid_dir: String,
     conf_dir: String,
 }
 
 impl VmTracker {
     pub fn new(pid_dir: String, conf_dir: String) -> Self {
         Self {
-            local_vms:           Mutex::new(HashMap::new()),
+            local_vms: Mutex::new(HashMap::new()),
             pages_stored_per_vm: Arc::new(dashmap::DashMap::new()),
             pid_dir,
             conf_dir,
@@ -98,7 +98,10 @@ impl VmTracker {
 
     /// Retourne le nombre de pages de ce vm_id stockées sur ce nœud.
     pub fn pages_stored_for(&self, vm_id: u32) -> u64 {
-        self.pages_stored_per_vm.get(&vm_id).map(|v| *v).unwrap_or(0)
+        self.pages_stored_per_vm
+            .get(&vm_id)
+            .map(|v| *v)
+            .unwrap_or(0)
     }
 
     /// Scanne le système de fichiers Proxmox pour découvrir les VMs locales.
@@ -118,7 +121,7 @@ impl VmTracker {
         for entry in std::fs::read_dir(pid_path)? {
             let entry = entry?;
             let fname = entry.file_name();
-            let name  = fname.to_string_lossy();
+            let name = fname.to_string_lossy();
 
             // Format attendu : "{vmid}.pid"
             if !name.ends_with(".pid") {
@@ -139,8 +142,12 @@ impl VmTracker {
                 .and_then(|s| s.trim().parse::<u32>().ok());
 
             let max_mem_mib = self.read_vm_max_mem(vmid).unwrap_or(0);
-            let rss_kb      = pid.and_then(read_proc_rss).unwrap_or(0);
-            let status      = if pid.is_some() { VmStatus::Running } else { VmStatus::Stopped };
+            let rss_kb = pid.and_then(read_proc_rss).unwrap_or(0);
+            let status = if pid.is_some() {
+                VmStatus::Running
+            } else {
+                VmStatus::Stopped
+            };
 
             let vm = LocalVm {
                 vmid,
@@ -162,7 +169,7 @@ impl VmTracker {
     /// Lit la RAM maximale configurée pour une VM depuis sa conf Proxmox.
     fn read_vm_max_mem(&self, vmid: u32) -> Option<u64> {
         let conf_file = format!("{}/{}.conf", self.conf_dir, vmid);
-        let content   = std::fs::read_to_string(&conf_file).ok()?;
+        let content = std::fs::read_to_string(&conf_file).ok()?;
 
         // Ligne format : "memory: 4096" (en Mio dans les confs Proxmox)
         for line in content.lines() {
@@ -194,7 +201,9 @@ impl VmTracker {
     ///
     /// Une VM est candidate si ses pages distantes dépassent `threshold_pages`.
     pub fn migration_candidates(&self, threshold_pages: u64) -> Vec<LocalVm> {
-        self.local_vms.lock().unwrap()
+        self.local_vms
+            .lock()
+            .unwrap()
             .values()
             .filter(|vm| vm.status == VmStatus::Running && vm.remote_pages >= threshold_pages)
             .cloned()
@@ -208,9 +217,7 @@ fn read_proc_rss(pid: u32) -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             // Format : "VmRSS:    123456 kB"
-            return rest.split_whitespace()
-                .next()
-                .and_then(|s| s.parse().ok());
+            return rest.split_whitespace().next().and_then(|s| s.parse().ok());
         }
     }
     None
@@ -223,7 +230,10 @@ mod tests {
     use super::*;
 
     fn make_tracker() -> VmTracker {
-        VmTracker::new("/tmp/nonexistent-pid".into(), "/tmp/nonexistent-conf".into())
+        VmTracker::new(
+            "/tmp/nonexistent-pid".into(),
+            "/tmp/nonexistent-conf".into(),
+        )
     }
 
     #[test]
@@ -255,7 +265,7 @@ mod tests {
         let vm = LocalVm {
             vmid: 100,
             pid: None,
-            max_mem_mib: 1024,    // 1 Gio = 262144 pages de 4Ko
+            max_mem_mib: 1024, // 1 Gio = 262144 pages de 4Ko
             rss_kb: 0,
             local_stored_pages: 0,
             remote_pages: 26214, // 10% de 262144

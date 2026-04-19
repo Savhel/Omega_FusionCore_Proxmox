@@ -36,22 +36,22 @@ use crate::vm_tracker::VmStatus;
 /// Résultat d'un cycle d'éviction.
 #[derive(Debug, Default)]
 pub struct EvictionResult {
-    pub pages_evicted:    u64,
-    pub vms_considered:   u32,
+    pub pages_evicted: u64,
+    pub vms_considered: u32,
     pub eviction_skipped: bool,
-    pub reason:           String,
+    pub reason: String,
 }
 
 /// Moteur d'éviction — tâche de fond (correction L1 : réactif aux fautes uffd).
 pub struct EvictionEngine {
-    state:            Arc<NodeState>,
-    threshold_pct:    f64,
+    state: Arc<NodeState>,
+    threshold_pct: f64,
     /// Intervalle adaptatif : réduit quand le FaultBus signale une pression uffd
-    check_interval:   AdaptiveInterval,
+    check_interval: AdaptiveInterval,
     /// Consommateur du bus de fautes (optionnel — absent si pas d'agent uffd)
-    fault_consumer:   Option<FaultBusConsumer>,
+    fault_consumer: Option<FaultBusConsumer>,
     /// Exécuteur de migrations (live + cold) — déclenché automatiquement sous pression
-    migration_exec:   Arc<MigrationExecutor>,
+    migration_exec: Arc<MigrationExecutor>,
     /// Politique de décision live vs cold
     migration_policy: MigrationPolicy,
 }
@@ -59,13 +59,13 @@ pub struct EvictionEngine {
 impl EvictionEngine {
     pub fn new(state: Arc<NodeState>, cfg: &Config) -> Self {
         let node_id = state.node_id.clone();
-        let exec    = Arc::new(MigrationExecutor::new(Arc::clone(&state)));
+        let exec = Arc::new(MigrationExecutor::new(Arc::clone(&state)));
         Self {
             state,
-            threshold_pct:    cfg.evict_threshold_pct,
-            check_interval:   AdaptiveInterval::new(10, 2),  // 10s normal, 2s accéléré
-            fault_consumer:   None,
-            migration_exec:   exec,
+            threshold_pct: cfg.evict_threshold_pct,
+            check_interval: AdaptiveInterval::new(10, 2), // 10s normal, 2s accéléré
+            fault_consumer: None,
+            migration_exec: exec,
             migration_policy: MigrationPolicy::new(node_id, MigrationThresholds::default()),
         }
     }
@@ -74,10 +74,7 @@ impl EvictionEngine {
     ///
     /// Appeler avant `run()`. Le moteur accélère son rythme si le taux de
     /// page faults distantes dépasse `accel_threshold_rps`.
-    pub fn with_fault_bus(
-        mut self,
-        consumer:             FaultBusConsumer,
-    ) -> Self {
+    pub fn with_fault_bus(mut self, consumer: FaultBusConsumer) -> Self {
         self.fault_consumer = Some(consumer);
         self
     }
@@ -86,7 +83,7 @@ impl EvictionEngine {
     pub async fn run(mut self) {
         info!(
             threshold_pct = self.threshold_pct,
-            fault_bus     = self.fault_consumer.is_some(),
+            fault_bus = self.fault_consumer.is_some(),
             "moteur d'éviction démarré"
         );
 
@@ -111,7 +108,7 @@ impl EvictionEngine {
 
             if !result.eviction_skipped {
                 info!(
-                    pages_evicted  = result.pages_evicted,
+                    pages_evicted = result.pages_evicted,
                     vms_considered = result.vms_considered,
                     "cycle d'éviction terminé"
                 );
@@ -137,7 +134,10 @@ impl EvictionEngine {
         if usage_pct < self.threshold_pct {
             return EvictionResult {
                 eviction_skipped: true,
-                reason: format!("usage RAM {:.1}% < seuil {:.1}%", usage_pct, self.threshold_pct),
+                reason: format!(
+                    "usage RAM {:.1}% < seuil {:.1}%",
+                    usage_pct, self.threshold_pct
+                ),
                 ..Default::default()
             };
         }
@@ -150,7 +150,8 @@ impl EvictionEngine {
 
         // Identifier les VMs locales sous pression
         let vms = self.state.vm_tracker.local_vms_snapshot();
-        let candidates: Vec<_> = vms.iter()
+        let candidates: Vec<_> = vms
+            .iter()
             .filter(|vm| vm.status == VmStatus::Running)
             .collect();
 
@@ -176,7 +177,9 @@ impl EvictionEngine {
             }
 
             // Vérifier qu'aucune migration pour cette VM n'est déjà en cours
-            let already_running = self.migration_exec.running()
+            let already_running = self
+                .migration_exec
+                .running()
                 .iter()
                 .any(|s| s.request.vm_id == rec.vm_id);
 
@@ -209,12 +212,13 @@ impl EvictionEngine {
         }
 
         EvictionResult {
-            pages_evicted:    0,
-            vms_considered:   candidates.len() as u32,
+            pages_evicted: 0,
+            vms_considered: candidates.len() as u32,
             eviction_skipped: false,
-            reason:           format!(
+            reason: format!(
                 "{} VM(s) sous pression, {} migration(s) déclenchée(s)",
-                candidates.len(), migrations_triggered
+                candidates.len(),
+                migrations_triggered
             ),
         }
     }

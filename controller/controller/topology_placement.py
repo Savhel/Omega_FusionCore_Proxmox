@@ -133,6 +133,15 @@ class TopologyAwarePlacementEngine:
     def required_free_mib(self, vm: VmEntry) -> int:
         return int(vm.max_mem_mib * (1.0 + self.safety_margin))
 
+    def _gpu_ok(self, node: NodeInfo, vm: VmEntry) -> bool:
+        return (
+            vm.gpu_vram_budget_mib == 0
+            or (
+                node.gpu_enabled
+                and node.gpu_free_vram_mib >= vm.gpu_vram_budget_mib
+            )
+        )
+
     def score_node(
         self,
         candidate:   NodeInfo,
@@ -173,9 +182,15 @@ class TopologyAwarePlacementEngine:
                     candidate.node_id, lat, self.max_latency_ms,
                 )
 
-        # ── Score CPU ──────────────────────────────────────────────────────
+        # ── Score CPU / GPU ────────────────────────────────────────────────
         dst_cpu   = dst_topo.cpu_usage if dst_topo else 0.5
         cpu_score = 1.0 - min(1.0, dst_cpu)
+        if vm.gpu_vram_budget_mib > 0:
+            gpu_score = (
+                candidate.gpu_free_vram_mib / candidate.gpu_total_vram_mib
+                if candidate.gpu_total_vram_mib > 0 else 0.0
+            )
+            cpu_score = 0.5 * cpu_score + 0.5 * gpu_score
 
         # ── Score charge migrations ────────────────────────────────────────
         active    = dst_topo.active_migrations if dst_topo else 0
@@ -214,6 +229,7 @@ class TopologyAwarePlacementEngine:
             n for n in cluster.reachable_nodes
             if n.node_id != source_node
             and n.mem_free_mib >= required
+            and self._gpu_ok(n, vm)
         ]
 
         if not candidates:

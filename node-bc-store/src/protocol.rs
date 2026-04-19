@@ -20,7 +20,7 @@
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const MAGIC: u16     = 0x524D;
+pub const MAGIC: u16 = 0x524D;
 pub const PAGE_SIZE: usize = 4096;
 pub const HEADER_SIZE: usize = 20;
 pub const MAX_PAYLOAD: usize = PAGE_SIZE * 2;
@@ -33,18 +33,18 @@ pub const FLAG_COMPRESSED: u8 = 0x01;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
     // Requêtes client → store
-    Ping         = 0x01,
-    PutPage      = 0x10,
-    GetPage      = 0x11,
-    DeletePage   = 0x12,
+    Ping = 0x01,
+    PutPage = 0x10,
+    GetPage = 0x11,
+    DeletePage = 0x12,
     StatsRequest = 0x20,
 
     // Réponses store → client
-    Pong         = 0x02,
-    Ok           = 0x80,
-    NotFound     = 0x81,
-    Error        = 0x82,
-    StatsResponse= 0x21,
+    Pong = 0x02,
+    Ok = 0x80,
+    NotFound = 0x81,
+    Error = 0x82,
+    StatsResponse = 0x21,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -73,9 +73,9 @@ impl TryFrom<u8> for Opcode {
 /// Un message complet (en-tête + payload déjà lu).
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub opcode:  Opcode,
-    pub flags:   u8,
-    pub vm_id:   u32,
+    pub opcode: Opcode,
+    pub flags: u8,
+    pub vm_id: u32,
     pub page_id: u64,
     pub payload: Vec<u8>,
 }
@@ -84,7 +84,13 @@ impl Message {
     // ------------------------------------------------------------------ constructeurs
 
     pub fn new(opcode: Opcode, vm_id: u32, page_id: u64, payload: Vec<u8>) -> Self {
-        Self { opcode, flags: 0, vm_id, page_id, payload }
+        Self {
+            opcode,
+            flags: 0,
+            vm_id,
+            page_id,
+            payload,
+        }
     }
 
     pub fn ping() -> Self {
@@ -143,9 +149,9 @@ impl Message {
             ));
         }
 
-        let opcode  = Opcode::try_from(header[2])?;
-        let flags   = header[3];
-        let vm_id   = u32::from_be_bytes(header[4..8].try_into().unwrap());
+        let opcode = Opcode::try_from(header[2])?;
+        let flags = header[3];
+        let vm_id = u32::from_be_bytes(header[4..8].try_into().unwrap());
         let page_id = u64::from_be_bytes(header[8..16].try_into().unwrap());
         let payload_len = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
 
@@ -161,7 +167,13 @@ impl Message {
             reader.read_exact(&mut payload).await?;
         }
 
-        Ok(Self { opcode, flags, vm_id, page_id, payload })
+        Ok(Self {
+            opcode,
+            flags,
+            vm_id,
+            page_id,
+            payload,
+        })
     }
 
     /// Écrit un message complet sur un stream asynchrone.
@@ -209,8 +221,8 @@ mod tests {
     #[tokio::test]
     async fn test_put_page_roundtrip() {
         let data = vec![0xABu8; PAGE_SIZE];
-        let msg  = Message::put_page(42, 1234, data.clone());
-        let got  = roundtrip(msg).await;
+        let msg = Message::put_page(42, 1234, data.clone());
+        let got = roundtrip(msg).await;
         assert_eq!(got.opcode as u8, Opcode::PutPage as u8);
         assert_eq!(got.vm_id, 42);
         assert_eq!(got.page_id, 1234);
@@ -219,7 +231,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_bad_magic() {
-        let mut buf = vec![0xDEu8, 0xAD, Opcode::Ping as u8, 0, 0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0];
+        let mut buf = vec![
+            0xDEu8,
+            0xAD,
+            Opcode::Ping as u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         let mut reader = tokio::io::BufReader::new(buf.as_slice());
         let res = Message::read_from(&mut reader).await;
         assert!(res.is_err());

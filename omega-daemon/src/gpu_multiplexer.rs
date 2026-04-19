@@ -38,27 +38,30 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::gpu_protocol::{
-    AllocRequest, AllocResponse, GpuHeader, GpuMessage, MsgType,
-};
+use crate::gpu_protocol::{AllocRequest, AllocResponse, GpuHeader, GpuMessage, MsgType};
 
 // ─── Budget VRAM ─────────────────────────────────────────────────────────────
 
 /// Budget VRAM d'une VM (Mio).
 #[derive(Debug, Clone)]
 pub struct VmVramBudget {
-    pub vm_id:        u32,
+    pub vm_id: u32,
     /// Budget total accordé (Mio)
-    pub budget_mib:   u64,
+    pub budget_mib: u64,
     /// VRAM actuellement allouée (Mio)
-    pub used_mib:     u64,
+    pub used_mib: u64,
     /// Nombre de handles VRAM actifs
     pub handle_count: u32,
 }
 
 impl VmVramBudget {
     pub fn new(vm_id: u32, budget_mib: u64) -> Self {
-        Self { vm_id, budget_mib, used_mib: 0, handle_count: 0 }
+        Self {
+            vm_id,
+            budget_mib,
+            used_mib: 0,
+            handle_count: 0,
+        }
     }
 
     pub fn can_alloc_bytes(&self, bytes: u64) -> bool {
@@ -67,20 +70,24 @@ impl VmVramBudget {
     }
 
     pub fn alloc_bytes(&mut self, bytes: u64) -> bool {
-        if !self.can_alloc_bytes(bytes) { return false; }
-        self.used_mib     += bytes.div_ceil(1024 * 1024);
+        if !self.can_alloc_bytes(bytes) {
+            return false;
+        }
+        self.used_mib += bytes.div_ceil(1024 * 1024);
         self.handle_count += 1;
         true
     }
 
     pub fn free_bytes(&mut self, bytes: u64) {
         let mib = bytes.div_ceil(1024 * 1024).min(self.used_mib);
-        self.used_mib      = self.used_mib.saturating_sub(mib);
-        self.handle_count  = self.handle_count.saturating_sub(1);
+        self.used_mib = self.used_mib.saturating_sub(mib);
+        self.handle_count = self.handle_count.saturating_sub(1);
     }
 
     pub fn free_pct(&self) -> f64 {
-        if self.budget_mib == 0 { return 0.0; }
+        if self.budget_mib == 0 {
+            return 0.0;
+        }
         (self.budget_mib - self.used_mib) as f64 / self.budget_mib as f64 * 100.0
     }
 }
@@ -90,16 +97,15 @@ impl VmVramBudget {
 /// Entrée dans la file de commandes GPU.
 #[derive(Debug)]
 pub(crate) struct QueueEntry {
-    msg:      GpuMessage,
-    arrived:  Instant,
+    msg: GpuMessage,
+    arrived: Instant,
     /// Canal de retour pour le résultat (oneshot via mpsc de taille 1)
     reply_tx: mpsc::Sender<GpuMessage>,
 }
 
 impl PartialEq for QueueEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.msg.header.priority == other.msg.header.priority
-            && self.arrived == other.arrived
+        self.msg.header.priority == other.msg.header.priority && self.arrived == other.arrived
     }
 }
 impl Eq for QueueEntry {}
@@ -113,7 +119,10 @@ impl PartialOrd for QueueEntry {
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Priorité décroissante, puis FIFO
-        self.msg.header.priority.cmp(&other.msg.header.priority)
+        self.msg
+            .header
+            .priority
+            .cmp(&other.msg.header.priority)
             .then(other.arrived.cmp(&self.arrived))
     }
 }
@@ -153,11 +162,11 @@ pub enum GpuError {
 impl std::fmt::Display for GpuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DeviceNotFound     => write!(f, "GPU non trouvé"),
-            Self::OutOfVram          => write!(f, "VRAM insuffisante"),
-            Self::InvalidHandle(h)   => write!(f, "handle VRAM invalide: {h}"),
-            Self::SubmitFailed(msg)  => write!(f, "soumission échouée: {msg}"),
-            Self::Timeout            => write!(f, "timeout GPU"),
+            Self::DeviceNotFound => write!(f, "GPU non trouvé"),
+            Self::OutOfVram => write!(f, "VRAM insuffisante"),
+            Self::InvalidHandle(h) => write!(f, "handle VRAM invalide: {h}"),
+            Self::SubmitFailed(msg) => write!(f, "soumission échouée: {msg}"),
+            Self::Timeout => write!(f, "timeout GPU"),
         }
     }
 }
@@ -171,25 +180,25 @@ pub struct GpuMuxState {
     /// File de priorité des commandes en attente
     pub(crate) _queue: Mutex<BinaryHeap<QueueEntry>>,
     /// Statistiques globales
-    pub stats:   Mutex<GpuMuxStats>,
+    pub stats: Mutex<GpuMuxStats>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct GpuMuxStats {
-    pub total_commands:   u64,
-    pub total_allocs:     u64,
-    pub total_frees:      u64,
-    pub rejected_oom:     u64,
-    pub avg_latency_us:   f64,
+    pub total_commands: u64,
+    pub total_allocs: u64,
+    pub total_frees: u64,
+    pub rejected_oom: u64,
+    pub avg_latency_us: f64,
 }
 
 /// Multiplexeur GPU — point d'entrée du démon.
 pub struct GpuMultiplexer {
     socket_path: PathBuf,
-    backend:     Arc<dyn GpuBackend>,
-    state:       Arc<GpuMuxState>,
+    backend: Arc<dyn GpuBackend>,
+    state: Arc<GpuMuxState>,
     /// Canal vers le worker GPU (taille bornée pour backpressure)
-    cmd_tx:      mpsc::Sender<QueueEntry>,
+    cmd_tx: mpsc::Sender<QueueEntry>,
 }
 
 impl GpuMultiplexer {
@@ -198,16 +207,21 @@ impl GpuMultiplexer {
 
         let state = Arc::new(GpuMuxState {
             budgets: RwLock::new(HashMap::new()),
-            _queue:  Mutex::new(BinaryHeap::new()),
-            stats:   Mutex::new(GpuMuxStats::default()),
+            _queue: Mutex::new(BinaryHeap::new()),
+            stats: Mutex::new(GpuMuxStats::default()),
         });
 
         // Lancer le worker GPU en tâche de fond
         let backend_w = Arc::clone(&backend);
-        let state_w   = Arc::clone(&state);
+        let state_w = Arc::clone(&state);
         tokio::spawn(gpu_worker(cmd_rx, backend_w, state_w));
 
-        Self { socket_path, backend, state, cmd_tx }
+        Self {
+            socket_path,
+            backend,
+            state,
+            cmd_tx,
+        }
     }
 
     /// Configure le budget VRAM d'une VM.
@@ -267,13 +281,13 @@ impl GpuMultiplexer {
             // Lire le header
             let mut hbuf = [0u8; crate::gpu_protocol::HEADER_SIZE];
             match stream.read_exact(&mut hbuf).await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e),
             }
 
             let header = match crate::gpu_protocol::GpuHeader::decode(&hbuf) {
-                Ok(h)  => h,
+                Ok(h) => h,
                 Err(e) => {
                     error!("header GPU invalide: {:?}", e);
                     break;
@@ -297,15 +311,9 @@ impl GpuMultiplexer {
             // Traiter les messages de contrôle directement (ALLOC, FREE, SYNC)
             // Les commandes brutes sont envoyées au worker via le canal
             let response = match msg.header.msg_type {
-                MsgType::GpuAlloc => {
-                    Some(self.handle_alloc(&msg).await)
-                }
-                MsgType::GpuFree => {
-                    Some(self.handle_free(&msg).await)
-                }
-                MsgType::GpuSync => {
-                    Some(self.handle_sync(&msg).await)
-                }
+                MsgType::GpuAlloc => Some(self.handle_alloc(&msg).await),
+                MsgType::GpuFree => Some(self.handle_free(&msg).await),
+                MsgType::GpuSync => Some(self.handle_sync(&msg).await),
                 MsgType::GpuCmd => {
                     // Envoyer au worker et attendre le résultat
                     let (reply_tx, mut reply_rx) = mpsc::channel::<GpuMessage>(1);
@@ -321,8 +329,8 @@ impl GpuMultiplexer {
                         // Attente du résultat (timeout 5s)
                         match tokio::time::timeout(Duration::from_secs(5), reply_rx.recv()).await {
                             Ok(Some(resp)) => Some(resp),
-                            Ok(None)       => Some(msg.make_error(0x02, "worker GPU terminé")),
-                            Err(_)         => Some(msg.make_error(0x03, "timeout GPU")),
+                            Ok(None) => Some(msg.make_error(0x02, "worker GPU terminé")),
+                            Err(_) => Some(msg.make_error(0x03, "timeout GPU")),
                         }
                     }
                 }
@@ -360,7 +368,10 @@ impl GpuMultiplexer {
             let mut budgets = self.state.budgets.write().await;
             let budget = budgets.entry(vm_id).or_insert_with(|| {
                 // Budget par défaut si non configuré : 256 Mio
-                warn!(vm_id, "budget VRAM non configuré — utilisation du défaut 256 Mio");
+                warn!(
+                    vm_id,
+                    "budget VRAM non configuré — utilisation du défaut 256 Mio"
+                );
                 VmVramBudget::new(vm_id, 256)
             });
 
@@ -368,8 +379,8 @@ impl GpuMultiplexer {
                 warn!(
                     vm_id,
                     requested_mib = req.size_bytes / (1024 * 1024),
-                    budget_mib    = budget.budget_mib,
-                    used_mib      = budget.used_mib,
+                    budget_mib = budget.budget_mib,
+                    used_mib = budget.used_mib,
                     "GPU_ALLOC refusé — budget VRAM dépassé"
                 );
                 let mut stats = self.state.stats.lock().await;
@@ -384,7 +395,10 @@ impl GpuMultiplexer {
                 let mut stats = self.state.stats.lock().await;
                 stats.total_allocs += 1;
 
-                let resp = AllocResponse { handle, size_bytes: req.size_bytes };
+                let resp = AllocResponse {
+                    handle,
+                    size_bytes: req.size_bytes,
+                };
                 let payload = resp.encode().to_vec();
                 let hdr = GpuHeader::new(
                     MsgType::GpuAllocResp,
@@ -412,7 +426,7 @@ impl GpuMultiplexer {
         if msg.payload.len() < 16 {
             return msg.make_error(0x30, "payload GPU_FREE invalide");
         }
-        let handle     = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap());
+        let handle = u64::from_le_bytes(msg.payload[0..8].try_into().unwrap());
         let size_bytes = u64::from_le_bytes(msg.payload[8..16].try_into().unwrap());
 
         // Libérer sur le GPU physique
@@ -434,7 +448,7 @@ impl GpuMultiplexer {
 
     async fn handle_sync(&self, msg: &GpuMessage) -> GpuMessage {
         match self.backend.sync().await {
-            Ok(_)  => msg.make_result(vec![]),
+            Ok(_) => msg.make_result(vec![]),
             Err(e) => msg.make_error(0x40, &e.to_string()),
         }
     }
@@ -446,7 +460,7 @@ impl GpuMultiplexer {
 
     /// Métriques Prometheus.
     pub async fn prometheus_metrics(&self, node_id: &str) -> String {
-        let stats   = self.state.stats.lock().await.clone();
+        let stats = self.state.stats.lock().await.clone();
         let budgets = self.state.budgets.read().await;
         let total_vram_used: u64 = budgets.values().map(|b| b.used_mib).sum();
 
@@ -459,11 +473,11 @@ impl GpuMultiplexer {
              omega_gpu_oom_total{{node=\"{node}\"}} {oom}\n\
              # HELP omega_gpu_vram_used_mib VRAM utilisée (toutes VMs, Mio)\n\
              omega_gpu_vram_used_mib{{node=\"{node}\"}} {vram}\n",
-            node   = node_id,
-            cmds   = stats.total_commands,
+            node = node_id,
+            cmds = stats.total_commands,
             allocs = stats.total_allocs,
-            oom    = stats.rejected_oom,
-            vram   = total_vram_used,
+            oom = stats.rejected_oom,
+            vram = total_vram_used,
         )
     }
 }
@@ -473,15 +487,15 @@ impl GpuMultiplexer {
 /// Tâche unique qui consomme la file et soumet au GPU physique.
 /// La sérialisation est nécessaire car les drivers GPU ne sont pas thread-safe.
 async fn gpu_worker(
-    mut rx:      mpsc::Receiver<QueueEntry>,
-    backend:     Arc<dyn GpuBackend>,
-    state:       Arc<GpuMuxState>,
+    mut rx: mpsc::Receiver<QueueEntry>,
+    backend: Arc<dyn GpuBackend>,
+    state: Arc<GpuMuxState>,
 ) {
     info!(backend = backend.name(), "worker GPU démarré");
 
     while let Some(entry) = rx.recv().await {
         let vm_id = entry.msg.header.vm_id;
-        let seq   = entry.msg.header.seq;
+        let seq = entry.msg.header.seq;
         let start = Instant::now();
 
         let result = backend.submit(&entry.msg.payload).await;
@@ -517,7 +531,7 @@ async fn gpu_worker(
 /// Backend de test qui simule un GPU en mémoire.
 pub struct MockGpuBackend {
     pub vram_total_mib: u64,
-    next_handle:        std::sync::atomic::AtomicU64,
+    next_handle: std::sync::atomic::AtomicU64,
 }
 
 impl MockGpuBackend {
@@ -538,7 +552,8 @@ impl GpuBackend for MockGpuBackend {
     }
 
     async fn alloc_vram(&self, size_bytes: u64, _alignment: u32) -> Result<u64, GpuError> {
-        let handle = self.next_handle
+        let handle = self
+            .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         debug!(handle, size_bytes, "MockGpu: VRAM allouée");
         Ok(handle)
@@ -553,7 +568,9 @@ impl GpuBackend for MockGpuBackend {
         Ok(())
     }
 
-    fn name(&self) -> &str { "MockGpuBackend" }
+    fn name(&self) -> &str {
+        "MockGpuBackend"
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -577,15 +594,15 @@ mod tests {
         assert!(b.can_alloc_bytes(256 * 1024 * 1024));
         assert!(b.alloc_bytes(256 * 1024 * 1024));
         assert_eq!(b.used_mib, 256);
-        assert!(!b.can_alloc_bytes(300 * 1024 * 1024));  // dépasserait 512 Mio
+        assert!(!b.can_alloc_bytes(300 * 1024 * 1024)); // dépasserait 512 Mio
         b.free_bytes(256 * 1024 * 1024);
         assert_eq!(b.used_mib, 0);
     }
 
     #[test]
     fn test_budget_oom_at_limit() {
-        let mut b = VmVramBudget::new(1, 1);  // 1 Mio seulement
-        assert!(!b.alloc_bytes(2 * 1024 * 1024));  // 2 Mio → refus
+        let mut b = VmVramBudget::new(1, 1); // 1 Mio seulement
+        assert!(!b.alloc_bytes(2 * 1024 * 1024)); // 2 Mio → refus
         assert_eq!(b.used_mib, 0);
     }
 
@@ -611,10 +628,19 @@ mod tests {
         let mux = make_mux(1024);
         mux.set_vm_budget(1, 512).await;
 
-        let req     = AllocRequest { size_bytes: 64 * 1024 * 1024, alignment: 4096 };
+        let req = AllocRequest {
+            size_bytes: 64 * 1024 * 1024,
+            alignment: 4096,
+        };
         let payload = req.encode().to_vec();
-        let header  = GpuHeader::new(MsgType::GpuAlloc, 1, 42, payload.len() as u32, Priority::Normal);
-        let msg     = GpuMessage::new(header, payload);
+        let header = GpuHeader::new(
+            MsgType::GpuAlloc,
+            1,
+            42,
+            payload.len() as u32,
+            Priority::Normal,
+        );
+        let msg = GpuMessage::new(header, payload);
 
         let resp = mux.handle_alloc(&msg).await;
         assert_eq!(resp.header.msg_type, MsgType::GpuAllocResp);
@@ -627,12 +653,21 @@ mod tests {
     #[tokio::test]
     async fn test_handle_alloc_oom() {
         let mux = make_mux(1024);
-        mux.set_vm_budget(1, 10).await;  // 10 Mio budget
+        mux.set_vm_budget(1, 10).await; // 10 Mio budget
 
-        let req     = AllocRequest { size_bytes: 100 * 1024 * 1024, alignment: 4096 }; // 100 Mio
+        let req = AllocRequest {
+            size_bytes: 100 * 1024 * 1024,
+            alignment: 4096,
+        }; // 100 Mio
         let payload = req.encode().to_vec();
-        let header  = GpuHeader::new(MsgType::GpuAlloc, 1, 1, payload.len() as u32, Priority::Normal);
-        let msg     = GpuMessage::new(header, payload);
+        let header = GpuHeader::new(
+            MsgType::GpuAlloc,
+            1,
+            1,
+            payload.len() as u32,
+            Priority::Normal,
+        );
+        let msg = GpuMessage::new(header, payload);
 
         let resp = mux.handle_alloc(&msg).await;
         assert_eq!(resp.header.msg_type, MsgType::GpuError);
@@ -642,8 +677,8 @@ mod tests {
     async fn test_handle_sync() {
         let mux = make_mux(1024);
         let header = GpuHeader::new(MsgType::GpuSync, 1, 0, 0, Priority::Normal);
-        let msg    = GpuMessage::new(header, vec![]);
-        let resp   = mux.handle_sync(&msg).await;
+        let msg = GpuMessage::new(header, vec![]);
+        let resp = mux.handle_sync(&msg).await;
         assert_eq!(resp.header.msg_type, MsgType::GpuResult);
     }
 
@@ -658,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prometheus_metrics() {
-        let mux     = make_mux(1024);
+        let mux = make_mux(1024);
         mux.set_vm_budget(1, 512).await;
         let metrics = mux.prometheus_metrics("node1").await;
         assert!(metrics.contains("omega_gpu_commands_total"));

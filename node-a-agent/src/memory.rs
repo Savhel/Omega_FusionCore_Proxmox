@@ -35,18 +35,18 @@ pub const PAGE_SIZE: usize = 4096;
 /// Partageable entre threads via `Arc<MemoryRegion>` (les seuls accès mutables
 /// passent par unsafe avec discipline explicite).
 pub struct MemoryRegion {
-    pub base:       *mut u8,
-    pub size:       usize,
-    pub num_pages:  usize,
-    pub vm_id:      u32,
+    pub base: *mut u8,
+    pub size: usize,
+    pub num_pages: usize,
+    pub vm_id: u32,
 
     /// Pages actuellement externalisées sur un store distant.
     /// Protégé par un Mutex pour accès concurrent handler/main.
-    remote_pages:   std::sync::Mutex<HashSet<u64>>,
+    remote_pages: std::sync::Mutex<HashSet<u64>>,
 
-    store:          Arc<RemoteStorePool>,
-    metrics:        Arc<AgentMetrics>,
-    tokio_handle:   Handle,
+    store: Arc<RemoteStorePool>,
+    metrics: Arc<AgentMetrics>,
+    tokio_handle: Handle,
 }
 
 // SAFETY: base est un pointeur vers une région mmap propre à ce processus.
@@ -61,13 +61,16 @@ impl MemoryRegion {
     ///
     /// La région est PROT_READ|PROT_WRITE mais non encore peuplée.
     pub fn allocate(
-        size_bytes:   usize,
-        vm_id:        u32,
-        store:        Arc<RemoteStorePool>,
-        metrics:      Arc<AgentMetrics>,
+        size_bytes: usize,
+        vm_id: u32,
+        store: Arc<RemoteStorePool>,
+        metrics: Arc<AgentMetrics>,
         tokio_handle: Handle,
     ) -> Result<Self> {
-        assert!(size_bytes.is_multiple_of(PAGE_SIZE), "size_bytes doit être multiple de PAGE_SIZE");
+        assert!(
+            size_bytes.is_multiple_of(PAGE_SIZE),
+            "size_bytes doit être multiple de PAGE_SIZE"
+        );
 
         // SAFETY: mmap standard avec MAP_ANONYMOUS|MAP_PRIVATE.
         let base = unsafe {
@@ -88,15 +91,15 @@ impl MemoryRegion {
 
         let num_pages = size_bytes / PAGE_SIZE;
         info!(
-            base       = format!("{:p}", base),
+            base = format!("{:p}", base),
             size_bytes = size_bytes,
-            num_pages  = num_pages,
+            num_pages = num_pages,
             "région mémoire allouée"
         );
 
         Ok(Self {
-            base:         base as *mut u8,
-            size:         size_bytes,
+            base: base as *mut u8,
+            size: size_bytes,
             num_pages,
             vm_id,
             remote_pages: std::sync::Mutex::new(HashSet::new()),
@@ -115,7 +118,11 @@ impl MemoryRegion {
     /// Écrit `data` dans la page locale `page_id` (bypass uffd — page déjà présente).
     pub fn write_page_local(&self, page_id: u64, data: &[u8; PAGE_SIZE]) -> Result<()> {
         if page_id >= self.num_pages as u64 {
-            bail!("page_id {} hors limites (max {})", page_id, self.num_pages - 1);
+            bail!(
+                "page_id {} hors limites (max {})",
+                page_id,
+                self.num_pages - 1
+            );
         }
         // SAFETY: ptr valide, data valide, pas d'aliasing concurrent sur cette page.
         unsafe {
@@ -170,7 +177,8 @@ impl MemoryRegion {
         // 3. Libération locale (MADV_DONTNEED → page devient "missing" → uffd interceptera)
         let ptr = self.page_ptr(page_id);
         // SAFETY: ptr valide, PAGE_SIZE correct.
-        let ret = unsafe { libc::madvise(ptr as *mut libc::c_void, PAGE_SIZE, libc::MADV_DONTNEED) };
+        let ret =
+            unsafe { libc::madvise(ptr as *mut libc::c_void, PAGE_SIZE, libc::MADV_DONTNEED) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             warn!(page_id, error = %err, "madvise(MADV_DONTNEED) échoué — page non libérée");
@@ -178,7 +186,9 @@ impl MemoryRegion {
 
         // 4. Marquage
         self.remote_pages.lock().unwrap().insert(page_id);
-        self.metrics.pages_evicted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .pages_evicted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         debug!(page_id, "page évinvée vers store");
         Ok(())
@@ -191,7 +201,8 @@ impl MemoryRegion {
         let vm_id = self.vm_id;
         let store = self.store.clone();
 
-        let data = self.tokio_handle
+        let data = self
+            .tokio_handle
             .block_on(store.get_page(vm_id, page_id))
             .with_context(|| format!("fetch_page : GET_PAGE page={page_id} échoué"))?;
 
@@ -202,7 +213,9 @@ impl MemoryRegion {
 
                 // Démarquer comme distant (la page va être réinsérée localement par UFFDIO_COPY)
                 self.remote_pages.lock().unwrap().remove(&page_id);
-                self.metrics.pages_fetched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .pages_fetched
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 Ok(arr)
             }
@@ -210,7 +223,9 @@ impl MemoryRegion {
                 // Page absente du store : on retourne une page zéro
                 // (situation anormale — possible si store redémarré)
                 warn!(page_id, "page absente du store — page zéro retournée");
-                self.metrics.fetch_zeros.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .fetch_zeros
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok([0u8; PAGE_SIZE])
             }
         }

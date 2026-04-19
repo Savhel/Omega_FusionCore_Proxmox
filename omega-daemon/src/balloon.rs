@@ -46,27 +46,31 @@ use tracing::{debug, info, trace, warn};
 #[derive(Debug, Clone, Default)]
 pub struct BalloonStats {
     /// RAM libre dans le guest (octets)
-    pub free_bytes:      u64,
+    pub free_bytes: u64,
     /// RAM disponible dans le guest (octets, avec reclaimable)
     pub available_bytes: u64,
     /// RAM totale visible par le guest (octets)
-    pub total_bytes:     u64,
+    pub total_bytes: u64,
     /// Page faults majeurs depuis démarrage (indicateur de swap)
-    pub major_faults:    u64,
+    pub major_faults: u64,
     /// Taille actuelle du balloon (octets retirés au guest)
-    pub actual_bytes:    u64,
+    pub actual_bytes: u64,
 }
 
 impl BalloonStats {
     /// Pourcentage de RAM libre dans le guest.
     pub fn free_pct(&self) -> f64 {
-        if self.total_bytes == 0 { return 100.0; }
+        if self.total_bytes == 0 {
+            return 100.0;
+        }
         (self.free_bytes as f64 / self.total_bytes as f64) * 100.0
     }
 
     /// Pourcentage de RAM disponible dans le guest.
     pub fn available_pct(&self) -> f64 {
-        if self.total_bytes == 0 { return 100.0; }
+        if self.total_bytes == 0 {
+            return 100.0;
+        }
         (self.available_bytes as f64 / self.total_bytes as f64) * 100.0
     }
 
@@ -78,7 +82,7 @@ impl BalloonStats {
 
 /// Client QMP pour un VMID Proxmox donné.
 pub struct QmpClient {
-    vmid:      u32,
+    vmid: u32,
     sock_path: PathBuf,
 }
 
@@ -97,7 +101,10 @@ impl QmpClient {
     /// n'est pas actif dans le guest.
     pub fn query_stats(&self) -> Result<Option<BalloonStats>> {
         if !self.sock_path.exists() {
-            trace!(vmid = self.vmid, "socket QMP absente — balloon non disponible");
+            trace!(
+                vmid = self.vmid,
+                "socket QMP absente — balloon non disponible"
+            );
             return Ok(None);
         }
 
@@ -131,17 +138,19 @@ impl QmpClient {
             return Ok(None);
         }
 
-        let actual_bytes = balloon_resp["return"]["actual"]
-            .as_u64().unwrap_or(0);
+        let actual_bytes = balloon_resp["return"]["actual"].as_u64().unwrap_or(0);
 
         // ── 4. Interroger les stats guest via QOM ─────────────────────────
-        self.send_json(&mut stream, &json!({
-            "execute": "qom-get",
-            "arguments": {
-                "path": "/machine/peripheral/balloon0",
-                "property": "guest-stats"
-            }
-        }))?;
+        self.send_json(
+            &mut stream,
+            &json!({
+                "execute": "qom-get",
+                "arguments": {
+                    "path": "/machine/peripheral/balloon0",
+                    "property": "guest-stats"
+                }
+            }),
+        )?;
         let stats_resp = self.read_response(&mut reader)?;
 
         if stats_resp.get("error").is_some() {
@@ -156,19 +165,19 @@ impl QmpClient {
         let gs = &stats_resp["return"]["stats"];
 
         let stats = BalloonStats {
-            free_bytes:      self.parse_stat(gs, "stat-free-memory"),
+            free_bytes: self.parse_stat(gs, "stat-free-memory"),
             available_bytes: self.parse_stat(gs, "stat-available-memory"),
-            total_bytes:     self.parse_stat(gs, "stat-total-memory"),
-            major_faults:    self.parse_stat(gs, "stat-major-faults"),
+            total_bytes: self.parse_stat(gs, "stat-total-memory"),
+            major_faults: self.parse_stat(gs, "stat-major-faults"),
             actual_bytes,
         };
 
         debug!(
-            vmid             = self.vmid,
-            free_pct         = format!("{:.1}%", stats.free_pct()),
-            total_mib        = stats.total_bytes / 1024 / 1024,
-            actual_mib       = stats.actual_bytes / 1024 / 1024,
-            major_faults     = stats.major_faults,
+            vmid = self.vmid,
+            free_pct = format!("{:.1}%", stats.free_pct()),
+            total_mib = stats.total_bytes / 1024 / 1024,
+            actual_mib = stats.actual_bytes / 1024 / 1024,
+            major_faults = stats.major_faults,
             "balloon stats lues"
         );
 
@@ -197,20 +206,29 @@ impl QmpClient {
         let _ = self.read_response(&mut reader)?;
 
         // Configurer l'intervalle de polling
-        self.send_json(&mut stream, &json!({
-            "execute": "qom-set",
-            "arguments": {
-                "path": "/machine/peripheral/balloon0",
-                "property": "guest-stats-polling-interval",
-                "value": poll_interval_secs
-            }
-        }))?;
+        self.send_json(
+            &mut stream,
+            &json!({
+                "execute": "qom-set",
+                "arguments": {
+                    "path": "/machine/peripheral/balloon0",
+                    "property": "guest-stats-polling-interval",
+                    "value": poll_interval_secs
+                }
+            }),
+        )?;
         let resp = self.read_response(&mut reader)?;
 
         if resp.get("error").is_some() {
-            warn!(vmid = self.vmid, "impossible de configurer le polling balloon : {:?}", resp);
+            warn!(
+                vmid = self.vmid,
+                "impossible de configurer le polling balloon : {:?}", resp
+            );
         } else {
-            info!(vmid = self.vmid, poll_interval_secs, "polling balloon configuré");
+            info!(
+                vmid = self.vmid,
+                poll_interval_secs, "polling balloon configuré"
+            );
         }
 
         Ok(())
@@ -248,38 +266,38 @@ impl QmpClient {
 
 /// Moniteur balloon — tourne en tâche Tokio, interroge les stats périodiquement.
 pub struct BalloonMonitor {
-    qmp_dir:              String,
-    poll_interval:        Duration,
+    qmp_dir: String,
+    poll_interval: Duration,
     /// Seuil de RAM libre en-dessous duquel on considère le guest sous pression (%)
-    free_threshold_pct:   f64,
+    free_threshold_pct: f64,
     /// Callback déclenché quand un guest est sous pression
     /// Arguments : vmid, BalloonStats
-    on_pressure:          Arc<dyn Fn(u32, BalloonStats) + Send + Sync>,
+    on_pressure: Arc<dyn Fn(u32, BalloonStats) + Send + Sync>,
 }
 
 use std::sync::Arc;
 
 impl BalloonMonitor {
     pub fn new(
-        qmp_dir:            String,
+        qmp_dir: String,
         poll_interval_secs: u64,
         free_threshold_pct: f64,
-        on_pressure:        impl Fn(u32, BalloonStats) + Send + Sync + 'static,
+        on_pressure: impl Fn(u32, BalloonStats) + Send + Sync + 'static,
     ) -> Self {
         Self {
             qmp_dir,
-            poll_interval:      Duration::from_secs(poll_interval_secs),
+            poll_interval: Duration::from_secs(poll_interval_secs),
             free_threshold_pct,
-            on_pressure:        Arc::new(on_pressure),
+            on_pressure: Arc::new(on_pressure),
         }
     }
 
     /// Boucle de surveillance — à lancer dans une tâche Tokio via `tokio::task::spawn_blocking`.
     pub fn run_blocking(self, vmids: Vec<u32>) {
         info!(
-            vms              = vmids.len(),
-            threshold_pct    = self.free_threshold_pct,
-            interval_secs    = self.poll_interval.as_secs(),
+            vms = vmids.len(),
+            threshold_pct = self.free_threshold_pct,
+            interval_secs = self.poll_interval.as_secs(),
             "BalloonMonitor démarré"
         );
 
@@ -301,7 +319,7 @@ impl BalloonMonitor {
                         if stats.is_under_pressure(self.free_threshold_pct) {
                             info!(
                                 vmid,
-                                free_pct  = format!("{:.1}%", stats.free_pct()),
+                                free_pct = format!("{:.1}%", stats.free_pct()),
                                 threshold = format!("{:.1}%", self.free_threshold_pct),
                                 "pression balloon détectée → augmentation taux d'éviction"
                             );
@@ -314,8 +332,8 @@ impl BalloonMonitor {
                             );
                         }
                     }
-                    Ok(None)    => trace!(vmid, "balloon non disponible"),
-                    Err(e)      => debug!(vmid, error = %e, "erreur lecture balloon"),
+                    Ok(None) => trace!(vmid, "balloon non disponible"),
+                    Err(e) => debug!(vmid, error = %e, "erreur lecture balloon"),
                 }
             }
         }

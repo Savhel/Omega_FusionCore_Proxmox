@@ -38,7 +38,11 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub enum FaultEvent {
     /// Page récupérée depuis le store distant.
-    PageServed { vm_id: u32, page_id: u64, latency_us: u64 },
+    PageServed {
+        vm_id: u32,
+        page_id: u64,
+        latency_us: u64,
+    },
     /// Page absente du store → injections de zéros.
     PageMissing { vm_id: u32, page_id: u64 },
     /// Page résolue localement (RAM locale disponible).
@@ -48,9 +52,9 @@ pub enum FaultEvent {
 impl FaultEvent {
     pub fn vm_id(&self) -> u32 {
         match self {
-            Self::PageServed  { vm_id, .. } => *vm_id,
+            Self::PageServed { vm_id, .. } => *vm_id,
             Self::PageMissing { vm_id, .. } => *vm_id,
-            Self::PageLocal   { vm_id, .. } => *vm_id,
+            Self::PageLocal { vm_id, .. } => *vm_id,
         }
     }
 }
@@ -59,15 +63,15 @@ impl FaultEvent {
 #[derive(Debug, Default, Clone)]
 pub struct FaultStats {
     /// Fautes servies depuis le store distant (fenêtre dernière minute)
-    pub remote_served:   u64,
+    pub remote_served: u64,
     /// Fautes sans données dans le store (incohérence)
-    pub store_misses:    u64,
+    pub store_misses: u64,
     /// Fautes locales (RAM dispo)
-    pub local_served:    u64,
+    pub local_served: u64,
     /// Latence moyenne de récupération distante (µs)
-    pub avg_latency_us:  u64,
+    pub avg_latency_us: u64,
     /// Débit de fautes distantes (fautes/sec, fenêtre 10s)
-    pub remote_rps:      f64,
+    pub remote_rps: f64,
 }
 
 impl FaultStats {
@@ -91,12 +95,17 @@ impl FaultBus {
     /// Crée un nouveau bus avec une capacité de file de `capacity` événements.
     pub fn new(capacity: usize) -> Self {
         let (sender, receiver) = mpsc::channel(capacity);
-        Self { sender, receiver: Some(receiver) }
+        Self {
+            sender,
+            receiver: Some(receiver),
+        }
     }
 
     /// Retourne un émetteur clonable pour le handler uffd.
     pub fn sender(&self) -> FaultBusSender {
-        FaultBusSender { inner: self.sender.clone() }
+        FaultBusSender {
+            inner: self.sender.clone(),
+        }
     }
 
     /// Extrait le récepteur (ne peut être appelé qu'une fois).
@@ -127,28 +136,28 @@ impl FaultBusSender {
 /// Accumule les statistiques sur une fenêtre glissante et calcule le débit
 /// de fautes distantes pour permettre à l'EvictionEngine d'accélérer/ralentir.
 pub struct FaultBusConsumer {
-    receiver:             mpsc::Receiver<FaultEvent>,
+    receiver: mpsc::Receiver<FaultEvent>,
     /// Fenêtre temporelle pour le calcul du RPS
-    window:               Duration,
+    window: Duration,
     /// Événements de la fenêtre courante
-    window_events:        Vec<(Instant, FaultEvent)>,
+    window_events: Vec<(Instant, FaultEvent)>,
     /// Stats courantes (recalculées à chaque `poll`)
-    pub stats:            FaultStats,
+    pub stats: FaultStats,
     /// Seuil RPS au-delà duquel on accélère l'éviction
-    pub accel_threshold:  f64,
+    pub accel_threshold: f64,
 }
 
 impl FaultBusConsumer {
     pub fn new(
-        receiver:          mpsc::Receiver<FaultEvent>,
-        window_secs:       u64,
-        accel_threshold:   f64,
+        receiver: mpsc::Receiver<FaultEvent>,
+        window_secs: u64,
+        accel_threshold: f64,
     ) -> Self {
         Self {
             receiver,
-            window:           Duration::from_secs(window_secs),
-            window_events:    Vec::new(),
-            stats:            FaultStats::default(),
+            window: Duration::from_secs(window_secs),
+            window_events: Vec::new(),
+            stats: FaultStats::default(),
             accel_threshold,
         }
     }
@@ -167,27 +176,29 @@ impl FaultBusConsumer {
         self.window_events.retain(|(ts, _)| *ts >= cutoff);
 
         // Recalculer les stats
-        let mut remote_served  = 0u64;
-        let mut store_misses   = 0u64;
-        let mut local_served   = 0u64;
-        let mut total_lat_us   = 0u64;
+        let mut remote_served = 0u64;
+        let mut store_misses = 0u64;
+        let mut local_served = 0u64;
+        let mut total_lat_us = 0u64;
 
         for (_, event) in &self.window_events {
             match event {
                 FaultEvent::PageServed { latency_us, .. } => {
-                    remote_served  += 1;
-                    total_lat_us   += latency_us;
+                    remote_served += 1;
+                    total_lat_us += latency_us;
                 }
                 FaultEvent::PageMissing { .. } => store_misses += 1,
-                FaultEvent::PageLocal { .. }   => local_served  += 1,
+                FaultEvent::PageLocal { .. } => local_served += 1,
             }
         }
 
         let window_secs = self.window.as_secs_f64().max(1.0);
-        let remote_rps  = remote_served as f64 / window_secs;
-        let avg_lat     = if remote_served > 0 {
+        let remote_rps = remote_served as f64 / window_secs;
+        let avg_lat = if remote_served > 0 {
             total_lat_us / remote_served
-        } else { 0 };
+        } else {
+            0
+        };
 
         self.stats = FaultStats {
             remote_served,
@@ -199,8 +210,8 @@ impl FaultBusConsumer {
 
         if self.stats.is_under_fault_pressure(self.accel_threshold) {
             debug!(
-                remote_rps     = format!("{:.1}", remote_rps),
-                threshold      = self.accel_threshold,
+                remote_rps = format!("{:.1}", remote_rps),
+                threshold = self.accel_threshold,
                 avg_latency_us = avg_lat,
                 "FaultBus : pression détectée → accélération éviction"
             );
@@ -230,16 +241,16 @@ impl FaultBusConsumer {
 /// let _sleep_dur = interval.current();
 /// ```
 pub struct AdaptiveInterval {
-    base:         Duration,
-    minimum:      Duration,
-    accelerated:  bool,
+    base: Duration,
+    minimum: Duration,
+    accelerated: bool,
 }
 
 impl AdaptiveInterval {
     pub fn new(base_secs: u64, min_secs: u64) -> Self {
         Self {
-            base:        Duration::from_secs(base_secs),
-            minimum:     Duration::from_secs(min_secs),
+            base: Duration::from_secs(base_secs),
+            minimum: Duration::from_secs(min_secs),
             accelerated: false,
         }
     }
@@ -249,7 +260,7 @@ impl AdaptiveInterval {
         if under_pressure && !self.accelerated {
             info!(
                 base_secs = self.base.as_secs(),
-                min_secs  = self.minimum.as_secs(),
+                min_secs = self.minimum.as_secs(),
                 "AdaptiveInterval : passage en mode accéléré"
             );
         } else if !under_pressure && self.accelerated {
@@ -260,6 +271,10 @@ impl AdaptiveInterval {
 
     /// Retourne l'intervalle courant.
     pub fn current(&self) -> Duration {
-        if self.accelerated { self.minimum } else { self.base }
+        if self.accelerated {
+            self.minimum
+        } else {
+            self.base
+        }
     }
 }

@@ -42,9 +42,9 @@ const UFFDIO_REGISTER_MODE_MISSING: u64 = 1 << 0;
 
 // Numéros ioctl (calculés selon _IOWR(_UFFDIO=0xAA, nr, sizeof(struct)))
 // Vérifiables via `strace` ou <linux/userfaultfd.h>.
-const UFFDIO_API:      libc::c_ulong = 0xC018AA3F;
+const UFFDIO_API: libc::c_ulong = 0xC018AA3F;
 const UFFDIO_REGISTER: libc::c_ulong = 0xC020AA00;
-const UFFDIO_COPY:     libc::c_ulong = 0xC028AA03;
+const UFFDIO_COPY: libc::c_ulong = 0xC028AA03;
 
 // Événement page fault
 const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
@@ -58,45 +58,45 @@ const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1 << 1;
 
 #[repr(C)]
 struct UffdioApi {
-    api:      u64, // version demandée
+    api: u64,      // version demandée
     features: u64, // features demandées (entrée) / disponibles (sortie)
-    ioctls:   u64, // ioctls disponibles (sortie)
+    ioctls: u64,   // ioctls disponibles (sortie)
 }
 
 #[repr(C)]
 struct UffdioRange {
     start: u64,
-    len:   u64,
+    len: u64,
 }
 
 #[repr(C)]
 struct UffdioRegister {
-    range:  UffdioRange,
-    mode:   u64,
+    range: UffdioRange,
+    mode: u64,
     ioctls: u64, // sortie : ioctls disponibles sur la région
 }
 
 #[repr(C)]
 struct UffdioCopy {
-    dst:  u64,   // destination page-alignée dans la région fautée
-    src:  u64,   // source (notre buffer de page)
-    len:  u64,   // PAGE_SIZE
-    mode: u64,   // 0 = wake le thread fauteur
-    copy: i64,   // sortie : octets copiés (négatif = errno)
+    dst: u64,  // destination page-alignée dans la région fautée
+    src: u64,  // source (notre buffer de page)
+    len: u64,  // PAGE_SIZE
+    mode: u64, // 0 = wake le thread fauteur
+    copy: i64, // sortie : octets copiés (négatif = errno)
 }
 
 /// Format du message lu depuis le fd uffd (32 octets sur x86-64).
 #[repr(C, packed)]
 struct UffdMsg {
-    event:     u8,
+    event: u8,
     reserved1: u8,
     reserved2: u16,
     reserved3: u32,
     // union — on lit les champs pagefault directement
-    flags:     u64,
-    address:   u64,
-    ptid:      u32,
-    _pad:      u32,
+    flags: u64,
+    address: u64,
+    ptid: u32,
+    _pad: u32,
 }
 
 const UFFD_MSG_SIZE: usize = std::mem::size_of::<UffdMsg>();
@@ -115,10 +115,7 @@ impl UffdHandle {
     pub fn open() -> Result<Self> {
         // SAFETY: syscall standard, flags validés.
         let fd = unsafe {
-            libc::syscall(
-                SYS_USERFAULTFD,
-                libc::O_CLOEXEC | libc::O_NONBLOCK,
-            ) as libc::c_int
+            libc::syscall(SYS_USERFAULTFD, libc::O_CLOEXEC | libc::O_NONBLOCK) as libc::c_int
         };
 
         if fd < 0 {
@@ -130,9 +127,9 @@ impl UffdHandle {
 
         // Négociation API
         let mut api = UffdioApi {
-            api:      UFFD_API,
+            api: UFFD_API,
             features: UFFD_FEATURES_NONE,
-            ioctls:   0,
+            ioctls: 0,
         };
 
         // SAFETY: fd valide, structure correctement alignée.
@@ -147,10 +144,18 @@ impl UffdHandle {
         if api.api != UFFD_API {
             // SAFETY: fd valide.
             unsafe { libc::close(fd) };
-            bail!("version API incompatible : kernel répond 0x{:02x}, attendu 0x{:02x}", api.api, UFFD_API);
+            bail!(
+                "version API incompatible : kernel répond 0x{:02x}, attendu 0x{:02x}",
+                api.api,
+                UFFD_API
+            );
         }
 
-        info!(features = api.features, ioctls = api.ioctls, "API userfaultfd négociée");
+        info!(
+            features = api.features,
+            ioctls = api.ioctls,
+            "API userfaultfd négociée"
+        );
 
         Ok(Self { fd })
     }
@@ -158,8 +163,11 @@ impl UffdHandle {
     /// Enregistre une région mémoire pour les fautes MISSING.
     pub fn register_region(&self, addr: *mut libc::c_void, size: usize) -> Result<()> {
         let mut reg = UffdioRegister {
-            range:  UffdioRange { start: addr as u64, len: size as u64 },
-            mode:   UFFDIO_REGISTER_MODE_MISSING,
+            range: UffdioRange {
+                start: addr as u64,
+                len: size as u64,
+            },
+            mode: UFFDIO_REGISTER_MODE_MISSING,
             ioctls: 0,
         };
 
@@ -171,8 +179,8 @@ impl UffdHandle {
         }
 
         info!(
-            addr   = format!("{:p}", addr),
-            size   = size,
+            addr = format!("{:p}", addr),
+            size = size,
             ioctls = reg.ioctls,
             "région enregistrée avec userfaultfd"
         );
@@ -184,9 +192,9 @@ impl UffdHandle {
     /// Débloque le thread qui a déclenché la faute de page.
     pub fn copy_page(&self, fault_addr: u64, page_data: &[u8; 4096]) -> Result<()> {
         let mut copy = UffdioCopy {
-            dst:  fault_addr,
-            src:  page_data.as_ptr() as u64,
-            len:  4096,
+            dst: fault_addr,
+            src: page_data.as_ptr() as u64,
+            len: 4096,
             mode: 0, // 0 = wake le thread fauteur immédiatement
             copy: 0,
         };
@@ -231,13 +239,13 @@ pub type FaultHandlerFn = Box<dyn Fn(u32, u64, u64, bool) -> Result<[u8; 4096]> 
 /// Ce thread utilise `read()` bloquant (fd en mode non-blocking uniquement pour
 /// l'ouverture — on le repasse en blocking pour la boucle de lecture).
 pub fn spawn_fault_handler_thread(
-    uffd:         UffdHandle,
+    uffd: UffdHandle,
     region_start: u64,
-    page_size:    u64,
-    vm_id:        u32,
-    handler:      FaultHandlerFn,
-    shutdown:     Arc<AtomicBool>,
-    metrics:      Arc<AgentMetrics>,
+    page_size: u64,
+    vm_id: u32,
+    handler: FaultHandlerFn,
+    shutdown: Arc<AtomicBool>,
+    metrics: Arc<AgentMetrics>,
 ) -> std::thread::JoinHandle<()> {
     // On passe le fd en bloquant pour la boucle de lecture
     let fd = uffd.fd();
@@ -255,8 +263,14 @@ pub fn spawn_fault_handler_thread(
             // pendant toute la durée du thread.
             let _uffd_owner = uffd;
             let mut msg_buf = UffdMsg {
-                event: 0, reserved1: 0, reserved2: 0, reserved3: 0,
-                flags: 0, address: 0, ptid: 0, _pad: 0,
+                event: 0,
+                reserved1: 0,
+                reserved2: 0,
+                reserved3: 0,
+                flags: 0,
+                address: 0,
+                ptid: 0,
+                _pad: 0,
             };
 
             info!(tid = ?std::thread::current().id(), "thread uffd-handler démarré");
@@ -292,7 +306,11 @@ pub fn spawn_fault_handler_thread(
                 }
 
                 if n as usize != UFFD_MSG_SIZE {
-                    warn!(n = n, expected = UFFD_MSG_SIZE, "lecture uffd partielle — ignorée");
+                    warn!(
+                        n = n,
+                        expected = UFFD_MSG_SIZE,
+                        "lecture uffd partielle — ignorée"
+                    );
                     continue;
                 }
 
@@ -303,19 +321,21 @@ pub fn spawn_fault_handler_thread(
                 }
 
                 let fault_addr = msg_buf.address;
-                let is_write   = (msg_buf.flags & UFFD_PAGEFAULT_FLAG_WRITE) != 0;
+                let is_write = (msg_buf.flags & UFFD_PAGEFAULT_FLAG_WRITE) != 0;
 
                 // Calcul du page_id à partir de l'adresse fautée et du début de la région
                 let page_id = (fault_addr - region_start) / page_size;
                 // Alignement page de l'adresse fautée
                 let page_aligned_addr = fault_addr & !(page_size - 1);
 
-                metrics.fault_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .fault_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 debug!(
                     fault_addr = format!("0x{:x}", fault_addr),
-                    page_id    = page_id,
-                    is_write   = is_write,
+                    page_id = page_id,
+                    is_write = is_write,
                     "page fault interceptée"
                 );
 
@@ -325,21 +345,31 @@ pub fn spawn_fault_handler_thread(
                     Ok(page_data) => {
                         // SAFETY: fd est valide (fd vit aussi longtemps que ce thread),
                         // page_data est un tableau de 4096 octets sur la pile, aligné.
-                        if let Err(e) = unsafe { uffdio_copy_raw(fd, page_aligned_addr, &page_data) } {
+                        if let Err(e) =
+                            unsafe { uffdio_copy_raw(fd, page_aligned_addr, &page_data) }
+                        {
                             error!(page_id = page_id, error = %e, "UFFDIO_COPY échoué");
-                            metrics.fault_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            metrics
+                                .fault_errors
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         } else {
-                            metrics.fault_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            metrics
+                                .fault_served
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             debug!(page_id = page_id, "page injectée avec succès");
                         }
                     }
                     Err(e) => {
                         error!(page_id = page_id, error = %e, "handler de faute échoué");
-                        metrics.fault_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .fault_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // En cas d'échec : injecter une page zéro pour ne pas bloquer
                         // la VM indéfiniment (comportement défensif V1)
                         let zero_page = [0u8; 4096];
-                        if let Err(e2) = unsafe { uffdio_copy_raw(fd, page_aligned_addr, &zero_page) } {
+                        if let Err(e2) =
+                            unsafe { uffdio_copy_raw(fd, page_aligned_addr, &zero_page) }
+                        {
                             error!(error = %e2, "injection page zéro de secours également échouée");
                         }
                     }
@@ -357,9 +387,9 @@ pub fn spawn_fault_handler_thread(
 /// `fd` doit être un fd userfaultfd valide. `page_data` doit pointer vers 4096 octets valides.
 unsafe fn uffdio_copy_raw(fd: RawFd, dst_addr: u64, page_data: &[u8; 4096]) -> Result<()> {
     let mut copy = UffdioCopy {
-        dst:  dst_addr,
-        src:  page_data.as_ptr() as u64,
-        len:  4096,
+        dst: dst_addr,
+        src: page_data.as_ptr() as u64,
+        len: 4096,
         mode: 0,
         copy: 0,
     };
@@ -371,7 +401,11 @@ unsafe fn uffdio_copy_raw(fd: RawFd, dst_addr: u64, page_data: &[u8; 4096]) -> R
     }
 
     if copy.copy < 0 {
-        bail!("UFFDIO_COPY retourne errno {} @ 0x{:x}", -copy.copy, dst_addr);
+        bail!(
+            "UFFDIO_COPY retourne errno {} @ 0x{:x}",
+            -copy.copy,
+            dst_addr
+        );
     }
 
     Ok(())

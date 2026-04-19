@@ -30,6 +30,7 @@ class VmEntry:
     remote_pages:   int
     remote_mem_mib: int
     status:         str   # "Running" | "Stopped" | "Unknown"
+    gpu_vram_budget_mib: int = 0
 
     @property
     def remote_mem_kb(self) -> int:
@@ -53,6 +54,11 @@ class NodeInfo:
     store_used_kb:    int
     local_vms:        list[VmEntry]
     timestamp_secs:   int
+    gpu_enabled:      bool = False
+    gpu_total_vram_mib: int = 0
+    gpu_free_vram_mib: int = 0
+    gpu_reserved_vram_mib: int = 0
+    gpu_backend_name: str = ""
     reachable:        bool = True
     error:            str  = ""
 
@@ -74,7 +80,9 @@ class NodeInfo:
             node_id=node_id, store_addr="", api_addr=api_addr,
             mem_total_kb=0, mem_available_kb=0, mem_usage_pct=0.0,
             pages_stored=0, store_used_kb=0, local_vms=[],
-            timestamp_secs=0, reachable=False, error=error,
+            timestamp_secs=0, gpu_enabled=False, gpu_total_vram_mib=0,
+            gpu_free_vram_mib=0, gpu_reserved_vram_mib=0, gpu_backend_name="",
+            reachable=False, error=error,
         )
 
 
@@ -165,9 +173,11 @@ class ClusterStateCollector:
                     remote_pages = vm.get("remote_pages", 0),
                     remote_mem_mib = vm.get("remote_mem_mib", 0),
                     status       = vm.get("status", "Unknown"),
+                    gpu_vram_budget_mib = vm.get("gpu_vram_budget_mib", 0),
                 )
                 for vm in data.get("local_vms", [])
             ]
+            gpu = data.get("gpu") or {}
 
             return NodeInfo(
                 node_id          = data.get("node_id", addr),
@@ -180,6 +190,11 @@ class ClusterStateCollector:
                 store_used_kb    = data.get("store_used_kb", 0),
                 local_vms        = vms,
                 timestamp_secs   = data.get("timestamp_secs", 0),
+                gpu_enabled      = gpu.get("enabled", False),
+                gpu_total_vram_mib = gpu.get("total_vram_mib", 0),
+                gpu_free_vram_mib = gpu.get("free_vram_mib", 0),
+                gpu_reserved_vram_mib = gpu.get("reserved_vram_mib", 0),
+                gpu_backend_name = gpu.get("backend_name", ""),
                 reachable        = True,
             )
 

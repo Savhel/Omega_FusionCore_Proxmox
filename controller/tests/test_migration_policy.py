@@ -21,6 +21,8 @@ def make_node(
     ram_pct:   float,
     vcpu_used: int = 10,
     vcpu_total: int = 24,
+    gpu_total: int = 0,
+    gpu_free: int = 0,
     vms: list = None,
 ) -> NodeState:
     total_kb = 32 * 1024 * 1024  # 32 Go
@@ -32,6 +34,8 @@ def make_node(
         mem_available_kb = avail_kb,
         vcpu_total      = vcpu_total,
         vcpu_free       = vcpu_total - vcpu_used,
+        gpu_total_vram_mib = gpu_total,
+        gpu_free_vram_mib = gpu_free,
         local_vms       = vms or [],
     )
 
@@ -43,6 +47,7 @@ def make_vm(
     avg_cpu_pct: float = 50.0,
     throttle:    float = 0.0,
     remote_pct:  float = 0.0,
+    gpu_budget:  int   = 0,
     idle_since:  float = None,
 ) -> VmState:
     total_pages  = max_mem_mib * 256
@@ -55,6 +60,7 @@ def make_vm(
         remote_pages   = remote_pages,
         avg_cpu_pct    = avg_cpu_pct,
         throttle_ratio = throttle,
+        gpu_vram_budget_mib = gpu_budget,
         idle_since     = idle_since,
     )
 
@@ -148,7 +154,7 @@ class TestTargetSelection:
             "node-b": make_node("node-b", ram_pct=40.0, vcpu_used=5,  vcpu_total=24),
             "node-c": make_node("node-c", ram_pct=40.0, vcpu_used=12, vcpu_total=24),
         }
-        target = policy._best_target_vcpu("node-a", nodes)
+        target = policy._best_target_vcpu("node-a", make_vm(99), nodes)
         assert target == "node-b"  # 19 vCPU libres vs 12 pour node-c
 
 
@@ -227,6 +233,29 @@ class TestEvaluateScenarios:
         cpu_candidates = [c for c in candidates if c.reason == MigrationReason.CPU_SATURATION]
         assert len(cpu_candidates) == 1
         assert cpu_candidates[0].mtype == MigrationType.LIVE  # VM throttlée = active
+
+    def test_gpu_budget_filters_invalid_targets(self):
+        policy = default_policy()
+        vm = make_vm(108, status="running", gpu_budget=4096)
+        nodes = {
+            "node-a": make_node("node-a", ram_pct=88.0, gpu_total=8192, gpu_free=1024, vms=[vm]),
+            "node-b": make_node("node-b", ram_pct=30.0, gpu_total=8192, gpu_free=2048),
+            "node-c": make_node("node-c", ram_pct=30.0, gpu_total=8192, gpu_free=6144),
+        }
+        target = policy._best_target("node-a", vm, nodes)
+        assert target == "node-c"
+
+    def test_gpu_saturation_triggers_migration(self):
+        policy = default_policy()
+        vm = make_vm(109, status="running", gpu_budget=4096, avg_cpu_pct=30.0)
+        nodes = {
+            "node-a": make_node("node-a", ram_pct=40.0, gpu_total=8192, gpu_free=256, vms=[vm]),
+            "node-b": make_node("node-b", ram_pct=25.0, gpu_total=8192, gpu_free=6144),
+        }
+        candidates = policy.evaluate(nodes)
+        gpu_candidates = [c for c in candidates if c.reason == MigrationReason.GPU_SATURATION]
+        assert len(gpu_candidates) == 1
+        assert gpu_candidates[0].target == "node-b"
 
     def test_stopped_vm_gets_cold(self):
         policy = default_policy()

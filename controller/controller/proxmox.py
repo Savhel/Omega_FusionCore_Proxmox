@@ -32,6 +32,7 @@ GET /api2/json/nodes/{node}/tasks/{upid}/status
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -182,6 +183,75 @@ class ProxmoxClient:
             if data:
                 return node.name
         return None
+
+    def get_vm_config(self, node: str, vmid: int) -> dict:
+        """Retourne la configuration Proxmox brute d'une VM."""
+        if self._stub_mode:
+            return {}
+        return self._get(f"nodes/{node}/qemu/{vmid}/config") or {}
+
+    @staticmethod
+    def parse_omega_metadata(config: dict) -> dict:
+        """
+        Extrait les métadonnées omega depuis la config Proxmox.
+
+        Sources supportées :
+        - description multiline :
+            omega.gpu_vram_mib=2048
+            omega.min_vcpus=2
+            omega.max_vcpus=8
+        - tags Proxmox :
+            omega-gpu-2048;omega-min-vcpus-2;omega-max-vcpus-8
+
+        Valeurs par défaut :
+        - max_vcpus = sockets × cores si omega.max_vcpus n'est pas déclaré
+        - min_vcpus = max_vcpus // 2 si omega.min_vcpus n'est pas déclaré
+        """
+        result = {
+            "gpu_vram_mib": 0,
+            "min_vcpus": None,
+            "max_vcpus": None,
+        }
+
+        description = config.get("description", "") or ""
+        for line in description.splitlines():
+            if "=" not in line:
+                continue
+            key, value = [part.strip() for part in line.split("=", 1)]
+            if key == "omega.gpu_vram_mib":
+                result["gpu_vram_mib"] = int(value or 0)
+            elif key == "omega.min_vcpus":
+                result["min_vcpus"] = int(value or 0)
+            elif key == "omega.max_vcpus":
+                result["max_vcpus"] = int(value or 0)
+
+        tags = config.get("tags", "") or ""
+        for tag in re.split(r"[;, ]+", tags):
+            if not tag:
+                continue
+            if match := re.fullmatch(r"omega-gpu-(\d+)", tag):
+                result["gpu_vram_mib"] = int(match.group(1))
+            elif match := re.fullmatch(r"omega-min-vcpus-(\d+)", tag):
+                result["min_vcpus"] = int(match.group(1))
+            elif match := re.fullmatch(r"omega-max-vcpus-(\d+)", tag):
+                result["max_vcpus"] = int(match.group(1))
+
+        sockets = int(config.get("sockets", 1) or 1)
+        cores = int(config.get("cores", 1) or 1)
+        inferred_max_vcpus = max(1, sockets * cores)
+
+        if result["max_vcpus"] is None:
+            result["max_vcpus"] = inferred_max_vcpus
+
+        if result["min_vcpus"] is None and result["max_vcpus"] is not None:
+            result["min_vcpus"] = max(1, result["max_vcpus"] // 2)
+
+        max_vcpus = result["max_vcpus"]
+        min_vcpus = result["min_vcpus"]
+        if min_vcpus is not None and max_vcpus is not None and min_vcpus > max_vcpus:
+            result["min_vcpus"] = max_vcpus
+
+        return result
 
     # ─── Migration ────────────────────────────────────────────────────────
 
