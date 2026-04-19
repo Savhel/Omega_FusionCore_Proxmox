@@ -77,6 +77,7 @@ def test_reconcile_uses_real_proxmox_node_name(monkeypatch):
         proxmox=FakeProxmox(),
         vcpu_pool=main.ClusterVcpuPoolPlanner(),
         last_vcpu_migrations={},
+        last_admission_migrations={},
         dry_run=False,
     )
 
@@ -127,6 +128,7 @@ def test_reconcile_stops_after_reposition_request(monkeypatch):
         proxmox=FakeProxmox(),
         vcpu_pool=main.ClusterVcpuPoolPlanner(),
         last_vcpu_migrations={},
+        last_admission_migrations={},
         dry_run=False,
     )
 
@@ -347,6 +349,7 @@ def test_reconcile_processes_smallest_vcpu_deficit_first(monkeypatch):
         proxmox=FakeProxmox(),
         vcpu_pool=main.ClusterVcpuPoolPlanner(),
         last_vcpu_migrations={},
+        last_admission_migrations={},
         dry_run=False,
     )
 
@@ -386,10 +389,72 @@ def test_reconcile_skips_gpu_update_when_vcpu_migration_is_pending(monkeypatch):
         proxmox=FakeProxmox(),
         vcpu_pool=main.ClusterVcpuPoolPlanner(),
         last_vcpu_migrations={},
+        last_admission_migrations={},
         dry_run=False,
     )
 
     assert gpu_calls == []
+
+
+def test_ensure_vm_admitted_uses_cooldown_for_reposition(monkeypatch):
+    class FakeDecision:
+        admitted = True
+        placement_node = "node-c"
+        reason = ""
+
+        @staticmethod
+        def quota_payload():
+            return {"local_budget_mib": 1536, "remote_budget_mib": 512}
+
+    class FakeAdmission:
+        def admit(self, cluster, spec):
+            return FakeDecision()
+
+    posts = []
+
+    def fake_post(url, json, timeout):
+        posts.append((url, json))
+        return FakeResponse({"status": "migration_started", "task_id": 42})
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+
+    vm = make_vm()
+    source = make_node("node-a", vcpu_free=2)
+    source.proxmox_node_name = "pve1"
+    target = make_node("node-c", vcpu_free=8)
+    target.proxmox_node_name = "pve3"
+    last_attempts = {}
+
+    assert main._ensure_vm_admitted(
+        source_node="node-a",
+        source_url="http://node-a:9300",
+        vm=vm,
+        cluster=main.ClusterState(nodes=[]),
+        admission=FakeAdmission(),
+        node_states={"node-a": source, "node-c": target},
+        last_admission_migrations=last_attempts,
+        now=100.0,
+        dry_run=False,
+    ) is True
+    assert posts == [
+        (
+            "http://node-a:9300/control/migrate",
+            {"vm_id": 101, "target": "pve3", "type": "live"},
+        )
+    ]
+
+    assert main._ensure_vm_admitted(
+        source_node="node-a",
+        source_url="http://node-a:9300",
+        vm=vm,
+        cluster=main.ClusterState(nodes=[]),
+        admission=FakeAdmission(),
+        node_states={"node-a": source, "node-c": target},
+        last_admission_migrations=last_attempts,
+        now=120.0,
+        dry_run=False,
+    ) is True
+    assert len(posts) == 1
 
 
 def test_ensure_vm_gpu_placement_migrates_to_less_loaded_gpu_node(monkeypatch):

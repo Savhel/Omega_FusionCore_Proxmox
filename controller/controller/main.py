@@ -74,6 +74,7 @@ log = structlog.get_logger()
 
 GPU_MIGRATION_COOLDOWN_SECS = 120.0
 GPU_LOAD_IMPROVEMENT_PCT = 10.0
+ADMISSION_MIGRATION_COOLDOWN_SECS = 60.0
 
 # ─── Groupe CLI principal ──────────────────────────────────────────────────────
 
@@ -280,6 +281,7 @@ def daemon(
     vcpu_pool = ClusterVcpuPoolPlanner(VcpuPoolConfig())
     last_vcpu_migrations: Dict[int, float] = {}
     last_gpu_migrations: Dict[int, float] = {}
+    last_admission_migrations: Dict[int, float] = {}
 
     log.info(
         "daemon de migration démarré",
@@ -302,6 +304,7 @@ def daemon(
                         vcpu_pool=vcpu_pool,
                         last_vcpu_migrations=last_vcpu_migrations,
                         last_gpu_migrations=last_gpu_migrations,
+                        last_admission_migrations=last_admission_migrations,
                         dry_run=dry_run,
                     )
                 candidates = policy.evaluate(node_states)
@@ -464,6 +467,7 @@ def _reconcile_cluster_resources(
     last_vcpu_migrations: Dict[int, float],
     dry_run: bool,
     last_gpu_migrations: Optional[Dict[int, float]] = None,
+    last_admission_migrations: Optional[Dict[int, float]] = None,
 ) -> None:
     cluster = _build_cluster_state(node_states, node_urls)
     pending_vcpu_profiles: List[Tuple[int, str, str, VmState, dict, int, dict]] = []
@@ -471,6 +475,8 @@ def _reconcile_cluster_resources(
     now = time.time()
     if last_gpu_migrations is None:
         last_gpu_migrations = {}
+    if last_admission_migrations is None:
+        last_admission_migrations = {}
 
     for node_id, node_state in node_states.items():
         source_url = node_urls[node_id]
@@ -485,6 +491,8 @@ def _reconcile_cluster_resources(
                     cluster=cluster,
                     admission=admission,
                     node_states=node_states,
+                    last_admission_migrations=last_admission_migrations,
+                    now=now,
                     dry_run=dry_run,
                 ):
                     continue
@@ -1127,6 +1135,8 @@ def _ensure_vm_admitted(
     cluster: ClusterState,
     admission: AdmissionController,
     node_states: Dict[str, MigNodeState],
+    last_admission_migrations: Dict[int, float],
+    now: float,
     dry_run: bool,
 ) -> bool:
     decision = admission.admit(cluster, VmSpec(vmid=vm.vm_id, max_mem_mib=vm.max_mem_mib))
@@ -1140,6 +1150,21 @@ def _ensure_vm_admitted(
         return False
 
     if decision.placement_node and decision.placement_node != source_node:
+        last_attempt = last_admission_migrations.get(vm.vm_id)
+        if (
+            last_attempt is not None
+            and now - last_attempt < ADMISSION_MIGRATION_COOLDOWN_SECS
+        ):
+            log.info(
+                "repositionnement automatique déjà en attente",
+                vm_id=vm.vm_id,
+                source=source_node,
+                target=decision.placement_node,
+                cooldown_remaining_secs=round(
+                    ADMISSION_MIGRATION_COOLDOWN_SECS - (now - last_attempt), 1
+                ),
+            )
+            return True
         proxmox_target = _proxmox_target_name(node_states, decision.placement_node)
         log.warning(
             "repositionnement automatique de VM",
@@ -1158,6 +1183,15 @@ def _ensure_vm_admitted(
         try:
             resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
             resp.raise_for_status()
+            last_admission_migrations[vm.vm_id] = now
+            data = resp.json()
+            log.info(
+                "repositionnement automatique accepté",
+                vm_id=vm.vm_id,
+                source=source_node,
+                target=decision.placement_node,
+                task_id=data.get("task_id"),
+            )
         except requests.RequestException as exc:
             log.error("échec repositionnement automatique", vm_id=vm.vm_id, error=str(exc))
         return True
