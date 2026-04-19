@@ -176,16 +176,23 @@ impl QmpVcpuClient {
 
         let mut cpus = Vec::new();
         for (idx, cpu) in cpus_json.iter().enumerate() {
+            let thread_id = cpu["thread-id"].as_u64();
+            let qom_path = cpu["qom-path"].as_str().unwrap_or("").to_string();
             cpus.push(VcpuEntry {
                 index: idx,
-                online: cpu["online"].as_bool().unwrap_or(false),
-                thread_id: cpu["thread-id"].as_u64(),
-                qom_path: cpu["qom-path"].as_str().unwrap_or("").to_string(),
+                online: cpu["online"]
+                    .as_bool()
+                    .unwrap_or(thread_id.is_some() || !qom_path.is_empty()),
+                thread_id,
+                qom_path,
             });
         }
 
         let online_count = cpus.iter().filter(|c| c.online).count();
-        let total_count = cpus.len();
+        let total_count = self
+            .query_hotpluggable_cpus()
+            .map(|slots| slots.len().max(cpus.len()))
+            .unwrap_or(cpus.len());
 
         debug!(
             vm_id = self.vm_id,
