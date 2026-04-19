@@ -158,16 +158,27 @@ impl CgroupCpuController {
         let machine_slice = self.cgroup_root.join("machine.slice");
 
         // Chercher le scope QEMU pour ce vmid
-        let entries = fs::read_dir(&machine_slice).ok()?;
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            // Format Proxmox VE : machine-qemu\x2d{vmid}-pve.scope
-            // ou machine-qemu-{vmid}.scope selon la version
-            if (name.contains(&"qemu".to_string()) && name.contains(&vm_id.to_string()))
-                && name.ends_with(".scope")
-            {
-                return Some(entry.path());
+        if let Ok(entries) = fs::read_dir(&machine_slice) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Format Proxmox VE : machine-qemu\x2d{vmid}-pve.scope
+                // ou machine-qemu-{vmid}.scope selon la version
+                if (name.contains("qemu") && name.contains(&vm_id.to_string()))
+                    && name.ends_with(".scope")
+                {
+                    return Some(entry.path());
+                }
             }
+        }
+
+        // Certaines versions/configurations Proxmox placent les VMs sous:
+        //   /sys/fs/cgroup/qemu.slice/<vmid>.scope
+        let qemu_slice = self
+            .cgroup_root
+            .join("qemu.slice")
+            .join(format!("{}.scope", vm_id));
+        if qemu_slice.exists() {
+            return Some(qemu_slice);
         }
 
         // Fallback : chemin direct Proxmox qemu-server
@@ -185,26 +196,42 @@ impl CgroupCpuController {
     /// Liste tous les vmids pour lesquels un cgroup est actif.
     pub fn list_active_vms(&self) -> Vec<u32> {
         let machine_slice = self.cgroup_root.join("machine.slice");
-        let Ok(entries) = fs::read_dir(&machine_slice) else {
-            return vec![];
-        };
-
         let mut vmids = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("qemu") && name.ends_with(".scope") {
-                // Extraire le vmid depuis le nom
-                for part in name.split('-') {
-                    if let Ok(id) = part.parse::<u32>() {
-                        if id > 100 {
-                            // vmids Proxmox commencent à 100
-                            vmids.push(id);
-                            break;
+        if let Ok(entries) = fs::read_dir(&machine_slice) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("qemu") && name.ends_with(".scope") {
+                    // Extraire le vmid depuis le nom
+                    for part in name.split('-') {
+                        if let Ok(id) = part.parse::<u32>() {
+                            if id > 100 {
+                                // vmids Proxmox commencent à 100
+                                vmids.push(id);
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
+
+        let qemu_slice = self.cgroup_root.join("qemu.slice");
+        if let Ok(entries) = fs::read_dir(&qemu_slice) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(id) = name.strip_suffix(".scope") else {
+                    continue;
+                };
+                if let Ok(id) = id.parse::<u32>() {
+                    if id > 100 {
+                        vmids.push(id);
+                    }
+                }
+            }
+        }
+
+        vmids.sort_unstable();
+        vmids.dedup();
         vmids
     }
 
@@ -431,6 +458,28 @@ burst_usec 0\n",
         scope
     }
 
+    fn make_vm_cgroup_qemu_slice(root: &Path, vm_id: u32) -> PathBuf {
+        let scope = root.join("qemu.slice").join(format!("{}.scope", vm_id));
+        fs::create_dir_all(&scope).unwrap();
+        fs::write(scope.join("cpu.weight"), "100\n").unwrap();
+        fs::write(scope.join("cpu.max"), "max 1000000\n").unwrap();
+        fs::write(
+            scope.join("cpu.stat"),
+            "\
+usage_usec 5000000\n\
+user_usec 3000000\n\
+system_usec 2000000\n\
+nr_periods 50\n\
+nr_throttled 3\n\
+throttled_usec 150000\n\
+nr_burst_periods 0\n\
+burst_usec 0\n",
+        )
+        .unwrap();
+        fs::write(scope.join("cpuset.cpus"), "0-3\n").unwrap();
+        scope
+    }
+
     #[test]
     fn test_find_vm_cgroup() {
         let tmp = TempDir::new().unwrap();
@@ -453,6 +502,16 @@ burst_usec 0\n",
         assert_eq!(stat.nr_periods, 50);
         assert_eq!(stat.nr_throttled, 3);
         assert_eq!(stat.throttled_usec, 150_000);
+    }
+
+    #[test]
+    fn test_find_vm_cgroup_in_qemu_slice() {
+        let tmp = TempDir::new().unwrap();
+        make_vm_cgroup_qemu_slice(tmp.path(), 107);
+        let ctrl = CgroupCpuController::with_root(tmp.path());
+        let found = ctrl.find_vm_cgroup(107);
+        assert!(found.is_some(), "cgroup qemu.slice introuvable");
+        assert!(found.unwrap().to_string_lossy().contains("qemu.slice/107.scope"));
     }
 
     #[test]
@@ -545,9 +604,11 @@ burst_usec 0\n",
         make_vm_cgroup(tmp.path(), 200);
         make_vm_cgroup(tmp.path(), 201);
         make_vm_cgroup(tmp.path(), 202);
+        make_vm_cgroup_qemu_slice(tmp.path(), 203);
         let ctrl = CgroupCpuController::with_root(tmp.path());
         let vms = ctrl.list_active_vms();
-        assert_eq!(vms.len(), 3);
+        assert_eq!(vms.len(), 4);
+        assert!(vms.contains(&203));
     }
 
     #[test]
