@@ -457,6 +457,18 @@ def test_ensure_vm_admitted_uses_cooldown_for_reposition(monkeypatch):
     assert len(posts) == 1
 
 
+def test_auto_migration_type_prefers_live_unless_explicitly_stopped():
+    assert main._auto_migration_type(make_vm(101)) == "live"
+
+    unknown = make_vm(102)
+    unknown.status = "unknown"
+    assert main._auto_migration_type(unknown) == "live"
+
+    stopped = make_vm(103)
+    stopped.status = "stopped"
+    assert main._auto_migration_type(stopped) == "cold"
+
+
 def test_ensure_vm_gpu_placement_migrates_to_less_loaded_gpu_node(monkeypatch):
     calls = []
 

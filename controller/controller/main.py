@@ -893,7 +893,7 @@ def _start_auto_migration(
     payload = {
         "vm_id": vm.vm_id,
         "target": proxmox_target,
-        "type": "live" if vm.status == "running" else "cold",
+        "type": _auto_migration_type(vm),
     }
     try:
         resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
@@ -1128,6 +1128,12 @@ def _proxmox_target_name(node_states: Dict[str, MigNodeState], target_node: str)
     return state.proxmox_node_name or target_node
 
 
+def _auto_migration_type(vm: VmState) -> str:
+    if vm.status == "stopped":
+        return "cold"
+    return "live"
+
+
 def _ensure_vm_admitted(
     source_node: str,
     source_url: str,
@@ -1178,7 +1184,7 @@ def _ensure_vm_admitted(
         payload = {
             "vm_id": vm.vm_id,
             "target": proxmox_target,
-            "type": "live" if vm.status == "running" else "cold",
+            "type": _auto_migration_type(vm),
         }
         try:
             resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
@@ -1318,7 +1324,7 @@ def _ensure_vm_vcpu_profile(
             payload = {
                 "vm_id": vm.vm_id,
                 "target": proxmox_target,
-                "type": "live" if vm.status == "running" else "cold",
+                "type": _auto_migration_type(vm),
             }
             try:
                 resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
@@ -1404,7 +1410,7 @@ def _ensure_vm_vcpu_profile(
         payload = {
             "vm_id": vm.vm_id,
             "target": proxmox_target,
-            "type": "live" if vm.status == "running" else "cold",
+            "type": _auto_migration_type(vm),
         }
         try:
             resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
