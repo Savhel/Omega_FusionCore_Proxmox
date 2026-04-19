@@ -3,8 +3,9 @@ use std::io::{self, Read};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use omega_daemon::policy_engine::{
-    admit_batch, admit_vm, evaluate_migrations, pick_migration_type, AdmissionBatchRequest,
-    AdmissionRequest, MigrationEvaluateRequest, PickMigrationTypeRequest,
+    admit_batch, admit_vm, evaluate_gpu_rebalance, evaluate_migrations, pick_migration_type,
+    AdmissionBatchRequest, AdmissionRequest, GpuRebalanceRequest, MigrationEvaluateRequest,
+    PickMigrationTypeRequest,
 };
 
 #[derive(Parser)]
@@ -20,6 +21,7 @@ enum Command {
     Admit,
     AdmitBatch,
     EvaluateMigrations,
+    EvaluateGpuRebalance,
     PickMigrationType,
 }
 
@@ -52,6 +54,12 @@ fn main() -> Result<()> {
             let req: MigrationEvaluateRequest =
                 serde_json::from_str(&input).context("JSON evaluate-migrations invalide")?;
             let out = evaluate_migrations(&req.thresholds, &req.nodes);
+            println!("{}", serde_json::to_string(&out)?);
+        }
+        Command::EvaluateGpuRebalance => {
+            let req: GpuRebalanceRequest =
+                serde_json::from_str(&input).context("JSON evaluate-gpu-rebalance invalide")?;
+            let out = evaluate_gpu_rebalance(&req);
             println!("{}", serde_json::to_string(&out)?);
         }
         Command::PickMigrationType => {

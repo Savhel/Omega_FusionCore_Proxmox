@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -243,6 +243,63 @@ pub struct MigrationCandidatePayload {
     pub mtype: String,
     pub reason: String,
     pub urgency: i64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuRebalanceConfigPayload {
+    #[serde(default = "default_gpu_migration_cooldown_secs")]
+    pub migration_cooldown_secs: f64,
+    #[serde(default = "default_gpu_load_improvement_pct")]
+    pub load_improvement_pct: f64,
+}
+
+fn default_gpu_migration_cooldown_secs() -> f64 {
+    120.0
+}
+
+fn default_gpu_load_improvement_pct() -> f64 {
+    10.0
+}
+
+impl Default for GpuRebalanceConfigPayload {
+    fn default() -> Self {
+        Self {
+            migration_cooldown_secs: default_gpu_migration_cooldown_secs(),
+            load_improvement_pct: default_gpu_load_improvement_pct(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuRebalanceRequest {
+    #[serde(default)]
+    pub config: GpuRebalanceConfigPayload,
+    pub source_node: String,
+    pub required_vcpus: i64,
+    pub gpu_budget_mib: i64,
+    pub now: f64,
+    #[serde(default)]
+    pub last_gpu_migrations: HashMap<i64, f64>,
+    pub vm: MigrationVmStatePayload,
+    pub nodes: Vec<MigrationNodeStatePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuEvictionPayload {
+    pub vm: MigrationVmStatePayload,
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuRebalancePlanPayload {
+    pub action: String,
+    #[serde(default)]
+    pub target_node: String,
+    #[serde(default)]
+    pub evictions: Vec<GpuEvictionPayload>,
+    #[serde(default)]
     pub detail: String,
 }
 
@@ -568,6 +625,79 @@ pub fn evaluate_migrations(
         .collect()
 }
 
+pub fn evaluate_gpu_rebalance(req: &GpuRebalanceRequest) -> GpuRebalancePlanPayload {
+    if req.gpu_budget_mib <= 0 {
+        return GpuRebalancePlanPayload {
+            action: "none".to_string(),
+            target_node: String::new(),
+            evictions: Vec::new(),
+            detail: String::new(),
+        };
+    }
+
+    if let Some(last) = req.last_gpu_migrations.get(&req.vm.vm_id) {
+        if req.now - last < req.config.migration_cooldown_secs {
+            return GpuRebalancePlanPayload {
+                action: "none".to_string(),
+                target_node: String::new(),
+                evictions: Vec::new(),
+                detail: "cooldown".to_string(),
+            };
+        }
+    }
+
+    if let Some(target) = gpu_candidate_target(
+        &req.source_node,
+        &req.vm,
+        &req.nodes,
+        req.required_vcpus,
+        req.gpu_budget_mib,
+        req.config.load_improvement_pct,
+    ) {
+        return GpuRebalancePlanPayload {
+            action: "migrate".to_string(),
+            target_node: target,
+            evictions: Vec::new(),
+            detail: "direct_gpu_rebalance".to_string(),
+        };
+    }
+
+    if let Some((target, evictions)) = find_gpu_space_creation_plan(
+        &req.source_node,
+        &req.vm,
+        &req.nodes,
+        req.required_vcpus,
+        req.gpu_budget_mib,
+        &req.last_gpu_migrations,
+        req.now,
+        req.config.load_improvement_pct,
+        req.config.migration_cooldown_secs,
+    ) {
+        let has_evictions = !evictions.is_empty();
+        return GpuRebalancePlanPayload {
+            action: if has_evictions {
+                "evict_then_migrate".to_string()
+            } else {
+                "migrate".to_string()
+            },
+            target_node: target,
+            evictions,
+            detail: if has_evictions {
+                "gpu_space_creation".to_string()
+            } else {
+                "gpu_rebalance".to_string()
+            },
+        };
+    }
+
+    GpuRebalancePlanPayload {
+        action: "none".to_string(),
+        target_node: String::new(),
+        evictions: Vec::new(),
+        detail: String::new(),
+    }
+}
+
 fn pick_type(
     thresholds: &MigrationThresholdsPayload,
     vm: &MigrationVmStatePayload,
@@ -690,6 +820,175 @@ fn best_target_vcpu(
         .map(|n| n.node_id.clone())
 }
 
+fn target_can_host_vm_with_requirements(
+    node: &MigrationNodeStatePayload,
+    vm: &MigrationVmStatePayload,
+    required_vcpus: i64,
+    gpu_budget_mib: i64,
+) -> bool {
+    if node.vcpu_free < required_vcpus {
+        return false;
+    }
+    if vm.max_mem_mib > 0 && node.mem_available_kb < vm.max_mem_mib * 1024 {
+        return false;
+    }
+    if gpu_budget_mib > 0
+        && (node.gpu_total_vram_mib <= 0 || node.gpu_free_vram_mib < gpu_budget_mib)
+    {
+        return false;
+    }
+    true
+}
+
+fn gpu_candidate_target(
+    source_id: &str,
+    vm: &MigrationVmStatePayload,
+    nodes: &[MigrationNodeStatePayload],
+    required_vcpus: i64,
+    gpu_budget_mib: i64,
+    load_improvement_pct: f64,
+) -> Option<String> {
+    let source = nodes.iter().find(|n| n.node_id == source_id)?;
+    let mut candidates: Vec<&MigrationNodeStatePayload> = nodes
+        .iter()
+        .filter(|n| {
+            n.node_id != source_id
+                && n.gpu_total_vram_mib > 0
+                && target_can_host_vm_with_requirements(n, vm, required_vcpus, gpu_budget_mib)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|n| {
+        (
+            (node_gpu_used_pct(n) * 1000.0) as i64,
+            -n.gpu_free_vram_mib,
+            (node_vcpu_used_pct(n) * 1000.0) as i64,
+            (node_ram_used_pct(n) * 1000.0) as i64,
+        )
+    });
+    let best = candidates[0];
+    if source.gpu_total_vram_mib <= 0
+        || source.gpu_free_vram_mib < gpu_budget_mib
+        || node_gpu_used_pct(source) - node_gpu_used_pct(best) >= load_improvement_pct
+    {
+        return Some(best.node_id.clone());
+    }
+    None
+}
+
+fn best_gpu_eviction_target(
+    source_id: &str,
+    vm: &MigrationVmStatePayload,
+    nodes: &[MigrationNodeStatePayload],
+    blocked_nodes: &HashSet<String>,
+) -> Option<String> {
+    let mut candidates: Vec<&MigrationNodeStatePayload> = nodes
+        .iter()
+        .filter(|n| {
+            n.node_id != source_id
+                && !blocked_nodes.contains(&n.node_id)
+                && n.gpu_total_vram_mib > 0
+                && target_can_host_vm_with_requirements(n, vm, 1, vm.gpu_vram_budget_mib)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|n| {
+        (
+            (node_gpu_used_pct(n) * 1000.0) as i64,
+            -n.gpu_free_vram_mib,
+            (node_vcpu_used_pct(n) * 1000.0) as i64,
+            (node_ram_used_pct(n) * 1000.0) as i64,
+        )
+    });
+    Some(candidates[0].node_id.clone())
+}
+
+fn find_gpu_space_creation_plan(
+    source_id: &str,
+    vm: &MigrationVmStatePayload,
+    nodes: &[MigrationNodeStatePayload],
+    required_vcpus: i64,
+    gpu_budget_mib: i64,
+    last_gpu_migrations: &HashMap<i64, f64>,
+    now: f64,
+    load_improvement_pct: f64,
+    migration_cooldown_secs: f64,
+) -> Option<(String, Vec<GpuEvictionPayload>)> {
+    let source = nodes.iter().find(|n| n.node_id == source_id)?;
+    let mut candidates: Vec<&MigrationNodeStatePayload> = nodes
+        .iter()
+        .filter(|n| {
+            n.node_id != source_id
+                && n.gpu_total_vram_mib >= gpu_budget_mib
+                && n.mem_available_kb >= vm.max_mem_mib * 1024
+                && n.vcpu_free >= required_vcpus
+        })
+        .collect();
+    candidates.sort_by_key(|n| {
+        (
+            (node_gpu_used_pct(n) * 1000.0) as i64,
+            -n.gpu_free_vram_mib,
+            (node_vcpu_used_pct(n) * 1000.0) as i64,
+            (node_ram_used_pct(n) * 1000.0) as i64,
+        )
+    });
+
+    for target in candidates {
+        let improvement = node_gpu_used_pct(source) - node_gpu_used_pct(target);
+        if source.gpu_total_vram_mib > 0
+            && source.gpu_free_vram_mib >= gpu_budget_mib
+            && improvement < load_improvement_pct
+        {
+            continue;
+        }
+
+        let needed_free = gpu_budget_mib - target.gpu_free_vram_mib;
+        if needed_free <= 0 {
+            return Some((target.node_id.clone(), Vec::new()));
+        }
+
+        let mut movable: Vec<(i64, MigrationVmStatePayload, String)> = Vec::new();
+        for resident in &target.local_vms {
+            if resident.vm_id == vm.vm_id || resident.gpu_vram_budget_mib <= 0 {
+                continue;
+            }
+            if let Some(last) = last_gpu_migrations.get(&resident.vm_id) {
+                if now - last < migration_cooldown_secs {
+                    continue;
+                }
+            }
+            let mut blocked = HashSet::new();
+            blocked.insert(target.node_id.clone());
+            if let Some(eviction_target) =
+                best_gpu_eviction_target(&target.node_id, resident, nodes, &blocked)
+            {
+                movable.push((resident.gpu_vram_budget_mib, resident.clone(), eviction_target));
+            }
+        }
+
+        movable.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.vm_id.cmp(&b.1.vm_id)));
+        let mut selected = Vec::new();
+        let mut freed = 0;
+        for (budget, resident, eviction_target) in movable {
+            selected.push(GpuEvictionPayload {
+                vm: resident,
+                source: target.node_id.clone(),
+                target: eviction_target,
+            });
+            freed += budget;
+            if freed >= needed_free {
+                return Some((target.node_id.clone(), selected));
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,5 +1068,127 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].reason, "cpu_saturation");
         assert_eq!(candidates[0].target, "node-b");
+    }
+
+    #[test]
+    fn gpu_rebalance_returns_direct_target() {
+        let req = GpuRebalanceRequest {
+            config: GpuRebalanceConfigPayload::default(),
+            source_node: "node-a".into(),
+            required_vcpus: 2,
+            gpu_budget_mib: 2048,
+            now: 0.0,
+            last_gpu_migrations: HashMap::new(),
+            vm: MigrationVmStatePayload {
+                vm_id: 10,
+                status: "running".into(),
+                max_mem_mib: 2048,
+                rss_kb: 0,
+                remote_pages: 0,
+                avg_cpu_pct: 10.0,
+                throttle_ratio: 0.0,
+                gpu_vram_budget_mib: 512,
+                idle_duration_secs: None,
+            },
+            nodes: vec![
+                MigrationNodeStatePayload {
+                    node_id: "node-a".into(),
+                    mem_total_kb: 16 * 1024 * 1024,
+                    mem_available_kb: 12 * 1024 * 1024,
+                    vcpu_total: 12,
+                    vcpu_free: 4,
+                    gpu_total_vram_mib: 8192,
+                    gpu_free_vram_mib: 512,
+                    local_vms: vec![],
+                },
+                MigrationNodeStatePayload {
+                    node_id: "node-b".into(),
+                    mem_total_kb: 16 * 1024 * 1024,
+                    mem_available_kb: 12 * 1024 * 1024,
+                    vcpu_total: 12,
+                    vcpu_free: 6,
+                    gpu_total_vram_mib: 8192,
+                    gpu_free_vram_mib: 4096,
+                    local_vms: vec![],
+                },
+            ],
+        };
+
+        let plan = evaluate_gpu_rebalance(&req);
+        assert_eq!(plan.action, "migrate");
+        assert_eq!(plan.target_node, "node-b");
+    }
+
+    #[test]
+    fn gpu_rebalance_returns_eviction_plan() {
+        let req = GpuRebalanceRequest {
+            config: GpuRebalanceConfigPayload::default(),
+            source_node: "node-a".into(),
+            required_vcpus: 2,
+            gpu_budget_mib: 4096,
+            now: 0.0,
+            last_gpu_migrations: HashMap::new(),
+            vm: MigrationVmStatePayload {
+                vm_id: 10,
+                status: "running".into(),
+                max_mem_mib: 2048,
+                rss_kb: 0,
+                remote_pages: 0,
+                avg_cpu_pct: 10.0,
+                throttle_ratio: 0.0,
+                gpu_vram_budget_mib: 512,
+                idle_duration_secs: None,
+            },
+            nodes: vec![
+                MigrationNodeStatePayload {
+                    node_id: "node-a".into(),
+                    mem_total_kb: 16 * 1024 * 1024,
+                    mem_available_kb: 12 * 1024 * 1024,
+                    vcpu_total: 12,
+                    vcpu_free: 4,
+                    gpu_total_vram_mib: 8192,
+                    gpu_free_vram_mib: 512,
+                    local_vms: vec![],
+                },
+                MigrationNodeStatePayload {
+                    node_id: "node-b".into(),
+                    mem_total_kb: 16 * 1024 * 1024,
+                    mem_available_kb: 12 * 1024 * 1024,
+                    vcpu_total: 12,
+                    vcpu_free: 6,
+                    gpu_total_vram_mib: 8192,
+                    gpu_free_vram_mib: 2048,
+                    local_vms: vec![MigrationVmStatePayload {
+                        vm_id: 20,
+                        status: "running".into(),
+                        max_mem_mib: 2048,
+                        rss_kb: 0,
+                        remote_pages: 0,
+                        avg_cpu_pct: 10.0,
+                        throttle_ratio: 0.0,
+                        gpu_vram_budget_mib: 2048,
+                        idle_duration_secs: None,
+                    }],
+                },
+                MigrationNodeStatePayload {
+                    node_id: "node-c".into(),
+                    mem_total_kb: 16 * 1024 * 1024,
+                    mem_available_kb: 12 * 1024 * 1024,
+                    vcpu_total: 12,
+                    vcpu_free: 6,
+                    gpu_total_vram_mib: 8192,
+                    gpu_free_vram_mib: 2048,
+                    local_vms: vec![],
+                },
+            ],
+        };
+
+        let plan = evaluate_gpu_rebalance(&req);
+        assert_eq!(plan.action, "evict_then_migrate");
+        assert_eq!(plan.target_node, "node-b");
+        assert_eq!(plan.evictions.len(), 1);
+        assert_eq!(plan.evictions[0].vm.vm_id, 20);
+        assert_eq!(plan.evictions[0].source, "node-b");
+        assert_eq!(plan.evictions[0].target, "node-c");
     }
 }

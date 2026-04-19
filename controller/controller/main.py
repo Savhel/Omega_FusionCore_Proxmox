@@ -37,6 +37,7 @@ from .migration_policy import (
 )
 from .policy import PolicyEngine, PolicyInput, Decision
 from .proxmox import ProxmoxClient
+from .rust_policy import call_policy
 from .store_client import poll_all_stores
 
 # ─── Configuration du logging structuré ───────────────────────────────────────
@@ -278,6 +279,7 @@ def daemon(
     proxmox = ProxmoxClient(base_url=proxmox_url, api_token=proxmox_token)
     vcpu_pool = ClusterVcpuPoolPlanner(VcpuPoolConfig())
     last_vcpu_migrations: Dict[int, float] = {}
+    last_gpu_migrations: Dict[int, float] = {}
 
     log.info(
         "daemon de migration démarré",
@@ -299,6 +301,7 @@ def daemon(
                         proxmox=proxmox,
                         vcpu_pool=vcpu_pool,
                         last_vcpu_migrations=last_vcpu_migrations,
+                        last_gpu_migrations=last_gpu_migrations,
                         dry_run=dry_run,
                     )
                 candidates = policy.evaluate(node_states)
@@ -909,6 +912,61 @@ def _ensure_vm_gpu_placement(
     if gpu_budget_mib <= 0:
         return False
 
+    rust_plan = _rust_gpu_rebalance_plan(
+        source_node=source_node,
+        vm=vm,
+        node_states=node_states,
+        required_vcpus=required_vcpus,
+        gpu_budget_mib=gpu_budget_mib,
+        last_gpu_migrations=last_gpu_migrations,
+        now=now,
+    )
+    if rust_plan is not None:
+        action = rust_plan.get("action", "none")
+        if action == "migrate":
+            return _start_auto_migration(
+                source_url=source_url,
+                node_states=node_states,
+                source_node=source_node,
+                vm=vm,
+                target=rust_plan.get("target_node", ""),
+                detail="rééquilibrage automatique GPU (Rust)",
+                tracker=last_gpu_migrations,
+                now=now,
+                dry_run=dry_run,
+            )
+        if action == "evict_then_migrate":
+            evictions = rust_plan.get("evictions") or []
+            for eviction in evictions:
+                resident_source = eviction["source"]
+                resident_url = node_urls[resident_source]
+                resident_vm = next(
+                    (
+                        resident
+                        for resident in node_states[resident_source].local_vms
+                        if resident.vm_id == eviction["vm"]["vm_id"]
+                    ),
+                    None,
+                )
+                if resident_vm is None:
+                    continue
+                migrated = _start_auto_migration(
+                    source_url=resident_url,
+                    node_states=node_states,
+                    source_node=resident_source,
+                    vm=resident_vm,
+                    target=eviction["target"],
+                    detail="création automatique d'espace GPU par évacuation d'une autre VM (Rust)",
+                    tracker=last_gpu_migrations,
+                    now=now,
+                    dry_run=dry_run,
+                )
+                if migrated:
+                    return True
+            return False
+        if action == "none":
+            return False
+
     last_vm_migration = last_gpu_migrations.get(vm.vm_id)
     if (
         last_vm_migration is not None
@@ -986,6 +1044,73 @@ def _ensure_vm_gpu_placement(
             return True
 
     return False
+
+
+def _rust_gpu_rebalance_plan(
+    source_node: str,
+    vm: VmState,
+    node_states: Dict[str, MigNodeState],
+    required_vcpus: int,
+    gpu_budget_mib: int,
+    last_gpu_migrations: Dict[int, float],
+    now: float,
+) -> Optional[dict]:
+    plan = call_policy(
+        "evaluate-gpu-rebalance",
+        {
+            "config": {
+                "migration_cooldown_secs": GPU_MIGRATION_COOLDOWN_SECS,
+                "load_improvement_pct": GPU_LOAD_IMPROVEMENT_PCT,
+            },
+            "source_node": source_node,
+            "required_vcpus": required_vcpus,
+            "gpu_budget_mib": gpu_budget_mib,
+            "now": now,
+            "last_gpu_migrations": last_gpu_migrations,
+            "vm": {
+                "vm_id": vm.vm_id,
+                "status": vm.status,
+                "max_mem_mib": vm.max_mem_mib,
+                "rss_kb": vm.rss_kb,
+                "remote_pages": vm.remote_pages,
+                "avg_cpu_pct": vm.avg_cpu_pct,
+                "throttle_ratio": vm.throttle_ratio,
+                "gpu_vram_budget_mib": vm.gpu_vram_budget_mib,
+                "idle_duration_secs": vm.idle_duration_secs() if vm.idle_since is not None else None,
+            },
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "mem_total_kb": node.mem_total_kb,
+                    "mem_available_kb": node.mem_available_kb,
+                    "vcpu_total": node.vcpu_total,
+                    "vcpu_free": node.vcpu_free,
+                    "gpu_total_vram_mib": node.gpu_total_vram_mib,
+                    "gpu_free_vram_mib": node.gpu_free_vram_mib,
+                    "local_vms": [
+                        {
+                            "vm_id": local_vm.vm_id,
+                            "status": local_vm.status,
+                            "max_mem_mib": local_vm.max_mem_mib,
+                            "rss_kb": local_vm.rss_kb,
+                            "remote_pages": local_vm.remote_pages,
+                            "avg_cpu_pct": local_vm.avg_cpu_pct,
+                            "throttle_ratio": local_vm.throttle_ratio,
+                            "gpu_vram_budget_mib": local_vm.gpu_vram_budget_mib,
+                            "idle_duration_secs": local_vm.idle_duration_secs()
+                            if local_vm.idle_since is not None
+                            else None,
+                        }
+                        for local_vm in node.local_vms
+                    ],
+                }
+                for node in node_states.values()
+            ],
+        },
+    )
+    if not isinstance(plan, dict):
+        return None
+    return plan
 
 
 def _proxmox_target_name(node_states: Dict[str, MigNodeState], target_node: str) -> str:
