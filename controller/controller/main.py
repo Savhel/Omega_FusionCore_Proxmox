@@ -306,7 +306,11 @@ def daemon(
                         ],
                     )
                     if not dry_run:
-                        _execute_migrations(candidates[:max_concurrent_migrations], node_urls)
+                        _execute_migrations(
+                            candidates[:max_concurrent_migrations],
+                            node_urls,
+                            node_states,
+                        )
                 else:
                     log.debug("aucune migration nécessaire")
 
@@ -449,14 +453,16 @@ def _reconcile_cluster_resources(
         for vm in node_state.local_vms:
             quota = _fetch_vm_quota(source_url, vm.vm_id)
             if quota is None:
-                _ensure_vm_admitted(
+                if _ensure_vm_admitted(
                     source_node=node_id,
                     source_url=source_url,
                     vm=vm,
                     cluster=cluster,
                     admission=admission,
+                    node_states=node_states,
                     dry_run=dry_run,
-                )
+                ):
+                    continue
 
             proxmox_node_name = node_state.proxmox_node_name or node_id
             config = proxmox.get_vm_config(proxmox_node_name, vm.vm_id)
@@ -470,7 +476,7 @@ def _reconcile_cluster_resources(
                     dry_run=dry_run,
                 )
 
-            _ensure_vm_vcpu_profile(
+            if _ensure_vm_vcpu_profile(
                 source_node=node_id,
                 source_url=source_url,
                 vm=vm,
@@ -478,7 +484,8 @@ def _reconcile_cluster_resources(
                 node_states=node_states,
                 gpu_budget_mib=gpu_budget or vm.gpu_vram_budget_mib,
                 dry_run=dry_run,
-            )
+            ):
+                continue
 
 
 def _fetch_vm_quota(source_url: str, vm_id: int) -> Optional[dict]:
@@ -562,14 +569,22 @@ def _best_reconciliation_target(
     return candidates[0].node_id
 
 
+def _proxmox_target_name(node_states: Dict[str, MigNodeState], target_node: str) -> str:
+    state = node_states.get(target_node)
+    if state is None:
+        return target_node
+    return state.proxmox_node_name or target_node
+
+
 def _ensure_vm_admitted(
     source_node: str,
     source_url: str,
     vm: VmState,
     cluster: ClusterState,
     admission: AdmissionController,
+    node_states: Dict[str, MigNodeState],
     dry_run: bool,
-) -> None:
+) -> bool:
     decision = admission.admit(cluster, VmSpec(vmid=vm.vm_id, max_mem_mib=vm.max_mem_mib))
     if not decision.admitted:
         log.warning(
@@ -578,20 +593,22 @@ def _ensure_vm_admitted(
             source=source_node,
             reason=decision.reason,
         )
-        return
+        return False
 
     if decision.placement_node and decision.placement_node != source_node:
+        proxmox_target = _proxmox_target_name(node_states, decision.placement_node)
         log.warning(
             "repositionnement automatique de VM",
             vm_id=vm.vm_id,
             source=source_node,
             target=decision.placement_node,
+            proxmox_target=proxmox_target,
         )
         if dry_run:
-            return
+            return True
         payload = {
             "vm_id": vm.vm_id,
-            "target": decision.placement_node,
+            "target": proxmox_target,
             "type": "live" if vm.status == "running" else "cold",
         }
         try:
@@ -599,7 +616,7 @@ def _ensure_vm_admitted(
             resp.raise_for_status()
         except requests.RequestException as exc:
             log.error("échec repositionnement automatique", vm_id=vm.vm_id, error=str(exc))
-        return
+        return True
 
     payload = decision.quota_payload()
     log.info(
@@ -620,6 +637,7 @@ def _ensure_vm_admitted(
         resp.raise_for_status()
     except requests.RequestException as exc:
         log.error("échec configuration quota automatique", vm_id=vm.vm_id, error=str(exc))
+    return False
 
 
 def _ensure_vm_gpu_budget(
@@ -654,10 +672,10 @@ def _ensure_vm_vcpu_profile(
     node_states: Dict[str, MigNodeState],
     gpu_budget_mib: int,
     dry_run: bool,
-) -> None:
+) -> bool:
     profile = _normalize_vcpu_profile(metadata)
     if profile is None:
-        return
+        return False
 
     desired_min, desired_max = profile
     vcpu_status = _fetch_vcpu_status(source_url) or {}
@@ -674,7 +692,7 @@ def _ensure_vm_vcpu_profile(
     current_max = int(current_state.get("max_vcpus", current_vcpus)) if current_state else 0
 
     if current_state and current_min == desired_min and current_max == desired_max:
-        return
+        return False
 
     required_extra = max(0, desired_min - current_vcpus)
     source_state = node_states[source_node]
@@ -694,21 +712,23 @@ def _ensure_vm_vcpu_profile(
                 min_vcpus=desired_min,
                 max_vcpus=desired_max,
             )
-            return
+            return False
 
+        proxmox_target = _proxmox_target_name(node_states, target)
         log.warning(
             "migration automatique pour satisfaire le profil vCPU",
             vm_id=vm.vm_id,
             source=source_node,
             target=target,
+            proxmox_target=proxmox_target,
             min_vcpus=desired_min,
             max_vcpus=desired_max,
         )
         if dry_run:
-            return
+            return True
         payload = {
             "vm_id": vm.vm_id,
-            "target": target,
+            "target": proxmox_target,
             "type": "live" if vm.status == "running" else "cold",
         }
         try:
@@ -716,7 +736,7 @@ def _ensure_vm_vcpu_profile(
             resp.raise_for_status()
         except requests.RequestException as exc:
             log.error("échec migration automatique CPU", vm_id=vm.vm_id, error=str(exc))
-        return
+        return True
 
     log.info(
         "configuration automatique du profil vCPU",
@@ -735,11 +755,13 @@ def _ensure_vm_vcpu_profile(
         resp.raise_for_status()
     except requests.RequestException as exc:
         log.error("échec configuration vCPU automatique", vm_id=vm.vm_id, error=str(exc))
+    return False
 
 
 def _execute_migrations(
     candidates: List[MigrationCandidate],
     node_urls: Dict[str, str],
+    node_states: Dict[str, MigNodeState],
 ) -> None:
     """Appelle POST /control/migrate pour chaque candidat."""
     for c in candidates:
@@ -750,6 +772,7 @@ def _execute_migrations(
 
         url = source_url.rstrip("/") + "/control/migrate"
         payload = c.to_api_payload()
+        payload["target"] = _proxmox_target_name(node_states, c.target)
         try:
             resp = requests.post(url, json=payload, timeout=10)
             resp.raise_for_status()
