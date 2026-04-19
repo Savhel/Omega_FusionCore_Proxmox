@@ -199,6 +199,10 @@ async fn main() -> Result<()> {
                     apply_hotplug_if_possible(&state, &hotplug, &cpu_ctrl, vm_id);
                 }
 
+                for vm_id in state.vcpu_scheduler.vms_needing_downscale() {
+                    apply_downscale_if_idle(&state, &hotplug, &cpu_ctrl, vm_id, false);
+                }
+
                 for (vm_id, reason) in state.vcpu_scheduler.vms_needing_migration() {
                     warn!(vm_id, reason = %reason, "VM candidate à la migration CPU");
                 }
@@ -489,6 +493,55 @@ fn apply_hotplug_if_possible(
         }
         HotplugResult::Removed { .. } | HotplugResult::AtMin { .. } => {
             state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
+        }
+    }
+}
+
+fn apply_downscale_if_idle(
+    state: &Arc<NodeState>,
+    hotplug: &VcpuHotplugManager,
+    cpu_ctrl: &CgroupCpuController,
+    vm_id: u32,
+    force: bool,
+) {
+    use omega_daemon::vcpu_scheduler::VcpuDecision;
+
+    let decision = state.vcpu_scheduler.try_downscale(vm_id, force);
+    let VcpuDecision::Downscaled {
+        new_count, slot, ..
+    } = decision
+    else {
+        return;
+    };
+
+    let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) else {
+        let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+        return;
+    };
+
+    match hotplug.remove_vcpu(vm_id, vm_state.min_vcpus) {
+        HotplugResult::Removed { new_count: qmp_count } => {
+            if let Err(e) = cpu_ctrl.apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count)) {
+                warn!(vm_id, error = %e, "échec mise à jour cpu.max après hot-unplug");
+            }
+            info!(
+                vm_id,
+                scheduler_count = new_count,
+                qmp_count,
+                force,
+                "downscale vCPU appliqué automatiquement"
+            );
+        }
+        HotplugResult::AtMin { .. } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+        }
+        HotplugResult::Unavailable { reason } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            warn!(vm_id, reason, "hot-unplug QMP indisponible — rollback scheduler");
+        }
+        HotplugResult::NoSlots { .. } | HotplugResult::Added { .. } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            warn!(vm_id, "résultat QMP inattendu pendant hot-unplug");
         }
     }
 }

@@ -54,6 +54,12 @@ pub const STEAL_THRESHOLD_PCT: f64 = 10.0;
 /// Seuil d'utilisation CPU déclenchant un hotplug de vCPU (%).
 pub const HOTPLUG_TRIGGER_PCT: f64 = 80.0;
 
+/// Seuil d'utilisation CPU sous lequel on peut envisager un retrait progressif.
+pub const DOWNSCALE_TRIGGER_PCT: f64 = 35.0;
+
+/// Durée minimale de faible charge avant de retirer un vCPU.
+pub const DOWNSCALE_STABLE_SECS: u64 = 60;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// Identifiant d'un slot vCPU : (pcpu_id, slot_index).
@@ -85,6 +91,8 @@ pub struct VmVcpuState {
     pub cpu_usage_pct: f64,
     /// Steal time détecté (%)
     pub steal_pct: f64,
+    /// Depuis quand la VM est en faible charge prolongée.
+    pub low_load_since: Option<u64>,
     /// Timestamp de la dernière mise à jour
     pub updated_at: u64,
 }
@@ -99,6 +107,7 @@ impl VmVcpuState {
             slots: Vec::new(),
             cpu_usage_pct: 0.0,
             steal_pct: 0.0,
+            low_load_since: None,
             updated_at: now_secs(),
         }
     }
@@ -116,6 +125,19 @@ impl VmVcpuState {
     /// La VM souffre-t-elle de steal time excessif ?
     pub fn has_steal_pressure(&self) -> bool {
         self.steal_pct >= STEAL_THRESHOLD_PCT
+    }
+
+    /// La VM peut-elle perdre 1 vCPU sans passer sous son minimum ?
+    pub fn can_downscale(&self) -> bool {
+        self.current_vcpus > self.min_vcpus
+            && self.cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT
+            && self.low_load_duration_secs() >= DOWNSCALE_STABLE_SECS
+    }
+
+    pub fn low_load_duration_secs(&self) -> u64 {
+        self.low_load_since
+            .map(|started| now_secs().saturating_sub(started))
+            .unwrap_or(0)
     }
 }
 
@@ -151,6 +173,14 @@ pub enum VcpuDecision {
     MigrateRequired { vm_id: u32, reason: String },
     /// La VM est déjà à son maximum.
     AtMax { vm_id: u32 },
+    /// La VM est déjà à son minimum.
+    AtMin { vm_id: u32 },
+    /// Un vCPU a été retiré progressivement.
+    Downscaled {
+        vm_id: u32,
+        new_count: usize,
+        slot: SlotId,
+    },
 }
 
 /// Scheduler de vCPU — gère les slots pCPU et l'élasticité des VMs.
@@ -272,9 +302,7 @@ impl VcpuScheduler {
             return Err("min_vcpus doit être ≥ 1".into());
         }
         if max_vcpus < min_vcpus {
-            return Err(format!(
-                "max_vcpus ({max_vcpus}) < min_vcpus ({min_vcpus})"
-            ));
+            return Err(format!("max_vcpus ({max_vcpus}) < min_vcpus ({min_vcpus})"));
         }
 
         let mut vms = self.vms.write().unwrap();
@@ -382,6 +410,46 @@ impl VcpuScheduler {
         }
     }
 
+    /// Tente de retirer 1 vCPU à une VM.
+    ///
+    /// `force=true` permet la convergence initiale vers le minimum au démarrage,
+    /// sans attendre la fenêtre de faible charge.
+    pub fn try_downscale(&self, vm_id: u32, force: bool) -> VcpuDecision {
+        let mut vms = self.vms.write().unwrap();
+        let mut slots = self.slots.write().unwrap();
+
+        let Some(state) = vms.get_mut(&vm_id) else {
+            return VcpuDecision::AtMin { vm_id };
+        };
+
+        if state.current_vcpus <= state.min_vcpus {
+            return VcpuDecision::AtMin { vm_id };
+        }
+
+        if !force && !state.can_downscale() {
+            return VcpuDecision::AtMin { vm_id };
+        }
+
+        let Some(slot) = state.slots.pop() else {
+            return VcpuDecision::AtMin { vm_id };
+        };
+
+        slots[slot.pcpu][slot.slot].vms.remove(&vm_id);
+        state.current_vcpus = state.current_vcpus.saturating_sub(1);
+        state.updated_at = now_secs();
+        if state.current_vcpus <= state.min_vcpus {
+            state.low_load_since = None;
+        }
+
+        let new_count = state.current_vcpus;
+        info!(vm_id, new_count, pcpu = slot.pcpu, slot = slot.slot, "vCPU retiré du scheduler");
+        VcpuDecision::Downscaled {
+            vm_id,
+            new_count,
+            slot,
+        }
+    }
+
     /// Annule un hotplug précédemment réservé si l'opération réelle échoue.
     pub fn rollback_hotplug(&self, vm_id: u32, slot: SlotId) -> bool {
         let mut vms = self.vms.write().unwrap();
@@ -402,6 +470,22 @@ impl VcpuScheduler {
         true
     }
 
+    /// Ré-annule un retrait si le hot-unplug réel échoue.
+    pub fn rollback_downscale(&self, vm_id: u32, slot: SlotId) -> bool {
+        let mut vms = self.vms.write().unwrap();
+        let mut slots = self.slots.write().unwrap();
+
+        let Some(state) = vms.get_mut(&vm_id) else {
+            return false;
+        };
+
+        slots[slot.pcpu][slot.slot].vms.insert(vm_id);
+        state.slots.push(slot);
+        state.current_vcpus += 1;
+        state.updated_at = now_secs();
+        true
+    }
+
     // ─── Monitoring ───────────────────────────────────────────────────────
 
     /// Met à jour les métriques CPU d'une VM (usage, steal).
@@ -410,6 +494,13 @@ impl VcpuScheduler {
         if let Some(state) = vms.get_mut(&vm_id) {
             state.cpu_usage_pct = cpu_usage_pct;
             state.steal_pct = steal_pct;
+            if state.current_vcpus > state.min_vcpus && cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT {
+                if state.low_load_since.is_none() {
+                    state.low_load_since = Some(now_secs());
+                }
+            } else {
+                state.low_load_since = None;
+            }
             state.updated_at = now_secs();
 
             if state.has_steal_pressure() {
@@ -451,6 +542,17 @@ impl VcpuScheduler {
             .unwrap()
             .values()
             .filter(|s| s.needs_more_vcpus())
+            .map(|s| s.vm_id)
+            .collect()
+    }
+
+    /// VMs qui peuvent perdre 1 vCPU après une période de faible charge.
+    pub fn vms_needing_downscale(&self) -> Vec<u32> {
+        self.vms
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| s.can_downscale())
             .map(|s| s.vm_id)
             .collect()
     }
@@ -651,6 +753,45 @@ mod tests {
 
         let d = s.try_hotplug(1);
         assert!(matches!(d, VcpuDecision::AtMax { .. }));
+    }
+
+    #[test]
+    fn test_downscale_requires_stable_low_load() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        let _ = s.try_hotplug(1);
+        s.update_vm_metrics(1, DOWNSCALE_TRIGGER_PCT + 10.0, 0.0);
+        let d = s.try_downscale(1, false);
+        assert!(matches!(d, VcpuDecision::AtMin { .. }));
+    }
+
+    #[test]
+    fn test_downscale_removes_one_vcpu_after_stable_low_load() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        let _ = s.try_hotplug(1);
+        {
+            let mut vms = s.vms.write().unwrap();
+            let state = vms.get_mut(&1).unwrap();
+            state.cpu_usage_pct = DOWNSCALE_TRIGGER_PCT - 5.0;
+            state.low_load_since = Some(now_secs().saturating_sub(DOWNSCALE_STABLE_SECS + 1));
+        }
+        let d = s.try_downscale(1, false);
+        assert!(matches!(d, VcpuDecision::Downscaled { new_count: 1, .. }));
+    }
+
+    #[test]
+    fn test_vms_needing_downscale_are_reported() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        let _ = s.try_hotplug(1);
+        {
+            let mut vms = s.vms.write().unwrap();
+            let state = vms.get_mut(&1).unwrap();
+            state.cpu_usage_pct = DOWNSCALE_TRIGGER_PCT - 5.0;
+            state.low_load_since = Some(now_secs().saturating_sub(DOWNSCALE_STABLE_SECS + 1));
+        }
+        assert_eq!(s.vms_needing_downscale(), vec![1]);
     }
 
     #[test]

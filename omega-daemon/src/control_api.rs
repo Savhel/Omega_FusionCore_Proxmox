@@ -519,10 +519,15 @@ async fn vcpu_admit(
             );
         };
 
-        if let Err(reason) = state
-            .vcpu_scheduler
-            .update_profile(vm_id, current.min_vcpus.min(current.current_vcpus), req.max_vcpus)
-        {
+        let bootstrap_convergence = current.min_vcpus == current.current_vcpus
+            && current.max_vcpus == current.current_vcpus
+            && req.min_vcpus < current.current_vcpus;
+
+        if let Err(reason) = state.vcpu_scheduler.update_profile(
+            vm_id,
+            current.min_vcpus.min(current.current_vcpus),
+            req.max_vcpus,
+        ) {
             return (
                 StatusCode::CONFLICT,
                 Json(json!({
@@ -531,6 +536,34 @@ async fn vcpu_admit(
                     "reason": reason,
                 })),
             );
+        }
+
+        if bootstrap_convergence {
+            loop {
+                let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) else {
+                    break;
+                };
+                if vm_state.current_vcpus <= req.min_vcpus {
+                    break;
+                }
+                let decision = apply_downscale(&state, vm_id, true);
+                match &decision {
+                    VcpuDecision::Downscaled { .. } => {
+                        decision_text = format!("{:?}", decision);
+                    }
+                    VcpuDecision::AtMin { .. } => break,
+                    _ => {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "status": "downscale_required",
+                                "vm_id": vm_id,
+                                "decision": format!("{:?}", decision),
+                            })),
+                        );
+                    }
+                }
+            }
         }
 
         loop {
@@ -562,13 +595,16 @@ async fn vcpu_admit(
                         })),
                     );
                 }
-                VcpuDecision::Allocated { .. } => {}
+                VcpuDecision::Allocated { .. }
+                | VcpuDecision::AtMin { .. }
+                | VcpuDecision::Downscaled { .. } => {}
             }
         }
 
-        if let Err(reason) = state
-            .vcpu_scheduler
-            .update_profile(vm_id, req.min_vcpus, req.max_vcpus)
+        if let Err(reason) =
+            state
+                .vcpu_scheduler
+                .update_profile(vm_id, req.min_vcpus, req.max_vcpus)
         {
             return (
                 StatusCode::CONFLICT,
@@ -603,7 +639,10 @@ async fn vcpu_admit(
                     })),
                 );
             }
-            VcpuDecision::AtMax { .. } | VcpuDecision::Hotplugged { .. } => {
+            VcpuDecision::AtMax { .. }
+            | VcpuDecision::Hotplugged { .. }
+            | VcpuDecision::AtMin { .. }
+            | VcpuDecision::Downscaled { .. } => {
                 decision_text = format!("{:?}", decision);
             }
         }
@@ -614,8 +653,8 @@ async fn vcpu_admit(
         .get_vm_state(vm_id)
         .map(|vm| vm.current_vcpus)
         .unwrap_or(req.min_vcpus);
-    let _ = CgroupCpuController::new()
-        .apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(current_vcpus));
+    let _ =
+        CgroupCpuController::new().apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(current_vcpus));
 
     (
         StatusCode::OK,
@@ -666,6 +705,9 @@ async fn vcpu_hotplug(
             (StatusCode::CONFLICT, "migrate_required")
         }
         VcpuDecision::Allocated { .. } => (StatusCode::OK, "allocated"),
+        VcpuDecision::AtMin { .. } | VcpuDecision::Downscaled { .. } => {
+            (StatusCode::CONFLICT, "unexpected_downscale_state")
+        }
     };
 
     (
@@ -821,6 +863,59 @@ fn apply_hotplug(state: &Arc<NodeState>, vm_id: u32) -> VcpuDecision {
             VcpuDecision::MigrateRequired {
                 vm_id,
                 reason: "résultat QMP inattendu pendant hotplug".into(),
+            }
+        }
+    }
+}
+
+fn apply_downscale(state: &Arc<NodeState>, vm_id: u32, force: bool) -> VcpuDecision {
+    let decision = state.vcpu_scheduler.try_downscale(vm_id, force);
+    let VcpuDecision::Downscaled {
+        new_count, slot, ..
+    } = decision
+    else {
+        return decision;
+    };
+
+    let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) else {
+        let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+        return VcpuDecision::AtMin { vm_id };
+    };
+
+    let hotplug_manager = VcpuHotplugManager::new(&state.qmp_dir);
+    match hotplug_manager.remove_vcpu(vm_id, vm_state.min_vcpus) {
+        HotplugResult::Removed { new_count: qmp_count } => {
+            let _ = CgroupCpuController::new()
+                .apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count));
+            VcpuDecision::Downscaled {
+                vm_id,
+                new_count,
+                slot,
+            }
+        }
+        HotplugResult::AtMin { .. } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            VcpuDecision::AtMin { vm_id }
+        }
+        HotplugResult::Unavailable { reason } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            VcpuDecision::MigrateRequired { vm_id, reason }
+        }
+        HotplugResult::NoSlots { current, max } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            VcpuDecision::MigrateRequired {
+                vm_id,
+                reason: format!(
+                    "résultat QMP inattendu pendant hot-unplug : current={} max={}",
+                    current, max,
+                ),
+            }
+        }
+        HotplugResult::Added { .. } => {
+            let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            VcpuDecision::MigrateRequired {
+                vm_id,
+                reason: "résultat QMP inattendu pendant hot-unplug".into(),
             }
         }
     }
