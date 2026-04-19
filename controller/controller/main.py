@@ -21,6 +21,12 @@ import structlog
 
 from .admission import AdmissionController, VmSpec
 from .cluster import ClusterState, NodeInfo, VmEntry
+from .cpu_admission import (
+    ClusterVcpuPoolPlanner,
+    VcpuPoolConfig,
+    VcpuPoolDecision,
+    VcpuPoolVm,
+)
 from .metrics import MetricsCollector
 from .migration_policy import (
     MigrationCandidate,
@@ -267,6 +273,8 @@ def daemon(
     policy = MigrationPolicy(MigrationThresholds())
     admission = AdmissionController()
     proxmox = ProxmoxClient(base_url=proxmox_url, api_token=proxmox_token)
+    vcpu_pool = ClusterVcpuPoolPlanner(VcpuPoolConfig())
+    last_vcpu_migrations: Dict[int, float] = {}
 
     log.info(
         "daemon de migration démarré",
@@ -286,6 +294,8 @@ def daemon(
                         node_states=node_states,
                         admission=admission,
                         proxmox=proxmox,
+                        vcpu_pool=vcpu_pool,
+                        last_vcpu_migrations=last_vcpu_migrations,
                         dry_run=dry_run,
                     )
                 candidates = policy.evaluate(node_states)
@@ -444,10 +454,14 @@ def _reconcile_cluster_resources(
     node_states: Dict[str, MigNodeState],
     admission: AdmissionController,
     proxmox: ProxmoxClient,
+    vcpu_pool: ClusterVcpuPoolPlanner,
+    last_vcpu_migrations: Dict[int, float],
     dry_run: bool,
 ) -> None:
     cluster = _build_cluster_state(node_states, node_urls)
     pending_vcpu_profiles: List[Tuple[int, str, str, VmState, dict, int, dict]] = []
+    pool_vms: List[VcpuPoolVm] = []
+    now = time.time()
 
     for node_id, node_state in node_states.items():
         source_url = node_urls[node_id]
@@ -480,6 +494,49 @@ def _reconcile_cluster_resources(
                 gpu_budget or vm.gpu_vram_budget_mib,
                 vcpu_status,
             ))
+            profile = _normalize_vcpu_profile(metadata)
+            if profile is None:
+                continue
+            desired_min, desired_max = profile
+            current_state = next(
+                (
+                    entry for entry in vcpu_status.get("vm_states", [])
+                    if entry.get("vm_id") == vm.vm_id
+                ),
+                None,
+            )
+            current_vcpus = int(current_state.get("current_vcpus", 0)) if current_state else 0
+            pool_vms.append(VcpuPoolVm(
+                vmid=vm.vm_id,
+                node_id=node_id,
+                current_vcpus=current_vcpus,
+                min_vcpus=desired_min,
+                max_vcpus=desired_max,
+            ))
+
+    pool_decisions = vcpu_pool.plan(
+        node_free_slots={node_id: state.vcpu_free for node_id, state in node_states.items()},
+        vms=pool_vms,
+        last_migration_at=last_vcpu_migrations,
+        now=now,
+    )
+    decisions_by_vmid = {decision.vmid: decision for decision in pool_decisions}
+    if pool_decisions:
+        log.info(
+            "plan du pool vCPU cluster",
+            decisions=[
+                {
+                    "vm_id": decision.vmid,
+                    "source": decision.source_node,
+                    "action": decision.action,
+                    "target": decision.target_node or None,
+                    "cpu_deficit": decision.cpu_deficit,
+                    "gain_vcpus": decision.gain_vcpus,
+                    "cooldown_remaining_secs": round(decision.cooldown_remaining_secs, 1),
+                }
+                for decision in pool_decisions
+            ],
+        )
 
     pending_vcpu_profiles.sort(key=lambda item: (item[0], item[3].vm_id))
     for (
@@ -499,6 +556,9 @@ def _reconcile_cluster_resources(
             node_states=node_states,
             gpu_budget_mib=gpu_budget_mib,
             vcpu_status=vcpu_status,
+            pool_decision=decisions_by_vmid.get(vm.vm_id),
+            last_vcpu_migrations=last_vcpu_migrations,
+            now=now,
             dry_run=dry_run,
         )
         if migration_started:
@@ -743,6 +803,9 @@ def _ensure_vm_vcpu_profile(
     node_states: Dict[str, MigNodeState],
     gpu_budget_mib: int,
     vcpu_status: dict,
+    pool_decision: Optional[VcpuPoolDecision],
+    last_vcpu_migrations: Dict[int, float],
+    now: float,
     dry_run: bool,
 ) -> bool:
     profile = _normalize_vcpu_profile(metadata)
@@ -764,6 +827,84 @@ def _ensure_vm_vcpu_profile(
 
     if current_state and current_min == desired_min and current_max == desired_max:
         return False
+
+    if pool_decision is not None:
+        if pool_decision.action == "apply_local":
+            log.info(
+                "configuration automatique du profil vCPU",
+                vm_id=vm.vm_id,
+                min_vcpus=desired_min,
+                max_vcpus=desired_max,
+                pool_action=pool_decision.action,
+                cpu_deficit=pool_decision.cpu_deficit,
+            )
+            if dry_run:
+                return False
+            try:
+                resp = requests.post(
+                    source_url.rstrip("/") + f"/control/vm/{vm.vm_id}/vcpu",
+                    json={"min_vcpus": desired_min, "max_vcpus": desired_max},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                log.error("échec configuration vCPU automatique", vm_id=vm.vm_id, error=str(exc))
+            return False
+
+        if pool_decision.action in {"migrate_full", "migrate_partial"}:
+            proxmox_target = _proxmox_target_name(node_states, pool_decision.target_node)
+            log.warning(
+                "migration automatique pilotée par le pool vCPU",
+                vm_id=vm.vm_id,
+                source=source_node,
+                target=pool_decision.target_node,
+                proxmox_target=proxmox_target,
+                resolution=pool_decision.action,
+                current_vcpus=pool_decision.current_vcpus,
+                cpu_deficit=pool_decision.cpu_deficit,
+                gain_vcpus=pool_decision.gain_vcpus,
+                min_vcpus=desired_min,
+                max_vcpus=desired_max,
+            )
+            if dry_run:
+                return True
+            payload = {
+                "vm_id": vm.vm_id,
+                "target": proxmox_target,
+                "type": "live" if vm.status == "running" else "cold",
+            }
+            try:
+                resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
+                resp.raise_for_status()
+                last_vcpu_migrations[vm.vm_id] = now
+            except requests.RequestException as exc:
+                log.error("échec migration automatique CPU", vm_id=vm.vm_id, error=str(exc))
+            return True
+
+        if pool_decision.action == "wait_cooldown":
+            log.info(
+                "profil vCPU en attente de cooldown",
+                vm_id=vm.vm_id,
+                source=source_node,
+                current_vcpus=pool_decision.current_vcpus,
+                desired_min=desired_min,
+                desired_max=desired_max,
+                cpu_deficit=pool_decision.cpu_deficit,
+                cooldown_remaining_secs=round(pool_decision.cooldown_remaining_secs, 1),
+            )
+            return False
+
+        if pool_decision.action == "wait_deficit":
+            log.warning(
+                "profil vCPU en déficit, VM conservée en attente",
+                vm_id=vm.vm_id,
+                source=source_node,
+                current_vcpus=pool_decision.current_vcpus,
+                desired_min=desired_min,
+                desired_max=desired_max,
+                cpu_deficit=pool_decision.cpu_deficit,
+            )
+            return False
 
     required_extra = max(0, desired_min - current_vcpus)
     source_state = node_states[source_node]

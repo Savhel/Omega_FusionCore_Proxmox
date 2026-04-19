@@ -2,6 +2,9 @@
 
 import pytest
 from controller.cpu_admission import (
+    ClusterVcpuPoolPlanner,
+    VcpuPoolConfig,
+    VcpuPoolVm,
     CpuAdmissionController,
     CpuAdmissionDecision,
     NodeCpuCapacity,
@@ -257,6 +260,59 @@ class TestClusterAdmission:
         slots = ctrl.free_slots_per_node()
         assert slots["node1"] == 14
         assert slots["node2"] == 18
+
+
+class TestClusterVcpuPoolPlanner:
+    def test_smallest_deficit_first(self):
+        planner = ClusterVcpuPoolPlanner()
+        decisions = planner.plan(
+            node_free_slots={"node1": 0, "node2": 6},
+            vms=[
+                VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=1, min_vcpus=4, max_vcpus=4),
+                VcpuPoolVm(vmid=101, node_id="node1", current_vcpus=1, min_vcpus=2, max_vcpus=2),
+            ],
+            now=100.0,
+        )
+        assert [d.vmid for d in decisions] == [101, 100]
+
+    def test_prefers_local_resolution_when_pool_has_local_capacity(self):
+        planner = ClusterVcpuPoolPlanner()
+        decisions = planner.plan(
+            node_free_slots={"node1": 2, "node2": 10},
+            vms=[VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=2, min_vcpus=4, max_vcpus=4)],
+            now=100.0,
+        )
+        assert decisions[0].action == "apply_local"
+
+    def test_uses_partial_migration_when_it_improves_pool(self):
+        planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(min_gain_vcpus=1))
+        decisions = planner.plan(
+            node_free_slots={"node1": 1, "node2": 3, "node3": 1},
+            vms=[VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=2, min_vcpus=4, max_vcpus=4)],
+            now=100.0,
+        )
+        assert decisions[0].action == "migrate_partial"
+        assert decisions[0].target_node == "node2"
+
+    def test_waits_for_cooldown_before_migrating_again(self):
+        planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(migration_cooldown_secs=60.0))
+        decisions = planner.plan(
+            node_free_slots={"node1": 0, "node2": 6},
+            vms=[VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=2, min_vcpus=4, max_vcpus=4)],
+            last_migration_at={100: 80.0},
+            now=100.0,
+        )
+        assert decisions[0].action == "wait_cooldown"
+        assert decisions[0].cooldown_remaining_secs == pytest.approx(40.0)
+
+    def test_waits_when_no_node_can_improve_deficit(self):
+        planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(min_gain_vcpus=2))
+        decisions = planner.plan(
+            node_free_slots={"node1": 1, "node2": 2},
+            vms=[VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=2, min_vcpus=4, max_vcpus=4)],
+            now=100.0,
+        )
+        assert decisions[0].action == "wait_deficit"
 
     def test_hotplug_via_controller(self):
         ctrl = make_controller()

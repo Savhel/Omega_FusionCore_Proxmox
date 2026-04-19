@@ -70,6 +70,8 @@ def test_reconcile_uses_real_proxmox_node_name(monkeypatch):
         node_states={"node-a": node},
         admission=FakeAdmission(),
         proxmox=FakeProxmox(),
+        vcpu_pool=main.ClusterVcpuPoolPlanner(),
+        last_vcpu_migrations={},
         dry_run=False,
     )
 
@@ -118,6 +120,8 @@ def test_reconcile_stops_after_reposition_request(monkeypatch):
         node_states={"node-a": source, "node-c": target},
         admission=FakeAdmission(),
         proxmox=FakeProxmox(),
+        vcpu_pool=main.ClusterVcpuPoolPlanner(),
+        last_vcpu_migrations={},
         dry_run=False,
     )
 
@@ -153,6 +157,9 @@ def test_ensure_vm_vcpu_profile_posts_profile_update(monkeypatch):
                 {"vm_id": 101, "current_vcpus": 1, "min_vcpus": 1, "max_vcpus": 2}
             ]
         },
+        pool_decision=None,
+        last_vcpu_migrations={},
+        now=0.0,
         dry_run=False,
     ) is False
 
@@ -193,6 +200,9 @@ def test_ensure_vm_vcpu_profile_migrates_when_source_is_too_full(monkeypatch):
                 {"vm_id": 101, "current_vcpus": 1, "min_vcpus": 1, "max_vcpus": 2}
             ]
         },
+        pool_decision=None,
+        last_vcpu_migrations={},
+        now=0.0,
         dry_run=False,
     ) is True
 
@@ -236,6 +246,9 @@ def test_ensure_vm_vcpu_profile_migrates_partial_fit_when_full_fit_is_unavailabl
                 {"vm_id": 101, "current_vcpus": 2, "min_vcpus": 2, "max_vcpus": 4}
             ]
         },
+        pool_decision=None,
+        last_vcpu_migrations={},
+        now=0.0,
         dry_run=False,
     ) is True
 
@@ -276,6 +289,9 @@ def test_ensure_vm_vcpu_profile_keeps_vm_alive_when_no_better_target_exists(monk
                 {"vm_id": 101, "current_vcpus": 2, "min_vcpus": 2, "max_vcpus": 4}
             ]
         },
+        pool_decision=None,
+        last_vcpu_migrations={},
+        now=0.0,
         dry_run=False,
     ) is False
 
@@ -324,6 +340,8 @@ def test_reconcile_processes_smallest_vcpu_deficit_first(monkeypatch):
         node_states={"node-a": node},
         admission=FakeAdmission(),
         proxmox=FakeProxmox(),
+        vcpu_pool=main.ClusterVcpuPoolPlanner(),
+        last_vcpu_migrations={},
         dry_run=False,
     )
 
@@ -361,6 +379,8 @@ def test_reconcile_skips_gpu_update_when_vcpu_migration_is_pending(monkeypatch):
         node_states={"node-a": node},
         admission=FakeAdmission(),
         proxmox=FakeProxmox(),
+        vcpu_pool=main.ClusterVcpuPoolPlanner(),
+        last_vcpu_migrations={},
         dry_run=False,
     )
 

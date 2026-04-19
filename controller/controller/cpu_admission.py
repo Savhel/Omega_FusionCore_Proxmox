@@ -94,6 +94,210 @@ class NodeCpuCapacity:
 
 
 @dataclass
+class VcpuPoolConfig:
+    """
+    Paramètres du pool logique cluster-wide.
+
+    - `min_gain_vcpus` : amélioration minimale requise pour autoriser une
+      migration best-effort vers une cible partielle.
+    - `migration_cooldown_secs` : délai minimum entre deux migrations
+      automatiques CPU d'une même VM.
+    """
+
+    min_gain_vcpus: int = 1
+    migration_cooldown_secs: float = 60.0
+
+
+@dataclass
+class VcpuPoolVm:
+    """VM candidate au rééquilibrage du pool logique vCPU."""
+    vmid: int
+    node_id: str
+    current_vcpus: int
+    min_vcpus: int
+    max_vcpus: int
+
+    @property
+    def cpu_deficit(self) -> int:
+        return max(0, self.min_vcpus - self.current_vcpus)
+
+
+@dataclass
+class VcpuPoolDecision:
+    """
+    Décision du planificateur de pool.
+
+    `action` ∈ {apply_local, migrate_full, migrate_partial, wait_cooldown, wait_deficit}
+    """
+
+    vmid: int
+    source_node: str
+    action: str
+    cpu_deficit: int
+    current_vcpus: int
+    min_vcpus: int
+    max_vcpus: int
+    target_node: str = ""
+    gain_vcpus: int = 0
+    cooldown_remaining_secs: float = 0.0
+    reason: str = ""
+
+
+class ClusterVcpuPoolPlanner:
+    """
+    Planificateur cluster-wide du pool logique de vCPU.
+
+    Politique :
+      - les plus petits déficits sont résolus d'abord
+      - on hotplug localement dès que possible
+      - sinon on migre vers un nœud qui satisfait totalement le min_vcpus
+      - sinon on autorise une migration partielle si elle améliore le cluster
+      - sinon on garde la VM vivante et on réessaie plus tard
+    """
+
+    def __init__(self, config: VcpuPoolConfig = VcpuPoolConfig()) -> None:
+        self.config = config
+
+    def plan(
+        self,
+        node_free_slots: Dict[str, int],
+        vms: List[VcpuPoolVm],
+        last_migration_at: Optional[Dict[int, float]] = None,
+        now: Optional[float] = None,
+    ) -> List[VcpuPoolDecision]:
+        now = now if now is not None else 0.0
+        last_migration_at = last_migration_at or {}
+        remaining = dict(node_free_slots)
+        decisions: List[VcpuPoolDecision] = []
+
+        for vm in sorted(vms, key=lambda item: (item.cpu_deficit, item.vmid)):
+            if vm.cpu_deficit <= 0:
+                continue
+
+            source_free = remaining.get(vm.node_id, 0)
+            if source_free >= vm.cpu_deficit:
+                remaining[vm.node_id] = max(0, source_free - vm.cpu_deficit)
+                decisions.append(VcpuPoolDecision(
+                    vmid=vm.vmid,
+                    source_node=vm.node_id,
+                    action="apply_local",
+                    cpu_deficit=vm.cpu_deficit,
+                    current_vcpus=vm.current_vcpus,
+                    min_vcpus=vm.min_vcpus,
+                    max_vcpus=vm.max_vcpus,
+                    reason="capacité locale suffisante dans le pool",
+                ))
+                continue
+
+            last_move = last_migration_at.get(vm.vmid)
+            if last_move is not None:
+                cooldown_remaining = self.config.migration_cooldown_secs - (now - last_move)
+                if cooldown_remaining > 0:
+                    decisions.append(VcpuPoolDecision(
+                        vmid=vm.vmid,
+                        source_node=vm.node_id,
+                        action="wait_cooldown",
+                        cpu_deficit=vm.cpu_deficit,
+                        current_vcpus=vm.current_vcpus,
+                        min_vcpus=vm.min_vcpus,
+                        max_vcpus=vm.max_vcpus,
+                        cooldown_remaining_secs=max(0.0, cooldown_remaining),
+                        reason="cooldown de migration CPU actif",
+                    ))
+                    continue
+
+            full_target = self._best_full_fit_target(remaining, vm)
+            if full_target is not None:
+                gain = max(0, remaining.get(full_target, 0) - source_free)
+                remaining[vm.node_id] = source_free + max(1, vm.current_vcpus)
+                remaining[full_target] = max(0, remaining.get(full_target, 0) - vm.min_vcpus)
+                decisions.append(VcpuPoolDecision(
+                    vmid=vm.vmid,
+                    source_node=vm.node_id,
+                    action="migrate_full",
+                    cpu_deficit=vm.cpu_deficit,
+                    current_vcpus=vm.current_vcpus,
+                    min_vcpus=vm.min_vcpus,
+                    max_vcpus=vm.max_vcpus,
+                    target_node=full_target,
+                    gain_vcpus=gain,
+                    reason="migration vers une cible qui satisfait entièrement le minimum",
+                ))
+                continue
+
+            partial = self._best_partial_fit_target(remaining, vm)
+            if partial is not None:
+                target_node, gain = partial
+                remaining[vm.node_id] = source_free + max(1, vm.current_vcpus)
+                remaining[target_node] = max(
+                    0,
+                    remaining.get(target_node, 0) - max(1, vm.current_vcpus),
+                )
+                decisions.append(VcpuPoolDecision(
+                    vmid=vm.vmid,
+                    source_node=vm.node_id,
+                    action="migrate_partial",
+                    cpu_deficit=vm.cpu_deficit,
+                    current_vcpus=vm.current_vcpus,
+                    min_vcpus=vm.min_vcpus,
+                    max_vcpus=vm.max_vcpus,
+                    target_node=target_node,
+                    gain_vcpus=gain,
+                    reason="migration best-effort qui améliore le pool sans satisfaire l'idéal complet",
+                ))
+                continue
+
+            decisions.append(VcpuPoolDecision(
+                vmid=vm.vmid,
+                source_node=vm.node_id,
+                action="wait_deficit",
+                cpu_deficit=vm.cpu_deficit,
+                current_vcpus=vm.current_vcpus,
+                min_vcpus=vm.min_vcpus,
+                max_vcpus=vm.max_vcpus,
+                reason="aucun nœud ne peut améliorer suffisamment ce déficit pour l'instant",
+            ))
+
+        return decisions
+
+    def _best_full_fit_target(
+        self,
+        remaining: Dict[str, int],
+        vm: VcpuPoolVm,
+    ) -> Optional[str]:
+        candidates = [
+            (node_id, free_slots)
+            for node_id, free_slots in remaining.items()
+            if node_id != vm.node_id and free_slots >= vm.min_vcpus
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[1], item[0]))
+        return candidates[0][0]
+
+    def _best_partial_fit_target(
+        self,
+        remaining: Dict[str, int],
+        vm: VcpuPoolVm,
+    ) -> Optional[Tuple[str, int]]:
+        source_free = remaining.get(vm.node_id, 0)
+        min_required = max(1, vm.current_vcpus)
+        candidates: List[Tuple[str, int]] = []
+        for node_id, free_slots in remaining.items():
+            if node_id == vm.node_id:
+                continue
+            gain = free_slots - source_free
+            if free_slots >= min_required and gain >= self.config.min_gain_vcpus:
+                candidates.append((node_id, gain))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (-item[1], item[0]))
+        return candidates[0]
+
+
+@dataclass
 class CpuAdmissionDecision:
     """Résultat d'une décision d'admission CPU."""
     admitted:        bool
