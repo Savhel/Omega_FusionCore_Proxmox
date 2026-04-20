@@ -294,6 +294,16 @@ class TestClusterVcpuPoolPlanner:
         assert decisions[0].action == "migrate_partial"
         assert decisions[0].target_node == "node2"
 
+    def test_prefers_full_fit_when_a_node_can_satisfy_the_minimum(self):
+        planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(min_gain_vcpus=1))
+        decisions = planner.plan(
+            node_free_slots={"node1": 1, "node2": 10, "node3": 4},
+            vms=[VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=2, min_vcpus=4, max_vcpus=4)],
+            now=100.0,
+        )
+        assert decisions[0].action == "migrate_full"
+        assert decisions[0].target_node == "node2"
+
     def test_waits_for_cooldown_before_migrating_again(self):
         planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(migration_cooldown_secs=60.0))
         decisions = planner.plan(
@@ -306,7 +316,7 @@ class TestClusterVcpuPoolPlanner:
         assert decisions[0].cooldown_remaining_secs == pytest.approx(40.0)
 
     def test_waits_when_no_node_can_improve_deficit(self):
-        planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(min_gain_vcpus=2))
+        planner = ClusterVcpuPoolPlanner(VcpuPoolConfig(min_gain_vcpus=3))
         decisions = planner.plan(
             node_free_slots={"node1": 1, "node2": 2},
             vms=[VcpuPoolVm(vmid=100, node_id="node1", current_vcpus=2, min_vcpus=4, max_vcpus=4)],

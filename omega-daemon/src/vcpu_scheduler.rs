@@ -69,6 +69,9 @@ pub const BOOSTED_CPU_WEIGHT: u32 = 200;
 /// Poids CPU d'une VM durablement idle qui cède temporairement de la priorité.
 pub const DONOR_CPU_WEIGHT: u32 = 50;
 
+/// Seuil maximal de steal/throttle toléré pour une VM donneuse locale (%).
+pub const DONOR_SAFE_STEAL_PCT: f64 = 5.0;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// Identifiant d'un slot vCPU : (pcpu_id, slot_index).
@@ -152,6 +155,9 @@ impl VmVcpuState {
     /// La VM peut-elle servir de donneuse CPU locale ?
     pub fn can_lend_cpu_locally(&self) -> bool {
         self.can_downscale()
+            && self.steal_pct <= DONOR_SAFE_STEAL_PCT
+            && !self.has_steal_pressure()
+            && !self.local_share_active
     }
 
     /// VM sous pression qui mérite un partage CPU local temporaire.
@@ -957,6 +963,22 @@ mod tests {
         }
 
         assert_eq!(s.local_share_donors(), vec![1]);
+    }
+
+    #[test]
+    fn test_local_share_donor_excluded_when_showing_pressure() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        let _ = s.try_hotplug(1);
+        {
+            let mut vms = s.vms.write().unwrap();
+            let vm = vms.get_mut(&1).unwrap();
+            vm.cpu_usage_pct = DOWNSCALE_TRIGGER_PCT - 5.0;
+            vm.low_load_since = Some(now_secs().saturating_sub(DOWNSCALE_STABLE_SECS + 10));
+            vm.steal_pct = DONOR_SAFE_STEAL_PCT + 1.0;
+        }
+
+        assert!(s.local_share_donors().is_empty());
     }
 
     #[test]

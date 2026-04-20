@@ -265,14 +265,26 @@ class ClusterVcpuPoolPlanner:
         remaining: Dict[str, int],
         vm: VcpuPoolVm,
     ) -> Optional[str]:
+        source_free = remaining.get(vm.node_id, 0)
+        released_vcpus = max(1, vm.current_vcpus)
         candidates = [
-            (node_id, free_slots)
+            (
+                node_id,
+                free_slots,
+                self._cluster_improvement_score(
+                    remaining,
+                    source_node=vm.node_id,
+                    target_node=node_id,
+                    source_after=source_free + released_vcpus,
+                    target_after=free_slots - vm.min_vcpus,
+                ),
+            )
             for node_id, free_slots in remaining.items()
             if node_id != vm.node_id and free_slots >= vm.min_vcpus
         ]
         if not candidates:
             return None
-        candidates.sort(key=lambda item: (-item[1], item[0]))
+        candidates.sort(key=lambda item: (item[2], item[1], item[0]), reverse=True)
         return candidates[0][0]
 
     def _best_partial_fit_target(
@@ -282,19 +294,59 @@ class ClusterVcpuPoolPlanner:
     ) -> Optional[Tuple[str, int]]:
         source_free = remaining.get(vm.node_id, 0)
         min_required = max(1, vm.current_vcpus)
-        candidates: List[Tuple[str, int]] = []
+        candidates: List[Tuple[str, int, Tuple[int, int, int, int]]] = []
         for node_id, free_slots in remaining.items():
             if node_id == vm.node_id:
                 continue
-            gain = free_slots - source_free
-            if free_slots >= min_required and gain >= self.config.min_gain_vcpus:
-                candidates.append((node_id, gain))
+            if free_slots < min_required:
+                continue
+
+            score = self._cluster_improvement_score(
+                remaining,
+                source_node=vm.node_id,
+                target_node=node_id,
+                source_after=source_free + min_required,
+                target_after=free_slots - min_required,
+            )
+            source_relief = max(0, min_required)
+            improvement = source_relief + max(0, score[0]) + max(0, score[1])
+            if improvement >= self.config.min_gain_vcpus:
+                candidates.append((node_id, improvement, score))
 
         if not candidates:
             return None
 
-        candidates.sort(key=lambda item: (-item[1], item[0]))
-        return candidates[0]
+        candidates.sort(key=lambda item: (item[2], item[1], item[0]), reverse=True)
+        return candidates[0][0], candidates[0][1]
+
+    def _cluster_improvement_score(
+        self,
+        remaining: Dict[str, int],
+        source_node: str,
+        target_node: str,
+        source_after: int,
+        target_after: int,
+    ) -> Tuple[int, int, int, int]:
+        before_values = list(remaining.values())
+        before_floor = min(before_values) if before_values else 0
+        before_spread = (max(before_values) - before_floor) if before_values else 0
+
+        simulated = dict(remaining)
+        simulated[source_node] = max(0, source_after)
+        simulated[target_node] = max(0, target_after)
+
+        after_values = list(simulated.values())
+        after_floor = min(after_values) if after_values else 0
+        after_spread = (max(after_values) - after_floor) if after_values else 0
+
+        floor_gain = after_floor - before_floor
+        spread_gain = before_spread - after_spread
+        return (
+            floor_gain,
+            spread_gain,
+            max(0, target_after),
+            max(0, source_after),
+        )
 
 
 @dataclass
