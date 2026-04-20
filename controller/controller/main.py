@@ -32,6 +32,8 @@ from .migration_policy import (
     MigrationCandidate,
     MigrationPolicy,
     MigrationThresholds,
+    MigrationReason,
+    MigrationType,
     NodeState as MigNodeState,
     VmState,
 )
@@ -75,6 +77,7 @@ log = structlog.get_logger()
 GPU_MIGRATION_COOLDOWN_SECS = 120.0
 GPU_LOAD_IMPROVEMENT_PCT = 10.0
 ADMISSION_MIGRATION_COOLDOWN_SECS = 60.0
+DRAIN_MIGRATION_COOLDOWN_SECS = 30.0
 
 # ─── Groupe CLI principal ──────────────────────────────────────────────────────
 
@@ -365,6 +368,129 @@ def migrate(source: str, vm_id: int, target: str, mtype: str) -> None:
     except requests.RequestException as exc:
         log.error("échec appel API migration", url=url, error=str(exc))
         sys.exit(1)
+
+
+@cli.command("drain-node")
+@click.option("--node-a", required=True, help="URL API contrôle nœud A (ex: http://192.168.10.1:9300)")
+@click.option("--node-b", required=True, help="URL API contrôle nœud B")
+@click.option("--node-c", required=True, help="URL API contrôle nœud C")
+@click.option(
+    "--source-node",
+    required=True,
+    type=click.Choice(["node-a", "node-b", "node-c"]),
+    help="Nœud à évacuer avant maintenance/arrêt",
+)
+@click.option("--poll-interval", default=5, show_default=True, help="Intervalle de polling en secondes")
+@click.option("--timeout", default=900, show_default=True, help="Temps max d'attente en secondes")
+@click.option(
+    "--max-concurrent-migrations",
+    default=1,
+    show_default=True,
+    help="Nombre maximum de migrations déclenchées par cycle",
+)
+@click.option("--dry-run", is_flag=True, default=False, help="Affiche seulement le plan d'évacuation")
+def drain_node(
+    node_a: str,
+    node_b: str,
+    node_c: str,
+    source_node: str,
+    poll_interval: int,
+    timeout: int,
+    max_concurrent_migrations: int,
+    dry_run: bool,
+) -> None:
+    """Évacue toutes les VMs d'un nœud avant maintenance."""
+    node_urls: Dict[str, str] = {
+        "node-a": node_a.rstrip("/"),
+        "node-b": node_b.rstrip("/"),
+        "node-c": node_c.rstrip("/"),
+    }
+    started: Dict[int, float] = {}
+    deadline = time.monotonic() + max(1, timeout)
+
+    log.info(
+        "drain node démarré",
+        source_node=source_node,
+        poll_interval_s=poll_interval,
+        timeout_s=timeout,
+        dry_run=dry_run,
+    )
+
+    while True:
+        node_states = _fetch_cluster_state(node_urls)
+        source_state = node_states.get(source_node)
+        if source_state is None:
+            log.error("nœud source introuvable pour le drain", source_node=source_node)
+            sys.exit(1)
+
+        if not source_state.local_vms:
+            log.info("drain node terminé", source_node=source_node)
+            return
+
+        plan = _plan_node_drain(source_node, node_states)
+        if not plan:
+            log.error(
+                "drain node impossible avec la capacité actuelle",
+                source_node=source_node,
+                remaining_vms=[vm.vm_id for vm in source_state.local_vms],
+            )
+            sys.exit(2)
+
+        if dry_run:
+            log.info(
+                "plan drain node",
+                source_node=source_node,
+                count=len(plan),
+                migrations=[
+                    {
+                        "vm_id": c.vm.vm_id,
+                        "source": c.source,
+                        "target": c.target,
+                        "type": c.mtype.value,
+                        "reason": c.reason.value,
+                    }
+                    for c in plan
+                ],
+            )
+            return
+
+        now = time.monotonic()
+        ready = [
+            candidate
+            for candidate in plan
+            if now - started.get(candidate.vm.vm_id, 0.0) >= DRAIN_MIGRATION_COOLDOWN_SECS
+        ]
+        for candidate in ready[: max(1, max_concurrent_migrations)]:
+            source_url = node_urls[candidate.source]
+            launched = _start_auto_migration(
+                source_url=source_url,
+                node_states=node_states,
+                source_node=candidate.source,
+                vm=candidate.vm,
+                target=candidate.target,
+                detail="drain maintenance automatique",
+                tracker=started,
+                now=now,
+                dry_run=False,
+                reason="maintenance",
+            )
+            if launched:
+                log.info(
+                    "migration de drain déclenchée",
+                    vm_id=candidate.vm.vm_id,
+                    source=candidate.source,
+                    target=candidate.target,
+                )
+
+        if time.monotonic() >= deadline:
+            log.error(
+                "drain node expiré",
+                source_node=source_node,
+                remaining_vms=[vm.vm_id for vm in source_state.local_vms],
+            )
+            sys.exit(3)
+
+        time.sleep(poll_interval)
 
 
 # ─── Helpers privés ───────────────────────────────────────────────────────────
@@ -878,6 +1004,7 @@ def _start_auto_migration(
     tracker: Dict[int, float],
     now: float,
     dry_run: bool,
+    reason: Optional[str] = None,
 ) -> bool:
     proxmox_target = _proxmox_target_name(node_states, target)
     log.warning(
@@ -895,6 +1022,8 @@ def _start_auto_migration(
         "target": proxmox_target,
         "type": _auto_migration_type(vm),
     }
+    if reason:
+        payload["reason"] = reason
     try:
         resp = requests.post(source_url.rstrip("/") + "/control/migrate", json=payload, timeout=10)
         resp.raise_for_status()
@@ -1473,6 +1602,79 @@ def _execute_migrations(
                 source = c.source,
                 error  = str(exc),
             )
+
+
+def _clone_node_state(state: MigNodeState) -> MigNodeState:
+    return MigNodeState(
+        node_id=state.node_id,
+        mem_total_kb=state.mem_total_kb,
+        mem_available_kb=state.mem_available_kb,
+        proxmox_node_name=state.proxmox_node_name,
+        vcpu_total=state.vcpu_total,
+        vcpu_free=state.vcpu_free,
+        gpu_total_vram_mib=state.gpu_total_vram_mib,
+        gpu_free_vram_mib=state.gpu_free_vram_mib,
+        local_vms=list(state.local_vms),
+    )
+
+
+def _drain_sort_key(vm: VmState) -> Tuple[int, int, float, int]:
+    return (
+        vm.gpu_vram_budget_mib,
+        vm.max_mem_mib,
+        vm.avg_cpu_pct,
+        vm.vm_id,
+    )
+
+
+def _apply_drain_reservation(target: MigNodeState, vm: VmState) -> None:
+    target.mem_available_kb = max(0, target.mem_available_kb - vm.max_mem_mib * 1024)
+    target.vcpu_free = max(0, target.vcpu_free - 1)
+    if vm.gpu_vram_budget_mib > 0:
+        target.gpu_free_vram_mib = max(0, target.gpu_free_vram_mib - vm.gpu_vram_budget_mib)
+    target.local_vms.append(vm)
+
+
+def _plan_node_drain(
+    source_node: str,
+    node_states: Dict[str, MigNodeState],
+) -> List[MigrationCandidate]:
+    source_state = node_states.get(source_node)
+    if source_state is None:
+        return []
+
+    simulated = {
+        node_id: _clone_node_state(state)
+        for node_id, state in node_states.items()
+    }
+    source_sim = simulated[source_node]
+    vms = sorted(source_sim.local_vms, key=_drain_sort_key, reverse=True)
+
+    plan: List[MigrationCandidate] = []
+    for vm in vms:
+        target = _best_reconciliation_target(
+            source_node=source_node,
+            vm=vm,
+            node_states=simulated,
+            required_vcpus=1,
+            gpu_budget_mib=vm.gpu_vram_budget_mib,
+        )
+        if target is None:
+            return []
+
+        candidate = MigrationCandidate(
+            vm=vm,
+            source=source_node,
+            target=target,
+            mtype=MigrationType(_auto_migration_type(vm)),
+            reason=MigrationReason.MAINTENANCE_DRAIN,
+            urgency=2,
+            detail="drain maintenance",
+        )
+        plan.append(candidate)
+        _apply_drain_reservation(simulated[target], vm)
+
+    return plan
 
 
 def _execute_decision(decision: Decision, proxmox: ProxmoxClient) -> None:

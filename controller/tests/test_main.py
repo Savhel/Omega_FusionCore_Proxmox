@@ -552,3 +552,71 @@ def test_ensure_vm_gpu_placement_creates_space_by_evicting_resident_vm(monkeypat
             {"vm_id": 202, "target": "pve3", "type": "live"},
         )
     ]
+
+
+def test_plan_node_drain_reserves_target_capacity_across_multiple_vms():
+    vm_a = make_vm(101)
+    vm_a.max_mem_mib = 8192
+    vm_b = make_vm(102)
+    vm_b.max_mem_mib = 4096
+
+    source = make_node("node-a", vcpu_free=2)
+    source.local_vms = [vm_a, vm_b]
+
+    target_b = make_node("node-b", vcpu_free=2)
+    target_b.mem_available_kb = 10 * 1024 * 1024
+    target_b.proxmox_node_name = "pve2"
+
+    target_c = make_node("node-c", vcpu_free=2)
+    target_c.mem_available_kb = 6 * 1024 * 1024
+    target_c.proxmox_node_name = "pve3"
+
+    plan = main._plan_node_drain(
+        "node-a",
+        {
+            "node-a": source,
+            "node-b": target_b,
+            "node-c": target_c,
+        },
+    )
+
+    assert [(c.vm.vm_id, c.target, c.reason.value) for c in plan] == [
+        (101, "node-b", "maintenance_drain"),
+        (102, "node-c", "maintenance_drain"),
+    ]
+
+
+def test_start_auto_migration_includes_maintenance_reason(monkeypatch):
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append((url, json))
+        return FakeResponse({"status": "ok"})
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+
+    source = make_node("node-a", vcpu_free=2)
+    source.proxmox_node_name = "pve1"
+    target = make_node("node-b", vcpu_free=8)
+    target.proxmox_node_name = "pve2"
+
+    launched = main._start_auto_migration(
+        source_url="http://node-a:9300",
+        node_states={"node-a": source, "node-b": target},
+        source_node="node-a",
+        vm=make_vm(101),
+        target="node-b",
+        detail="maintenance drain test",
+        tracker={},
+        now=0.0,
+        dry_run=False,
+        reason="maintenance",
+    )
+
+    assert launched is True
+    assert calls == [
+        (
+            "http://node-a:9300/control/migrate",
+            {"vm_id": 101, "target": "pve2", "type": "live", "reason": "maintenance"},
+        )
+    ]
