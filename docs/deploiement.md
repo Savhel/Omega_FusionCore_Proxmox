@@ -24,6 +24,9 @@
 11. [Avantages de la solution](#11-avantages)
 12. [Limites et solutions possibles](#12-limites-et-solutions)
 
+> Retour d'expérience réel et historique détaillé des problèmes rencontrés :
+> voir [retour-experience-cluster-reel.md](retour-experience-cluster-reel.md).
+
 ---
 
 ## 1. Vue d'ensemble

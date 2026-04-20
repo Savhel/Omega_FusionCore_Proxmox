@@ -528,23 +528,46 @@ Importer le dashboard Grafana depuis `docs/grafana-dashboard.json` (si disponibl
 ### 9.1 Mise à jour d'un nœud sans interruption
 
 ```bash
-# 1. Migrer les VMs du nœud vers les autres (depuis l'interface Proxmox)
-# 2. Arrêter le daemon
+# 1. Drainer le nœud depuis le controller
+omega-controller drain-node \
+    --node-a http://192.168.1.11:9300 \
+    --node-b http://192.168.1.12:9300 \
+    --node-c http://192.168.1.13:9300 \
+    --source-node node-b
+
+# 2. Vérifier que le nœud n'héberge plus de VM
+curl -s http://192.168.1.12:9200/api/status | python3 -m json.tool | grep -A5 local_vms
+
+# 3. Arrêter le daemon
 systemctl stop omega-daemon
 
-# 3. Mettre à jour le code et recompiler
+# 4. Mettre à jour le code et recompiler
 cd /opt/omega-remote-paging
 git pull
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 install -m 755 target/release/omega-daemon /usr/local/bin/
 
-# 4. Redémarrer
+# 5. Redémarrer
 systemctl start omega-daemon
 
-# 5. Vérifier
+# 6. Vérifier
 systemctl status omega-daemon
 curl -s http://192.168.1.11:9200/health
 ```
+
+Si on veut seulement voir le plan sans déclencher les migrations :
+
+```bash
+omega-controller drain-node \
+    --node-a http://192.168.1.11:9300 \
+    --node-b http://192.168.1.12:9300 \
+    --node-c http://192.168.1.13:9300 \
+    --source-node node-b \
+    --dry-run
+```
+
+Historique détaillé de tous les problèmes rencontrés sur cluster réel :
+[retour-experience-cluster-reel.md](retour-experience-cluster-reel.md).
 
 ### 9.2 Vider les pages d'une VM après migration
 
