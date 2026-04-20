@@ -60,6 +60,15 @@ pub const DOWNSCALE_TRIGGER_PCT: f64 = 35.0;
 /// Durée minimale de faible charge avant de retirer un vCPU.
 pub const DOWNSCALE_STABLE_SECS: u64 = 60;
 
+/// Poids CPU nominal appliqué aux VMs sans partage local particulier.
+pub const DEFAULT_CPU_WEIGHT: u32 = 100;
+
+/// Poids CPU d'une VM sous pression à qui on donne temporairement la priorité.
+pub const BOOSTED_CPU_WEIGHT: u32 = 200;
+
+/// Poids CPU d'une VM durablement idle qui cède temporairement de la priorité.
+pub const DONOR_CPU_WEIGHT: u32 = 50;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// Identifiant d'un slot vCPU : (pcpu_id, slot_index).
@@ -91,6 +100,10 @@ pub struct VmVcpuState {
     pub cpu_usage_pct: f64,
     /// Steal time détecté (%)
     pub steal_pct: f64,
+    /// Poids CPU cgroup actuellement demandé pour cette VM.
+    pub cpu_weight: u32,
+    /// La VM participe-t-elle à un partage CPU local temporaire ?
+    pub local_share_active: bool,
     /// Depuis quand la VM est en faible charge prolongée.
     pub low_load_since: Option<u64>,
     /// Timestamp de la dernière mise à jour
@@ -107,6 +120,8 @@ impl VmVcpuState {
             slots: Vec::new(),
             cpu_usage_pct: 0.0,
             steal_pct: 0.0,
+            cpu_weight: DEFAULT_CPU_WEIGHT,
+            local_share_active: false,
             low_load_since: None,
             updated_at: now_secs(),
         }
@@ -132,6 +147,20 @@ impl VmVcpuState {
         self.current_vcpus > self.min_vcpus
             && self.cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT
             && self.low_load_duration_secs() >= DOWNSCALE_STABLE_SECS
+    }
+
+    /// La VM peut-elle servir de donneuse CPU locale ?
+    pub fn can_lend_cpu_locally(&self) -> bool {
+        self.can_downscale()
+    }
+
+    /// VM sous pression qui mérite un partage CPU local temporaire.
+    pub fn needs_local_cpu_share(&self) -> bool {
+        (self.needs_more_vcpus() || self.has_steal_pressure()) && self.cpu_usage_pct > 0.0
+    }
+
+    pub fn vcpu_deficit(&self) -> usize {
+        self.max_vcpus.saturating_sub(self.current_vcpus)
     }
 
     pub fn low_load_duration_secs(&self) -> u64 {
@@ -568,6 +597,85 @@ impl VcpuScheduler {
             .collect()
     }
 
+    /// VMs sous pression à servir d'abord localement, triées par déficit croissant.
+    pub fn local_share_borrowers(&self) -> Vec<u32> {
+        let mut borrowers: Vec<_> = self
+            .vms
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| s.needs_local_cpu_share())
+            .map(|s| (s.vm_id, s.vcpu_deficit(), s.steal_pct, s.cpu_usage_pct))
+            .collect();
+
+        borrowers.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| b.2.total_cmp(&a.2))
+                .then_with(|| b.3.total_cmp(&a.3))
+        });
+
+        borrowers.into_iter().map(|(vm_id, _, _, _)| vm_id).collect()
+    }
+
+    /// VMs durablement au repos pouvant céder 1 vCPU réel.
+    pub fn local_share_donors(&self) -> Vec<u32> {
+        let mut donors: Vec<_> = self
+            .vms
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| s.can_lend_cpu_locally())
+            .map(|s| {
+                (
+                    s.vm_id,
+                    s.current_vcpus.saturating_sub(s.min_vcpus),
+                    s.low_load_duration_secs(),
+                    s.cpu_usage_pct,
+                )
+            })
+            .collect();
+
+        donors.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.3.total_cmp(&b.3))
+        });
+
+        donors.into_iter().map(|(vm_id, _, _, _)| vm_id).collect()
+    }
+
+    /// VMs qui ne cèdent pas forcément 1 vCPU, mais dont la priorité CPU peut baisser.
+    pub fn local_share_idle_peers(&self) -> Vec<u32> {
+        let mut peers: Vec<_> = self
+            .vms
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| s.cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT && !s.needs_local_cpu_share())
+            .map(|s| (s.vm_id, s.low_load_duration_secs(), s.cpu_usage_pct))
+            .collect();
+
+        peers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.total_cmp(&b.2)));
+        peers.into_iter().map(|(vm_id, _, _)| vm_id).collect()
+    }
+
+    pub fn set_cpu_weight(&self, vm_id: u32, weight: u32, local_share_active: bool) -> bool {
+        let mut vms = self.vms.write().unwrap();
+        let Some(state) = vms.get_mut(&vm_id) else {
+            return false;
+        };
+
+        let weight = weight.clamp(1, 10000);
+        if state.cpu_weight == weight && state.local_share_active == local_share_active {
+            return false;
+        }
+
+        state.cpu_weight = weight;
+        state.local_share_active = local_share_active;
+        state.updated_at = now_secs();
+        true
+    }
+
     // ─── Snapshot / métriques ─────────────────────────────────────────────
 
     /// Nombre de slots vCPU totaux sur le nœud.
@@ -612,6 +720,7 @@ impl VcpuScheduler {
         let steal = self.read_node_steal_pct();
         let vms = self.vms.read().unwrap();
         let vm_count = vms.len();
+        let shared_vm_count = vms.values().filter(|vm| vm.local_share_active).count();
 
         format!(
             "# HELP omega_vcpu_slots_total Slots vCPU totaux\n\
@@ -623,7 +732,9 @@ impl VcpuScheduler {
              # HELP omega_vcpu_steal_pct Steal time CPU nœud (%)\n\
              omega_vcpu_steal_pct{{node=\"{node}\"}} {steal:.2}\n\
              # HELP omega_vcpu_vm_count VMs gérées par le scheduler\n\
-             omega_vcpu_vm_count{{node=\"{node}\"}} {vm_count}\n",
+             omega_vcpu_vm_count{{node=\"{node}\"}} {vm_count}\n\
+             # HELP omega_vcpu_local_share_vms VMs actuellement en partage CPU local\n\
+             omega_vcpu_local_share_vms{{node=\"{node}\"}} {shared_vm_count}\n",
             node = node_id,
         )
     }
@@ -814,6 +925,48 @@ mod tests {
 
         let err = s.update_profile(1, 3, 6).unwrap_err();
         assert!(err.contains("min_vcpus"));
+    }
+
+    #[test]
+    fn test_local_share_borrowers_sorted_by_smallest_deficit_first() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        s.admit_vm(2, 1, 2);
+        s.update_vm_metrics(1, 95.0, 0.0);
+        s.update_vm_metrics(2, 90.0, 20.0);
+
+        let borrowers = s.local_share_borrowers();
+        assert_eq!(borrowers, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_local_share_donors_are_stable_low_load_vms() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        s.admit_vm(2, 1, 4);
+        let _ = s.try_hotplug(1);
+        let _ = s.try_hotplug(1);
+        let _ = s.try_hotplug(2);
+        {
+            let mut vms = s.vms.write().unwrap();
+            let vm1 = vms.get_mut(&1).unwrap();
+            vm1.cpu_usage_pct = DOWNSCALE_TRIGGER_PCT - 5.0;
+            vm1.low_load_since = Some(now_secs().saturating_sub(DOWNSCALE_STABLE_SECS + 10));
+            let vm2 = vms.get_mut(&2).unwrap();
+            vm2.cpu_usage_pct = HOTPLUG_TRIGGER_PCT + 5.0;
+        }
+
+        assert_eq!(s.local_share_donors(), vec![1]);
+    }
+
+    #[test]
+    fn test_set_cpu_weight_marks_local_share_mode() {
+        let s = make_scheduler(2);
+        s.admit_vm(1, 1, 2);
+        assert!(s.set_cpu_weight(1, BOOSTED_CPU_WEIGHT, true));
+        let state = s.get_vm_state(1).unwrap();
+        assert_eq!(state.cpu_weight, BOOSTED_CPU_WEIGHT);
+        assert!(state.local_share_active);
     }
 
     #[test]

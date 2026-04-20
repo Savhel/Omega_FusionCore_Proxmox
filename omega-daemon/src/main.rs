@@ -205,6 +205,8 @@ async fn main() -> Result<()> {
                     apply_downscale_if_idle(&state, &hotplug, &cpu_ctrl, vm_id, false);
                 }
 
+                reconcile_local_cpu_sharing(&state, &hotplug, &cpu_ctrl);
+
                 for (vm_id, reason) in state.vcpu_scheduler.vms_needing_migration() {
                     warn!(vm_id, reason = %reason, "VM candidate à la migration CPU");
                 }
@@ -432,7 +434,7 @@ fn ensure_vm_registered(
 
     match state.vcpu_scheduler.admit_vm(vm_id, min_vcpus, max_vcpus) {
         omega_daemon::vcpu_scheduler::VcpuDecision::Allocated { .. } => {
-            let _ = cpu_ctrl.apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(min_vcpus));
+            let _ = apply_cpu_envelope(state, cpu_ctrl, vm_id, min_vcpus);
             info!(
                 vm_id,
                 min_vcpus, max_vcpus, "VM enregistrée automatiquement dans le scheduler vCPU"
@@ -519,12 +521,31 @@ fn read_vm_cpu_profile_from_qm(vm_id: u32) -> Option<(usize, usize)> {
     parse_vm_cpu_profile(&content)
 }
 
+fn apply_cpu_envelope(
+    state: &Arc<NodeState>,
+    cpu_ctrl: &CgroupCpuController,
+    vm_id: u32,
+    vcpu_cap: usize,
+) -> Result<()> {
+    let weight = state
+        .vcpu_scheduler
+        .get_vm_state(vm_id)
+        .map(|vm| vm.cpu_weight)
+        .unwrap_or(omega_daemon::vcpu_scheduler::DEFAULT_CPU_WEIGHT);
+
+    cpu_ctrl.apply(
+        &VmCpuConfig::new(vm_id)
+            .capped_at_vcpus(vcpu_cap)
+            .with_weight(weight),
+    )
+}
+
 fn apply_hotplug_if_possible(
     state: &Arc<NodeState>,
     hotplug: &VcpuHotplugManager,
     cpu_ctrl: &CgroupCpuController,
     vm_id: u32,
-) {
+) -> omega_daemon::vcpu_scheduler::VcpuDecision {
     use omega_daemon::vcpu_scheduler::VcpuDecision;
 
     let decision = state.vcpu_scheduler.try_hotplug(vm_id);
@@ -532,18 +553,21 @@ fn apply_hotplug_if_possible(
         new_count, slot, ..
     } = decision
     else {
-        return;
+        return decision;
     };
 
     let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) else {
-        return;
+        return VcpuDecision::MigrateRequired {
+            vm_id,
+            reason: "état vCPU introuvable après réservation".into(),
+        };
     };
 
     match hotplug.add_vcpu(vm_id, vm_state.min_vcpus, vm_state.max_vcpus) {
         HotplugResult::Added {
             new_count: qmp_count,
         } => {
-            if let Err(e) = cpu_ctrl.apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count)) {
+            if let Err(e) = apply_cpu_envelope(state, cpu_ctrl, vm_id, qmp_count) {
                 warn!(vm_id, error = %e, "échec mise à jour cpu.max après hotplug");
             }
             info!(
@@ -552,6 +576,11 @@ fn apply_hotplug_if_possible(
                 qmp_count,
                 "hotplug vCPU appliqué automatiquement"
             );
+            VcpuDecision::Hotplugged {
+                vm_id,
+                new_count,
+                slot,
+            }
         }
         HotplugResult::NoSlots { current, max } => {
             state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
@@ -559,6 +588,13 @@ fn apply_hotplug_if_possible(
                 vm_id,
                 current, max, "hotplug QMP impossible — rollback scheduler, migration nécessaire"
             );
+            VcpuDecision::MigrateRequired {
+                vm_id,
+                reason: format!(
+                    "aucun slot CPU hotpluggable hors-ligne : current={} max={}",
+                    current, max
+                ),
+            }
         }
         HotplugResult::Unavailable { reason } => {
             state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
@@ -566,9 +602,14 @@ fn apply_hotplug_if_possible(
                 vm_id,
                 reason, "hotplug QMP indisponible — rollback scheduler"
             );
+            VcpuDecision::MigrateRequired { vm_id, reason }
         }
         HotplugResult::Removed { .. } | HotplugResult::AtMin { .. } => {
             state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
+            VcpuDecision::MigrateRequired {
+                vm_id,
+                reason: "résultat QMP inattendu pendant hotplug".into(),
+            }
         }
     }
 }
@@ -600,7 +641,7 @@ fn apply_downscale_if_idle(
     cpu_ctrl: &CgroupCpuController,
     vm_id: u32,
     force: bool,
-) {
+) -> omega_daemon::vcpu_scheduler::VcpuDecision {
     use omega_daemon::vcpu_scheduler::VcpuDecision;
 
     let decision = state.vcpu_scheduler.try_downscale(vm_id, force);
@@ -608,17 +649,17 @@ fn apply_downscale_if_idle(
         new_count, slot, ..
     } = decision
     else {
-        return;
+        return decision;
     };
 
     let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) else {
         let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
-        return;
+        return VcpuDecision::AtMin { vm_id };
     };
 
     match hotplug.remove_vcpu(vm_id, vm_state.min_vcpus) {
         HotplugResult::Removed { new_count: qmp_count } => {
-            if let Err(e) = cpu_ctrl.apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count)) {
+            if let Err(e) = apply_cpu_envelope(state, cpu_ctrl, vm_id, qmp_count) {
                 warn!(vm_id, error = %e, "échec mise à jour cpu.max après hot-unplug");
             }
             info!(
@@ -628,17 +669,120 @@ fn apply_downscale_if_idle(
                 force,
                 "downscale vCPU appliqué automatiquement"
             );
+            VcpuDecision::Downscaled {
+                vm_id,
+                new_count,
+                slot,
+            }
         }
         HotplugResult::AtMin { .. } => {
             let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
+            VcpuDecision::AtMin { vm_id }
         }
         HotplugResult::Unavailable { reason } => {
             let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
             warn!(vm_id, reason, "hot-unplug QMP indisponible — rollback scheduler");
+            VcpuDecision::MigrateRequired { vm_id, reason }
         }
         HotplugResult::NoSlots { .. } | HotplugResult::Added { .. } => {
             let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
             warn!(vm_id, "résultat QMP inattendu pendant hot-unplug");
+            VcpuDecision::MigrateRequired {
+                vm_id,
+                reason: "résultat QMP inattendu pendant hot-unplug".into(),
+            }
         }
+    }
+}
+
+fn reconcile_local_cpu_sharing(
+    state: &Arc<NodeState>,
+    hotplug: &VcpuHotplugManager,
+    cpu_ctrl: &CgroupCpuController,
+) {
+    use omega_daemon::vcpu_scheduler::{
+        VcpuDecision, BOOSTED_CPU_WEIGHT, DEFAULT_CPU_WEIGHT, DONOR_CPU_WEIGHT,
+    };
+    use std::collections::HashSet;
+
+    let borrowers = state.vcpu_scheduler.local_share_borrowers();
+    let mut donors = state.vcpu_scheduler.local_share_donors();
+
+    for borrower in &borrowers {
+        let Some(mut borrower_state) = state.vcpu_scheduler.get_vm_state(*borrower) else {
+            continue;
+        };
+
+        while borrower_state.needs_more_vcpus()
+            && borrower_state.current_vcpus < borrower_state.max_vcpus
+        {
+            let Some(idx) = donors.iter().position(|donor| *donor != *borrower) else {
+                break;
+            };
+            let donor_vm = donors.remove(idx);
+
+            match apply_downscale_if_idle(state, hotplug, cpu_ctrl, donor_vm, false) {
+                VcpuDecision::Downscaled { .. } => {
+                    info!(
+                        borrower_vm = *borrower,
+                        donor_vm,
+                        "réclamation locale d'un vCPU depuis une VM idle"
+                    );
+                    let _ = apply_hotplug_if_possible(state, hotplug, cpu_ctrl, *borrower);
+                }
+                _ => continue,
+            }
+
+            let Some(updated_state) = state.vcpu_scheduler.get_vm_state(*borrower) else {
+                break;
+            };
+            borrower_state = updated_state;
+        }
+    }
+
+    let stressed: HashSet<u32> = state
+        .vcpu_scheduler
+        .local_share_borrowers()
+        .into_iter()
+        .collect();
+    let donor_peers: HashSet<u32> = state
+        .vcpu_scheduler
+        .local_share_idle_peers()
+        .into_iter()
+        .filter(|vm_id| !stressed.contains(vm_id))
+        .collect();
+
+    for vm_state in state.vcpu_scheduler.vm_snapshot() {
+        let (target_weight, local_share_active) = if stressed.contains(&vm_state.vm_id) {
+            (BOOSTED_CPU_WEIGHT, true)
+        } else if donor_peers.contains(&vm_state.vm_id) {
+            (DONOR_CPU_WEIGHT, true)
+        } else {
+            (DEFAULT_CPU_WEIGHT, false)
+        };
+
+        if !state
+            .vcpu_scheduler
+            .set_cpu_weight(vm_state.vm_id, target_weight, local_share_active)
+        {
+            continue;
+        }
+
+        if let Err(e) = apply_cpu_envelope(state, cpu_ctrl, vm_state.vm_id, vm_state.current_vcpus)
+        {
+            warn!(
+                vm_id = vm_state.vm_id,
+                error = %e,
+                "échec mise à jour cpu.weight pendant le partage CPU local"
+            );
+            continue;
+        }
+
+        info!(
+            vm_id = vm_state.vm_id,
+            cpu_weight = target_weight,
+            local_share_active,
+            "politique de partage CPU local appliquée"
+        );
     }
 }

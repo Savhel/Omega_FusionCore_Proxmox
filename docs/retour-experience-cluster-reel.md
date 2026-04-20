@@ -293,6 +293,8 @@ La politique finale retenue pour le CPU est :
 - elle ne reçoit pas tout son plafond au boot
 - sous charge, le daemon monte progressivement jusqu'à `max_vcpus`
 - à faible charge stable, il redescend progressivement
+- si une VM est sous pression mais qu'aucun slot libre n'existe, le daemon essaie d'abord de récupérer 1 vCPU réel sur une VM durablement idle
+- si aucun retrait réel n'est possible, le daemon active un partage CPU local temporaire via `cpu.weight`
 - si le nœud manque de CPU, la VM reste vivante
 - si un autre nœud améliore la situation, le controller la migre
 - si aucun nœud ne peut la satisfaire complètement, elle reste vivante avec un déficit temporaire
@@ -301,6 +303,8 @@ Le projet utilise donc :
 
 - un pool logique cluster-wide
 - des hotplugs locaux côté daemon
+- une réclamation locale des VMs idle avant migration
+- un partage CPU local temporaire par priorité cgroup
 - des migrations best-effort côté controller
 
 Pas de vrai "remote CPU execution" inter-nœuds.
@@ -437,6 +441,4 @@ Ce qui a été validé sur le cluster réel :
 Ce qui reste à faire si on veut aller plus loin :
 
 - `cordon/uncordon` persistant
-- résolution correcte de `target=auto` côté daemon
 - HA Proxmox si on veut une reprise après panne sans drain manuel préalable
-

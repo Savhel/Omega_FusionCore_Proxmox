@@ -207,25 +207,26 @@ vcpu_scheduler.rs reçoit la métrique :
 Délai typique entre détection et hotplug : < 200 ms
 ```
 
-### Scénario 3 — Pool épuisé (migration d'instructions)
+### Scénario 3 — Pool épuisé (réclamation locale puis partage CPU)
 
 ```
 node-a : 24 vCPU pool → tous alloués
 VM 103 veut 2 vCPU supplémentaires → pool = 0
 
 vcpu_scheduler.rs :
-  Option 1 : attendre qu'une autre VM libère des vCPU
-  Option 2 : migration de charge
+  Étape 1 : chercher une VM durablement idle pouvant céder 1 vCPU réel
+  Étape 2 : hot-unplug côté donneur, hotplug côté VM 103
+  Étape 3 : si aucun donneur n'est disponible, activer un partage CPU local
 
-Migration : VM 103 ne migre pas physiquement.
-  Ses instructions sont placées dans la file d'attente d'un vCPU
-  partagé avec 2 autres VMs (MAX_VMS_PER_SLOT = 3).
+Partage CPU local :
+  VM 103 garde ses vCPU actuels
+  son cpu.weight est temporairement augmenté
+  les VMs peu actives du nœud voient leur cpu.weight baisser
 
-  cpu.max de VM 103 reste à sa valeur
-  Mais le slot CFS est partagé → les 3 VMs se partagent le temps
-
-Résultat : VM 103 reçoit moins que son quota pendant la contention
-  → throttling détecté → décision de réduire d'autres VMs moins prioritaires
+Résultat :
+  VM 103 reçoit plus de temps CPU hôte pendant la contention
+  sans "emprunter" littéralement les vCPU logiques des autres VMs
+  → si la pression persiste, la migration est recommandée
 ```
 
 ### Scénario 4 — Throttling persistant
@@ -235,9 +236,11 @@ VM 104 : throttle_ratio = 0.40 (40% des périodes throttlées) pendant 1 seconde
   Le nœud est saturé — aucun vCPU libre
 
 vcpu_scheduler.rs :
-  Identifie VM 105 (interne, basse priorité) : avg_usage = 3%
-  → Retire 2 vCPU à VM 105 (hotplug_remove)
-  → Donne 2 vCPU à VM 104
+  Identifie VM 105 (basse charge stable) : avg_usage = 3%
+  → Retire 1 vCPU à VM 105 (hotplug_remove) si elle est au-dessus de son minimum
+  → Donne 1 vCPU à VM 104
+  → Si aucun retrait réel n'est possible, VM 104 passe en priorité CPU locale
+    via cpu.weight en attendant la migration
 
 balloon.rs peut aussi intervenir :
   Si VM 105 n'a pas besoin de RAM → libérer sa RAM pour éviter que la

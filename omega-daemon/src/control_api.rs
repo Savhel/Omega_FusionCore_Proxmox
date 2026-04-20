@@ -37,7 +37,7 @@ use crate::cpu_cgroup::{CgroupCpuController, VmCpuConfig};
 use crate::node_state::NodeState;
 use crate::qmp_vcpu::{HotplugResult, VcpuHotplugManager};
 use crate::quota::VmQuota;
-use crate::vcpu_scheduler::VcpuDecision;
+use crate::vcpu_scheduler::{VcpuDecision, DEFAULT_CPU_WEIGHT};
 use crate::vm_migration::{
     MigrationExecutor, MigrationPolicy, MigrationRequest, MigrationThresholds,
 };
@@ -653,8 +653,16 @@ async fn vcpu_admit(
         .get_vm_state(vm_id)
         .map(|vm| vm.current_vcpus)
         .unwrap_or(req.min_vcpus);
-    let _ =
-        CgroupCpuController::new().apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(current_vcpus));
+    let weight = state
+        .vcpu_scheduler
+        .get_vm_state(vm_id)
+        .map(|vm| vm.cpu_weight)
+        .unwrap_or(DEFAULT_CPU_WEIGHT);
+    let _ = CgroupCpuController::new().apply(
+        &VmCpuConfig::new(vm_id)
+            .capped_at_vcpus(current_vcpus)
+            .with_weight(weight),
+    );
 
     (
         StatusCode::OK,
@@ -836,8 +844,16 @@ fn apply_hotplug(state: &Arc<NodeState>, vm_id: u32) -> VcpuDecision {
         HotplugResult::Added {
             new_count: qmp_count,
         } => {
-            let _ = CgroupCpuController::new()
-                .apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count));
+            let weight = state
+                .vcpu_scheduler
+                .get_vm_state(vm_id)
+                .map(|vm| vm.cpu_weight)
+                .unwrap_or(DEFAULT_CPU_WEIGHT);
+            let _ = CgroupCpuController::new().apply(
+                &VmCpuConfig::new(vm_id)
+                    .capped_at_vcpus(qmp_count)
+                    .with_weight(weight),
+            );
             VcpuDecision::Hotplugged {
                 vm_id,
                 new_count,
@@ -885,8 +901,16 @@ fn apply_downscale(state: &Arc<NodeState>, vm_id: u32, force: bool) -> VcpuDecis
     let hotplug_manager = VcpuHotplugManager::new(&state.qmp_dir);
     match hotplug_manager.remove_vcpu(vm_id, vm_state.min_vcpus) {
         HotplugResult::Removed { new_count: qmp_count } => {
-            let _ = CgroupCpuController::new()
-                .apply(&VmCpuConfig::new(vm_id).capped_at_vcpus(qmp_count));
+            let weight = state
+                .vcpu_scheduler
+                .get_vm_state(vm_id)
+                .map(|vm| vm.cpu_weight)
+                .unwrap_or(DEFAULT_CPU_WEIGHT);
+            let _ = CgroupCpuController::new().apply(
+                &VmCpuConfig::new(vm_id)
+                    .capped_at_vcpus(qmp_count)
+                    .with_weight(weight),
+            );
             VcpuDecision::Downscaled {
                 vm_id,
                 new_count,
