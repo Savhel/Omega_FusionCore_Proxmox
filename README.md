@@ -48,7 +48,8 @@ Les disques sont sur Ceph RBD (partagés), donc seule la RAM est transférée.
 Les vCPU sont alloués dynamiquement. Une VM démarre avec un minimum et reçoit des cœurs supplémentaires (hotplug) quand sa charge augmente, jusqu'à son plafond. Si le nœud sature, le daemon suit désormais trois étapes :
 
 - réclamation locale d'un vCPU auprès d'une VM durablement idle
-- seulement si cette VM donneuse reste au-dessus de son minimum et ne montre pas de pression CPU
+- seulement si cette VM donneuse reste à un niveau égal ou supérieur à son plancher de sécurité
+  calculé depuis `min_vcpus` et son utilisation récente, sans pression CPU
 - partage CPU local temporaire via `cpu.weight` pour favoriser la VM en tension
 - migration automatique vers un autre nœud si la saturation persiste ou si le hotplug n'est plus possible
   et cette migration suit le nœud qui améliore le mieux l'équilibre global du cluster

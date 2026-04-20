@@ -294,7 +294,9 @@ La politique finale retenue pour le CPU est :
 - sous charge, le daemon monte progressivement jusqu'à `max_vcpus`
 - à faible charge stable, il redescend progressivement
 - si une VM est sous pression mais qu'aucun slot libre n'existe, le daemon essaie d'abord de récupérer 1 vCPU réel sur une VM durablement idle
-  à condition que la donneuse reste au-dessus de son `min_vcpus`, ne throttle pas et ne montre pas de pression CPU
+  à condition que la donneuse reste à un niveau égal ou supérieur à un plancher
+  de sécurité dérivé de `min_vcpus` et de son utilisation récente, sans throttle
+  ni pression CPU
 - si aucun retrait réel n'est possible, le daemon active un partage CPU local temporaire via `cpu.weight`
 - si le nœud manque de CPU, la VM reste vivante
 - si un autre nœud améliore la situation globale du cluster, le controller la migre

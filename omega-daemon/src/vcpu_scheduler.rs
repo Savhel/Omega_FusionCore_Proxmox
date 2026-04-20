@@ -147,7 +147,7 @@ impl VmVcpuState {
 
     /// La VM peut-elle perdre 1 vCPU sans passer sous son minimum ?
     pub fn can_downscale(&self) -> bool {
-        self.current_vcpus > self.min_vcpus
+        self.current_vcpus > self.safe_vcpu_floor()
             && self.cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT
             && self.low_load_duration_secs() >= DOWNSCALE_STABLE_SECS
     }
@@ -158,6 +158,16 @@ impl VmVcpuState {
             && self.steal_pct <= DONOR_SAFE_STEAL_PCT
             && !self.has_steal_pressure()
             && !self.local_share_active
+    }
+
+    /// Plancher dynamique en dessous duquel la VM ne doit pas descendre.
+    ///
+    /// Il reste au minimum déclaré, mais peut monter si l'utilisation CPU récente
+    /// suggère que la VM a encore besoin de plus de parallélisme pour survivre
+    /// correctement après un retrait.
+    pub fn safe_vcpu_floor(&self) -> usize {
+        let usage_floor = ((self.cpu_usage_pct / HOTPLUG_TRIGGER_PCT).ceil() as usize).max(1);
+        self.min_vcpus.max(usage_floor).min(self.current_vcpus.max(1))
     }
 
     /// VM sous pression qui mérite un partage CPU local temporaire.
@@ -634,7 +644,7 @@ impl VcpuScheduler {
             .map(|s| {
                 (
                     s.vm_id,
-                    s.current_vcpus.saturating_sub(s.min_vcpus),
+                    s.current_vcpus.saturating_sub(s.safe_vcpu_floor()),
                     s.low_load_duration_secs(),
                     s.cpu_usage_pct,
                 )
@@ -979,6 +989,23 @@ mod tests {
         }
 
         assert!(s.local_share_donors().is_empty());
+    }
+
+    #[test]
+    fn test_safe_vcpu_floor_can_stay_above_min_when_usage_requires_it() {
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4);
+        let _ = s.try_hotplug(1);
+        let _ = s.try_hotplug(1);
+        {
+            let mut vms = s.vms.write().unwrap();
+            let vm = vms.get_mut(&1).unwrap();
+            vm.cpu_usage_pct = 55.0;
+            vm.low_load_since = Some(now_secs().saturating_sub(DOWNSCALE_STABLE_SECS + 10));
+        }
+
+        let state = s.get_vm_state(1).unwrap();
+        assert_eq!(state.safe_vcpu_floor(), 2);
     }
 
     #[test]
