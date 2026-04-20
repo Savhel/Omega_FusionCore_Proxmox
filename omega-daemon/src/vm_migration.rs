@@ -286,6 +286,12 @@ pub fn build_qm_args(req: &MigrationRequest) -> Vec<String> {
 
 /// Exécute `qm migrate` sur ce nœud.
 pub async fn execute_qm_migrate(req: &MigrationRequest) -> Result<()> {
+    if req.target == "auto" {
+        return Err(anyhow::anyhow!(
+            "cible de migration non résolue: le daemon ne peut pas exécuter qm migrate avec target=auto"
+        ));
+    }
+
     let args = build_qm_args(req);
 
     let output = Command::new("qm")
@@ -528,7 +534,6 @@ impl MigrationPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn make_req(mtype: MigrationType) -> MigrationRequest {
         MigrationRequest {
@@ -563,6 +568,17 @@ mod tests {
             let args = build_qm_args(&make_req(mtype));
             assert!(!args.contains(&"--with-local-disks".to_string()));
         }
+    }
+
+    #[tokio::test]
+    async fn test_execute_qm_migrate_rejects_auto_target() {
+        let mut req = make_req(MigrationType::Live);
+        req.target = "auto".into();
+
+        let err = execute_qm_migrate(&req).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("target=auto"));
     }
 
     fn make_policy() -> MigrationPolicy {

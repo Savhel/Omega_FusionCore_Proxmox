@@ -191,6 +191,16 @@ impl EvictionEngine {
                 continue;
             }
 
+            if rec.target == "auto" {
+                warn!(
+                    vm_id = rec.vm_id,
+                    mtype = ?rec.mtype,
+                    reason = ?rec.reason,
+                    "migration automatique recommandée sans cible résolue — exécution locale ignorée"
+                );
+                continue;
+            }
+
             info!(
                 vm_id   = rec.vm_id,
                 target  = %rec.target,

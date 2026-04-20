@@ -449,18 +449,53 @@ fn ensure_vm_registered(
 }
 
 fn read_vm_cpu_profile(conf_dir: &str, vm_id: u32) -> Option<(usize, usize)> {
-    let conf_file = format!("{}/{}.conf", conf_dir, vm_id);
-    let content = fs::read_to_string(conf_file).ok()?;
+    let direct_conf = format!("{}/{}.conf", conf_dir, vm_id);
+    if let Ok(content) = fs::read_to_string(&direct_conf) {
+        if let Some(profile) = parse_vm_cpu_profile(&content) {
+            return Some(profile);
+        }
+    }
 
+    // Certaines installations exposent les confs locales sous /etc/pve/nodes/<node>/qemu-server.
+    if conf_dir.ends_with("/qemu-server") {
+        if let Some(nodes_root) = conf_dir.strip_suffix("/qemu-server") {
+            let nodes_dir = format!("{}/nodes", nodes_root);
+            if let Ok(entries) = fs::read_dir(nodes_dir) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join("qemu-server").join(format!("{vm_id}.conf"));
+                    if let Ok(content) = fs::read_to_string(candidate) {
+                        if let Some(profile) = parse_vm_cpu_profile(&content) {
+                            return Some(profile);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    read_vm_cpu_profile_from_qm(vm_id)
+}
+
+fn parse_vm_cpu_profile(content: &str) -> Option<(usize, usize)> {
     let mut sockets = 1usize;
     let mut cores = 1usize;
     let mut boot_vcpus: Option<usize> = None;
 
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("sockets:") {
-            sockets = rest.trim().parse::<usize>().ok().filter(|v| *v > 0).unwrap_or(1);
+            sockets = rest
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|v| *v > 0)
+                .unwrap_or(1);
         } else if let Some(rest) = line.strip_prefix("cores:") {
-            cores = rest.trim().parse::<usize>().ok().filter(|v| *v > 0).unwrap_or(1);
+            cores = rest
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|v| *v > 0)
+                .unwrap_or(1);
         } else if let Some(rest) = line.strip_prefix("vcpus:") {
             boot_vcpus = rest.trim().parse::<usize>().ok().filter(|v| *v > 0);
         }
@@ -469,6 +504,19 @@ fn read_vm_cpu_profile(conf_dir: &str, vm_id: u32) -> Option<(usize, usize)> {
     let max_vcpus = sockets.saturating_mul(cores).max(1);
     let min_vcpus = boot_vcpus.unwrap_or(max_vcpus).clamp(1, max_vcpus);
     Some((min_vcpus, max_vcpus))
+}
+
+fn read_vm_cpu_profile_from_qm(vm_id: u32) -> Option<(usize, usize)> {
+    let output = std::process::Command::new("qm")
+        .arg("config")
+        .arg(vm_id.to_string())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let content = String::from_utf8(output.stdout).ok()?;
+    parse_vm_cpu_profile(&content)
 }
 
 fn apply_hotplug_if_possible(
@@ -522,6 +570,27 @@ fn apply_hotplug_if_possible(
         HotplugResult::Removed { .. } | HotplugResult::AtMin { .. } => {
             state.vcpu_scheduler.rollback_hotplug(vm_id, slot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_vm_cpu_profile_uses_boot_vcpus_as_min() {
+        let profile = parse_vm_cpu_profile(
+            "boot: order=scsi0\ncores: 4\nsockets: 1\nvcpus: 1\nmemory: 512\n",
+        )
+        .unwrap();
+        assert_eq!(profile, (1, 4));
+    }
+
+    #[test]
+    fn test_parse_vm_cpu_profile_defaults_min_to_max_without_vcpus_line() {
+        let profile =
+            parse_vm_cpu_profile("cores: 2\nsockets: 2\nmemory: 512\n").unwrap();
+        assert_eq!(profile, (4, 4));
     }
 }
 
