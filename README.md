@@ -60,6 +60,24 @@ Il ne s'agit pas d'un "prêt" direct de vCPU entre VMs : on rééquilibre le tem
 
 Un GPU physique est partagé entre toutes les VMs d'un nœud. Chaque VM a un budget VRAM configurable via l'API de contrôle. Le daemon arbitre les accès, expose l'état GPU du nœud, nettoie les budgets après migration et le controller évite d'envoyer une VM GPU vers un nœud qui n'a pas assez de VRAM libre.
 
+La source de vérité GPU est explicite :
+
+- la capacité GPU du nœud vient du backend DRM réel (`/dev/dri/renderD*` + sysfs VRAM)
+- les budgets GPU des VMs viennent de la configuration Proxmox (`description` / `tags`)
+- le controller ne réinvente pas ces valeurs, il consomme ce que le daemon et Proxmox publient
+
+### 6. Scheduler disque local
+
+Le stockage reste partagé via Ceph RBD, mais la contention disque locale est maintenant gérée automatiquement :
+
+- lecture des compteurs réels via `io.stat` cgroups v2
+- lecture de la pression I/O du nœud via PSI (`io.pressure`)
+- rééquilibrage temporaire via `io.weight`
+- baisse de priorité pour les VMs durablement idle
+- hausse de priorité pour les VMs réellement actives quand le nœud souffre
+
+Il ne s'agit pas d'un "prêt" de disque entre VMs. On laisse le noyau arbitrer le débit I/O avec des poids réalistes, puis le controller peut migrer si un autre nœud améliore l'état global du cluster.
+
 ---
 
 ## Architecture
@@ -104,6 +122,8 @@ Un seul binaire, un daemon par nœud.
 | `vm_tracker.rs` | Détecte les VMs QEMU locales via les fichiers Proxmox |
 | `quota.rs` | Budget strict RAM par VM, invariant garanti à chaque écriture |
 | `vcpu_scheduler.rs` | Allocation élastique des vCPU, hotplug, steal time |
+| `disk_io_scheduler.rs` | Répartition locale des priorités disque via `io.weight` |
+| `io_cgroup.rs` | Lecture/écriture `io.stat`, `io.weight`, PSI I/O |
 | `vm_migration.rs` | Lance `qm migrate` live ou cold, nettoie les ressources source |
 | `gpu_multiplexer.rs` | Arbitre les accès GPU entre VMs, budget VRAM par VM |
 | `gpu_runtime.rs` | État GPU synchrone exposé via `/api/status` et `/control/gpu/status` |
@@ -121,7 +141,7 @@ Un seul processus, tourne sur un nœud.
 | `admission.py` | Valide et place les nouvelles VMs (RAM locale + distante) |
 | `cpu_admission.py` | Valide l'allocation vCPU à l'échelle du cluster |
 | `gpu_admission.py` | Valide les budgets VRAM à l'échelle du cluster |
-| `migration_policy.py` | Évalue quelles VMs migrer en tenant compte de la RAM, du CPU, du GPU et du type live/cold |
+| `migration_policy.py` | Évalue quelles VMs migrer en tenant compte de la RAM, du CPU, du disque, du GPU et du type live/cold |
 | `migration_daemon.py` | Boucle de migration automatique via l'API Proxmox |
 | `topology_placement.py` | Score de placement : RAM 50%, topologie 25%, CPU 15%, migrations actives 10% |
 | `resilient_collector.py` | Collecte l'état des nœuds avec retry + circuit-breaker (données en cache 120s) |
@@ -152,7 +172,8 @@ JSON sur HTTP plain. Le port 9200 est accessible par le cluster entier. Le port 
 
 - Ne modifie pas le kernel Linux — tout fonctionne en espace utilisateur via userfaultfd
 - Ne remplace pas QEMU/KVM — la virtualisation reste inchangée
-- Ne gère pas les disques des VMs — uniquement la RAM
+- Ne migre pas les disques locaux des VMs — on suppose Ceph RBD / stockage partagé
+- Ne fait pas de QoS disque matérielle au niveau SAN/Ceph — seulement l'arbitrage local via cgroups v2
 - Ne remplace pas Proxmox HA — la tolérance aux pannes nœud reste celle de Proxmox natif
 - Ne compresse pas les pages (optionnel, non activé par défaut)
 
@@ -173,6 +194,7 @@ JSON sur HTTP plain. Le port 9200 est accessible par le cluster entier. Le port 
 | `docs/developpement-et-deploiement.md` | Workflow dev → lab → prod |
 | `docs/architecture.md` | Flux de données détaillés |
 | `docs/fonctionnement-complet.md` | Chaque décision expliquée |
+| `docs/guide-test-et-depannage-complet.md` | Guide terrain unique : création VM, tests, logs, erreurs réelles |
 | `docs/cluster-kvm.md` | Monter un lab KVM sur une machine physique |
 | `docs/cluster-physique.md` | Déploiement sur machines physiques |
 | `docs/utilisation-physique.md` | Commandes opérationnelles |
