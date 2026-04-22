@@ -124,6 +124,8 @@ pub fn build_control_router(state: Arc<NodeState>) -> Router {
         .route("/control/vm/:vm_id/vcpu", post(vcpu_admit))
         .route("/control/vm/:vm_id/vcpu", delete(vcpu_release))
         .route("/control/vm/:vm_id/vcpu/hotplug", post(vcpu_hotplug))
+        // ── Scheduler disque ──────────────────────────────────────────────
+        .route("/control/disk/status", get(disk_status))
         // ── GPU multiplexer ───────────────────────────────────────────────
         .route("/control/gpu/status", get(gpu_status))
         .route("/control/vm/:vm_id/gpu", post(set_gpu_budget))
@@ -459,6 +461,7 @@ async fn prometheus_metrics(State(state): State<Arc<NodeState>>) -> String {
     );
 
     output.push_str(&state.vcpu_scheduler.prometheus_metrics(&state.node_id));
+    output.push_str(&state.disk_io_scheduler.prometheus_metrics(&state.node_id));
     if let Some(gpu) = &state.gpu_runtime {
         output.push_str(&gpu.prometheus_metrics(&state.node_id).await);
     }
@@ -485,6 +488,22 @@ async fn vcpu_status(State(state): State<Arc<NodeState>>) -> Json<Value> {
         "vms_needing_migration": sched.vms_needing_migration(),
         "vm_states":        sched.vm_snapshot(),
         "prometheus":       metrics,
+    }))
+}
+
+/// GET /control/disk/status — état global du scheduler disque
+async fn disk_status(State(state): State<Arc<NodeState>>) -> Json<Value> {
+    let sched = &state.disk_io_scheduler;
+    let status = sched.status();
+    let metrics = sched.prometheus_metrics(&state.node_id);
+
+    Json(json!({
+        "node_id": state.node_id,
+        "disk_pressure_pct": status.node_pressure_pct,
+        "busy_vms": status.busy_vms,
+        "donor_vms": status.donor_vms,
+        "vm_states": status.vm_states,
+        "prometheus": metrics,
     }))
 }
 
@@ -900,7 +919,9 @@ fn apply_downscale(state: &Arc<NodeState>, vm_id: u32, force: bool) -> VcpuDecis
 
     let hotplug_manager = VcpuHotplugManager::new(&state.qmp_dir);
     match hotplug_manager.remove_vcpu(vm_id, vm_state.min_vcpus) {
-        HotplugResult::Removed { new_count: qmp_count } => {
+        HotplugResult::Removed {
+            new_count: qmp_count,
+        } => {
             let weight = state
                 .vcpu_scheduler
                 .get_vm_state(vm_id)

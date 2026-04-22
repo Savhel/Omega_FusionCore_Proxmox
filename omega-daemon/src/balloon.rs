@@ -273,6 +273,8 @@ pub struct BalloonMonitor {
     /// Callback déclenché quand un guest est sous pression
     /// Arguments : vmid, BalloonStats
     on_pressure: Arc<dyn Fn(u32, BalloonStats) + Send + Sync>,
+    /// Callback déclenché à chaque échantillon valide
+    on_sample: Option<Arc<dyn Fn(u32, BalloonStats) + Send + Sync>>,
 }
 
 use std::sync::Arc;
@@ -289,7 +291,16 @@ impl BalloonMonitor {
             poll_interval: Duration::from_secs(poll_interval_secs),
             free_threshold_pct,
             on_pressure: Arc::new(on_pressure),
+            on_sample: None,
         }
+    }
+
+    pub fn with_sample_hook(
+        mut self,
+        on_sample: impl Fn(u32, BalloonStats) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_sample = Some(Arc::new(on_sample));
+        self
     }
 
     /// Boucle de surveillance — à lancer dans une tâche Tokio via `tokio::task::spawn_blocking`.
@@ -316,6 +327,9 @@ impl BalloonMonitor {
                 let client = QmpClient::for_vm(vmid, &self.qmp_dir);
                 match client.query_stats() {
                     Ok(Some(stats)) => {
+                        if let Some(ref hook) = self.on_sample {
+                            hook(vmid, stats.clone());
+                        }
                         if stats.is_under_pressure(self.free_threshold_pct) {
                             info!(
                                 vmid,

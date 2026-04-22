@@ -1,4 +1,4 @@
-# Fonctionnement complet — RAM, vCPU, GPU
+# Fonctionnement complet — RAM, vCPU, disque, GPU
 
 Ce document décrit tous les scénarios de vie d'une VM dans le système omega-remote-paging :
 de la création jusqu'au fonctionnement sous pression, pour les trois ressources gérées.
@@ -15,7 +15,7 @@ de la création jusqu'au fonctionnement sous pression, pour les trois ressources
 │  ┌──────────────┐                                               │
 │  │ processus    │  userfaultfd ──► omega-daemon (Rust)          │
 │  │ qemu-system  │  QMP socket  ──► vcpu hotplug                 │
-│  │              │  cgroup v2   ──► cpu.max / cpu.weight         │
+│  │              │  cgroup v2   ──► cpu.max / cpu.weight / io.weight │
 │  └──────────────┘  /dev/dri   ──► GPU multiplexer              │
 │                                                                 │
 │  omega-daemon (Rust)                                            │
@@ -23,7 +23,9 @@ de la création jusqu'au fonctionnement sous pression, pour les trois ressources
 │  ├── eviction_engine  ← décide quoi paginer vers les autres nœuds│
 │  ├── vcpu_scheduler   ← gère le pool de vCPU                   │
 │  ├── qmp_vcpu         ← hotplug réel via QMP                   │
-│  ├── cpu_cgroup       ← lit/écrit cgroups v2                   │
+│  ├── cpu_cgroup       ← lit/écrit cgroups CPU v2               │
+│  ├── io_cgroup        ← lit/écrit cgroups I/O v2               │
+│  ├── disk_io_scheduler← rééquilibre les priorités disque locales│
 │  ├── gpu_multiplexer  ← partage le GPU entre VMs               │
 │  └── gpu_drm_backend  ← ioctls DRM vers /dev/dri/renderD128    │
 │                                                                 │
@@ -35,7 +37,15 @@ de la création jusqu'au fonctionnement sous pression, pour les trois ressources
 ```
 
 Le cluster comporte 3 nœuds identiques. Chaque nœud exécute un `omega-daemon`.
-Les nœuds communiquent entre eux via TLS pour le paging RAM distant.
+Les nœuds communiquent entre eux via TLS pour le paging RAM distant. Le disque reste
+sur Ceph RBD partagé, mais l'arbitrage de contention locale se fait via `io.weight`.
+
+## Partie 0 — Source de vérité par ressource
+
+- RAM : quotas et budgets réels dans `quota.rs`, ajustés depuis `virtio-balloon` via QMP
+- CPU : topologie et hotplug réels via QMP, bande passante via `cpu.max`/`cpu.weight`
+- Disque : compteurs réels via `io.stat`, pression nœud via PSI I/O, priorités via `io.weight`
+- GPU : capacité nœud via backend DRM (`/dev/dri/renderD*`), budgets VM via métadonnées Proxmox
 
 ---
 

@@ -524,6 +524,10 @@ def _fetch_cluster_state(node_urls: Dict[str, str]) -> Dict[str, MigNodeState]:
                     avg_cpu_pct    = vm_entry.get("avg_cpu_pct", 0.0),
                     throttle_ratio = vm_entry.get("throttle_ratio", 0.0),
                     gpu_vram_budget_mib = vm_entry.get("gpu_vram_budget_mib", 0),
+                    disk_read_bps = vm_entry.get("disk_read_bps", 0.0),
+                    disk_write_bps = vm_entry.get("disk_write_bps", 0.0),
+                    disk_io_weight = vm_entry.get("disk_io_weight", 100),
+                    disk_local_share_active = vm_entry.get("disk_local_share_active", False),
                 ))
 
             mem_total_kb      = node_data.get("mem_total_kb", 0)
@@ -540,6 +544,7 @@ def _fetch_cluster_state(node_urls: Dict[str, str]) -> Dict[str, MigNodeState]:
                 vcpu_free        = vcpu_free,
                 gpu_total_vram_mib = gpu_data.get("total_vram_mib", 0),
                 gpu_free_vram_mib = gpu_data.get("free_vram_mib", 0),
+                disk_pressure_pct = node_data.get("disk_pressure_pct", 0.0),
                 local_vms        = vms,
             )
         except requests.RequestException as exc:
@@ -560,6 +565,10 @@ def _build_cluster_state(node_states: Dict[str, MigNodeState], node_urls: Dict[s
                 remote_mem_mib=vm.remote_pages * 4 // 1024,
                 status=vm.status,
                 gpu_vram_budget_mib=vm.gpu_vram_budget_mib,
+                disk_read_bps=vm.disk_read_bps,
+                disk_write_bps=vm.disk_write_bps,
+                disk_io_weight=vm.disk_io_weight,
+                disk_local_share_active=vm.disk_local_share_active,
             )
             for vm in state.local_vms
         ]
@@ -579,6 +588,7 @@ def _build_cluster_state(node_states: Dict[str, MigNodeState], node_urls: Dict[s
             gpu_free_vram_mib=state.gpu_free_vram_mib,
             gpu_reserved_vram_mib=max(0, state.gpu_total_vram_mib - state.gpu_free_vram_mib),
             gpu_backend_name="",
+            disk_pressure_pct=state.disk_pressure_pct,
             reachable=True,
         ))
     return ClusterState(nodes=nodes)

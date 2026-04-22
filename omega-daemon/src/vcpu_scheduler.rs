@@ -167,7 +167,9 @@ impl VmVcpuState {
     /// correctement après un retrait.
     pub fn safe_vcpu_floor(&self) -> usize {
         let usage_floor = ((self.cpu_usage_pct / HOTPLUG_TRIGGER_PCT).ceil() as usize).max(1);
-        self.min_vcpus.max(usage_floor).min(self.current_vcpus.max(1))
+        self.min_vcpus
+            .max(usage_floor)
+            .min(self.current_vcpus.max(1))
     }
 
     /// VM sous pression qui mérite un partage CPU local temporaire.
@@ -487,7 +489,13 @@ impl VcpuScheduler {
         }
 
         let new_count = state.current_vcpus;
-        info!(vm_id, new_count, pcpu = slot.pcpu, slot = slot.slot, "vCPU retiré du scheduler");
+        info!(
+            vm_id,
+            new_count,
+            pcpu = slot.pcpu,
+            slot = slot.slot,
+            "vCPU retiré du scheduler"
+        );
         VcpuDecision::Downscaled {
             vm_id,
             new_count,
@@ -630,7 +638,10 @@ impl VcpuScheduler {
                 .then_with(|| b.3.total_cmp(&a.3))
         });
 
-        borrowers.into_iter().map(|(vm_id, _, _, _)| vm_id).collect()
+        borrowers
+            .into_iter()
+            .map(|(vm_id, _, _, _)| vm_id)
+            .collect()
     }
 
     /// VMs durablement au repos pouvant céder 1 vCPU réel.

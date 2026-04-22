@@ -511,7 +511,10 @@ burst_usec 0\n",
         let ctrl = CgroupCpuController::with_root(tmp.path());
         let found = ctrl.find_vm_cgroup(107);
         assert!(found.is_some(), "cgroup qemu.slice introuvable");
-        assert!(found.unwrap().to_string_lossy().contains("qemu.slice/107.scope"));
+        assert!(found
+            .unwrap()
+            .to_string_lossy()
+            .contains("qemu.slice/107.scope"));
     }
 
     #[test]

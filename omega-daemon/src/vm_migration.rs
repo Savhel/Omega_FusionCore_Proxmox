@@ -576,9 +576,7 @@ mod tests {
         req.target = "auto".into();
 
         let err = execute_qm_migrate(&req).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("target=auto"));
+        assert!(err.to_string().contains("target=auto"));
     }
 
     fn make_policy() -> MigrationPolicy {

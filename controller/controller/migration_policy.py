@@ -50,6 +50,7 @@ class MigrationType(str, Enum):
 class MigrationReason(str, Enum):
     MEMORY_PRESSURE      = "memory_pressure"
     CPU_SATURATION       = "cpu_saturation"
+    DISK_SATURATION      = "disk_saturation"
     GPU_SATURATION       = "gpu_saturation"
     EXCESSIVE_REMOTE_PAGING = "excessive_remote_paging"
     MAINTENANCE_DRAIN    = "maintenance_drain"
@@ -67,6 +68,7 @@ class NodeState:
     vcpu_free:        int       = 24
     gpu_total_vram_mib: int     = 0
     gpu_free_vram_mib: int      = 0
+    disk_pressure_pct: float    = 0.0
     local_vms:        List[VmState] = field(default_factory=list)
 
     @property
@@ -85,7 +87,8 @@ class NodeState:
         """Score de capacité d'accueil : plus haut = meilleur nœud cible."""
         ram_free_ratio  = 1.0 - self.ram_used_pct  / 100.0
         vcpu_free_ratio = 1.0 - self.vcpu_used_pct / 100.0
-        return ram_free_ratio * 0.6 + vcpu_free_ratio * 0.4
+        disk_free_ratio = 1.0 - self.disk_pressure_pct / 100.0
+        return ram_free_ratio * 0.5 + vcpu_free_ratio * 0.3 + disk_free_ratio * 0.2
 
     @property
     def gpu_used_pct(self) -> float:
@@ -104,6 +107,7 @@ class NodeState:
         new_avail_pct = new_avail / self.mem_total_kb * 100.0 if self.mem_total_kb else 0.0
         ram_ok  = new_avail_pct >= 20.0  # garder 20% libres
         vcpu_ok = self.vcpu_used_pct < 80.0
+        disk_ok = self.disk_pressure_pct < 15.0
         gpu_ok = (
             vm.gpu_vram_budget_mib == 0
             or (
@@ -111,7 +115,7 @@ class NodeState:
                 and self.gpu_free_vram_mib >= vm.gpu_vram_budget_mib
             )
         )
-        return ram_ok and vcpu_ok and gpu_ok
+        return ram_ok and vcpu_ok and disk_ok and gpu_ok
 
 
 @dataclass
@@ -125,6 +129,10 @@ class VmState:
     avg_cpu_pct:    float        = 0.0
     throttle_ratio: float        = 0.0
     gpu_vram_budget_mib: int     = 0
+    disk_read_bps: float         = 0.0
+    disk_write_bps: float        = 0.0
+    disk_io_weight: int          = 100
+    disk_local_share_active: bool = False
     idle_since:     Optional[float] = None   # timestamp monotonic depuis quand idle
 
     @property
@@ -141,6 +149,10 @@ class VmState:
         if total_pages == 0:
             return 0.0
         return self.remote_pages / total_pages * 100.0
+
+    @property
+    def disk_total_bps(self) -> float:
+        return self.disk_read_bps + self.disk_write_bps
 
     def idle_duration_secs(self) -> float:
         if self.idle_since is None:
@@ -181,6 +193,8 @@ class MigrationThresholds:
     # vCPU
     vcpu_throttle_trigger: float = 0.30   # throttle > 30% → migrer
     vcpu_saturation_pct:   float = 90.0   # nœud > 90% utilisé → migrer
+    disk_high_pct:         float = 10.0   # PSI I/O avg10 > 10% → disque tendu
+    disk_hot_vm_bps:       float = 8.0 * 1024.0 * 1024.0  # VM très active en disque
 
     # Remote paging
     remote_paging_pct: float = 60.0   # > 60% de la RAM en distant → migrer
@@ -231,6 +245,8 @@ class MigrationPolicy:
                     "vcpu_saturation_pct": self.thresholds.vcpu_saturation_pct,
                     "remote_paging_pct": self.thresholds.remote_paging_pct,
                     "gpu_high_pct": self.thresholds.gpu_high_pct,
+                    "disk_high_pct": self.thresholds.disk_high_pct,
+                    "disk_hot_vm_bps": self.thresholds.disk_hot_vm_bps,
                     "idle_cpu_pct": self.thresholds.idle_cpu_pct,
                     "idle_duration_secs": self.thresholds.idle_duration_secs,
                     "target_max_ram_pct": self.thresholds.target_max_ram_pct,
@@ -245,6 +261,7 @@ class MigrationPolicy:
                         "vcpu_free": node.vcpu_free,
                         "gpu_total_vram_mib": node.gpu_total_vram_mib,
                         "gpu_free_vram_mib": node.gpu_free_vram_mib,
+                        "disk_pressure_pct": node.disk_pressure_pct,
                         "local_vms": [
                             {
                                 "vm_id": vm.vm_id,
@@ -255,6 +272,10 @@ class MigrationPolicy:
                                 "avg_cpu_pct": vm.avg_cpu_pct,
                                 "throttle_ratio": vm.throttle_ratio,
                                 "gpu_vram_budget_mib": vm.gpu_vram_budget_mib,
+                                "disk_read_bps": vm.disk_read_bps,
+                                "disk_write_bps": vm.disk_write_bps,
+                                "disk_io_weight": vm.disk_io_weight,
+                                "disk_local_share_active": vm.disk_local_share_active,
                                 "idle_duration_secs": vm.idle_duration_secs() if vm.idle_since is not None else None,
                             }
                             for vm in node.local_vms
@@ -276,6 +297,10 @@ class MigrationPolicy:
                         avg_cpu_pct=item["vm"].get("avg_cpu_pct", 0.0),
                         throttle_ratio=item["vm"].get("throttle_ratio", 0.0),
                         gpu_vram_budget_mib=item["vm"].get("gpu_vram_budget_mib", 0),
+                        disk_read_bps=item["vm"].get("disk_read_bps", 0.0),
+                        disk_write_bps=item["vm"].get("disk_write_bps", 0.0),
+                        disk_io_weight=item["vm"].get("disk_io_weight", 100),
+                        disk_local_share_active=item["vm"].get("disk_local_share_active", False),
                     ),
                     source=item["source"],
                     target=item["target"],
@@ -347,7 +372,25 @@ class MigrationPolicy:
                             ),
                         ))
 
-                # ── 5. Saturation GPU réservée ────────────────────────────
+                # ── 5. Saturation disque ────────────────────────────────
+                if (
+                    node.disk_pressure_pct >= t.disk_high_pct
+                    and vm.disk_total_bps >= t.disk_hot_vm_bps
+                ):
+                    target = self._best_target(node_id, vm, node_states)
+                    if target:
+                        candidates.append(MigrationCandidate(
+                            vm=vm, source=node_id, target=target,
+                            mtype=MigrationType.LIVE,
+                            reason=MigrationReason.DISK_SATURATION,
+                            urgency=1,
+                            detail=(
+                                f"PSI disque {node.disk_pressure_pct:.1f}% "
+                                f"VM {vm.disk_total_bps / 1024 / 1024:.1f} Mio/s"
+                            ),
+                        ))
+
+                # ── 6. Saturation GPU réservée ────────────────────────────
                 if (
                     vm.gpu_vram_budget_mib > 0
                     and node.gpu_total_vram_mib > 0
@@ -395,6 +438,8 @@ class MigrationPolicy:
                     "vcpu_saturation_pct": self.thresholds.vcpu_saturation_pct,
                     "remote_paging_pct": self.thresholds.remote_paging_pct,
                     "gpu_high_pct": self.thresholds.gpu_high_pct,
+                    "disk_high_pct": self.thresholds.disk_high_pct,
+                    "disk_hot_vm_bps": self.thresholds.disk_hot_vm_bps,
                     "idle_cpu_pct": self.thresholds.idle_cpu_pct,
                     "idle_duration_secs": self.thresholds.idle_duration_secs,
                     "target_max_ram_pct": self.thresholds.target_max_ram_pct,
@@ -409,6 +454,10 @@ class MigrationPolicy:
                     "avg_cpu_pct": vm.avg_cpu_pct,
                     "throttle_ratio": vm.throttle_ratio,
                     "gpu_vram_budget_mib": vm.gpu_vram_budget_mib,
+                    "disk_read_bps": vm.disk_read_bps,
+                    "disk_write_bps": vm.disk_write_bps,
+                    "disk_io_weight": vm.disk_io_weight,
+                    "disk_local_share_active": vm.disk_local_share_active,
                     "idle_duration_secs": vm.idle_duration_secs() if vm.idle_since is not None else None,
                 },
                 "node_ram_pct": node_ram_pct,

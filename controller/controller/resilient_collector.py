@@ -241,6 +241,10 @@ class ResilientCollector:
                 remote_mem_mib = vm.get("remote_mem_mib", 0),
                 status         = vm.get("status", "Unknown"),
                 gpu_vram_budget_mib = vm.get("gpu_vram_budget_mib", 0),
+                disk_read_bps = vm.get("disk_read_bps", 0.0),
+                disk_write_bps = vm.get("disk_write_bps", 0.0),
+                disk_io_weight = vm.get("disk_io_weight", 100),
+                disk_local_share_active = vm.get("disk_local_share_active", False),
             )
             for vm in data.get("local_vms", [])
         ]
@@ -262,6 +266,7 @@ class ResilientCollector:
             gpu_free_vram_mib = gpu.get("free_vram_mib", 0),
             gpu_reserved_vram_mib = gpu.get("reserved_vram_mib", 0),
             gpu_backend_name = gpu.get("backend_name", ""),
+            disk_pressure_pct = data.get("disk_pressure_pct", 0.0),
             reachable        = True,
         )
 

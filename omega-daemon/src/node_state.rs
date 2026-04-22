@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use crate::disk_io_scheduler::DiskIoScheduler;
 use crate::gpu_runtime::GpuRuntime;
 use crate::quota::QuotaRegistry;
 use crate::vcpu_scheduler::VcpuScheduler;
@@ -38,6 +39,8 @@ pub struct NodeStatus {
     pub vcpu_free: usize,
     /// Taux d'occupation vCPU (0.0 – 100.0)
     pub vcpu_occupancy_pct: f64,
+    /// Pression I/O du nœud (PSI avg10)
+    pub disk_pressure_pct: f64,
     /// VMs locales et leurs compteurs de pages distantes
     pub local_vms: Vec<VmStatusEntry>,
     /// État GPU local si le multiplexeur est actif
@@ -61,6 +64,14 @@ pub struct VmStatusEntry {
     pub throttle_ratio: f64,
     /// Budget VRAM réservé pour cette VM (Mio)
     pub gpu_vram_budget_mib: u64,
+    /// Débit lecture disque VM (octets/s)
+    pub disk_read_bps: f64,
+    /// Débit écriture disque VM (octets/s)
+    pub disk_write_bps: f64,
+    /// Poids I/O cgroup courant
+    pub disk_io_weight: u32,
+    /// La VM participe-t-elle à un partage I/O local temporaire ?
+    pub disk_local_share_active: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -92,6 +103,8 @@ pub struct NodeState {
     pub qmp_dir: String,
     /// Runtime GPU optionnel
     pub gpu_runtime: Option<Arc<GpuRuntime>>,
+    /// Planificateur disque local
+    pub disk_io_scheduler: Arc<DiskIoScheduler>,
 }
 
 impl NodeState {
@@ -117,6 +130,7 @@ impl NodeState {
             vcpu_scheduler: VcpuScheduler::new(num_pcpus),
             qmp_dir,
             gpu_runtime,
+            disk_io_scheduler: DiskIoScheduler::new(),
         }
     }
 
@@ -142,12 +156,28 @@ impl NodeState {
                 })
                 .collect()
         };
+        let disk_stats: std::collections::HashMap<u32, (f64, f64, u32, bool)> = self
+            .disk_io_scheduler
+            .vm_snapshot()
+            .into_iter()
+            .map(|s| {
+                (
+                    s.vm_id,
+                    (s.read_bps, s.write_bps, s.io_weight, s.local_share_active),
+                )
+            })
+            .collect();
 
         let vm_entries: Vec<VmStatusEntry> = vms
             .iter()
             .map(|vm| {
                 let (avg_cpu_pct, throttle_ratio) =
                     vcpu_stats.get(&vm.vmid).copied().unwrap_or((0.0, 0.0));
+                let (disk_read_bps, disk_write_bps, disk_io_weight, disk_local_share_active) =
+                    disk_stats
+                        .get(&vm.vmid)
+                        .copied()
+                        .unwrap_or((0.0, 0.0, 100, false));
                 let gpu_vram_budget_mib = self
                     .gpu_runtime
                     .as_ref()
@@ -163,6 +193,10 @@ impl NodeState {
                     avg_cpu_pct,
                     throttle_ratio,
                     gpu_vram_budget_mib,
+                    disk_read_bps,
+                    disk_write_bps,
+                    disk_io_weight,
+                    disk_local_share_active,
                 }
             })
             .collect();
@@ -200,6 +234,7 @@ impl NodeState {
             vcpu_total,
             vcpu_free,
             vcpu_occupancy_pct,
+            disk_pressure_pct: self.disk_io_scheduler.read_node_pressure_pct(),
             local_vms: vm_entries,
             gpu,
             timestamp_secs: ts,

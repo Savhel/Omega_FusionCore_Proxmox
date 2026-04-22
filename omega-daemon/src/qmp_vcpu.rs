@@ -381,7 +381,8 @@ impl QmpVcpuClient {
             });
         };
 
-        let cpu_id = format!("cpu-{}", cpu.index);
+        let cpu_id = device_id_from_qom_path(&cpu.qom_path)
+            .unwrap_or_else(|| format!("cpu-{}", cpu.index));
 
         let (mut stream, mut reader) = self.connect()?;
         self.handshake(&mut stream, &mut reader)?;
@@ -406,12 +407,26 @@ impl QmpVcpuClient {
         info!(
             vm_id     = self.vm_id,
             cpu_id    = %cpu_id,
+            qom_path  = %cpu.qom_path,
             new_count = new_count,
             "vCPU retiré via QMP"
         );
 
         Ok(HotplugResult::Removed { new_count })
     }
+}
+
+fn device_id_from_qom_path(qom_path: &str) -> Option<String> {
+    let trimmed = qom_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    trimmed
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
 }
 
 // ─── Gestionnaire de hotplug cluster ─────────────────────────────────────────
@@ -470,6 +485,20 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_device_id_from_qom_path_extracts_leaf() {
+        assert_eq!(
+            device_id_from_qom_path("/machine/unattached/device[3]"),
+            Some("device[3]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_device_id_from_qom_path_rejects_empty() {
+        assert_eq!(device_id_from_qom_path(""), None);
+        assert_eq!(device_id_from_qom_path("   "), None);
+    }
 
     #[test]
     fn test_client_unavailable_when_no_socket() {

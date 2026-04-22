@@ -31,6 +31,10 @@ class VmEntry:
     remote_mem_mib: int
     status:         str   # "Running" | "Stopped" | "Unknown"
     gpu_vram_budget_mib: int = 0
+    disk_read_bps: float = 0.0
+    disk_write_bps: float = 0.0
+    disk_io_weight: int = 100
+    disk_local_share_active: bool = False
 
     @property
     def remote_mem_kb(self) -> int:
@@ -59,6 +63,7 @@ class NodeInfo:
     gpu_free_vram_mib: int = 0
     gpu_reserved_vram_mib: int = 0
     gpu_backend_name: str = ""
+    disk_pressure_pct: float = 0.0
     reachable:        bool = True
     error:            str  = ""
 
@@ -82,6 +87,7 @@ class NodeInfo:
             pages_stored=0, store_used_kb=0, local_vms=[],
             timestamp_secs=0, gpu_enabled=False, gpu_total_vram_mib=0,
             gpu_free_vram_mib=0, gpu_reserved_vram_mib=0, gpu_backend_name="",
+            disk_pressure_pct=0.0,
             reachable=False, error=error,
         )
 
@@ -174,6 +180,10 @@ class ClusterStateCollector:
                     remote_mem_mib = vm.get("remote_mem_mib", 0),
                     status       = vm.get("status", "Unknown"),
                     gpu_vram_budget_mib = vm.get("gpu_vram_budget_mib", 0),
+                    disk_read_bps = vm.get("disk_read_bps", 0.0),
+                    disk_write_bps = vm.get("disk_write_bps", 0.0),
+                    disk_io_weight = vm.get("disk_io_weight", 100),
+                    disk_local_share_active = vm.get("disk_local_share_active", False),
                 )
                 for vm in data.get("local_vms", [])
             ]
@@ -195,6 +205,7 @@ class ClusterStateCollector:
                 gpu_free_vram_mib = gpu.get("free_vram_mib", 0),
                 gpu_reserved_vram_mib = gpu.get("reserved_vram_mib", 0),
                 gpu_backend_name = gpu.get("backend_name", ""),
+                disk_pressure_pct = data.get("disk_pressure_pct", 0.0),
                 reachable        = True,
             )
 

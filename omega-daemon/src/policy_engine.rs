@@ -122,6 +122,10 @@ pub struct MigrationThresholdsPayload {
     pub remote_paging_pct: f64,
     #[serde(default = "default_gpu_high_pct")]
     pub gpu_high_pct: f64,
+    #[serde(default = "default_disk_high_pct")]
+    pub disk_high_pct: f64,
+    #[serde(default = "default_disk_hot_vm_bps")]
+    pub disk_hot_vm_bps: f64,
     #[serde(default = "default_idle_cpu_pct")]
     pub idle_cpu_pct: f64,
     #[serde(default = "default_idle_duration_secs")]
@@ -150,6 +154,12 @@ fn default_remote_paging_pct() -> f64 {
 fn default_gpu_high_pct() -> f64 {
     90.0
 }
+fn default_disk_high_pct() -> f64 {
+    10.0
+}
+fn default_disk_hot_vm_bps() -> f64 {
+    8.0 * 1024.0 * 1024.0
+}
 fn default_idle_cpu_pct() -> f64 {
     5.0
 }
@@ -172,6 +182,8 @@ impl Default for MigrationThresholdsPayload {
             vcpu_saturation_pct: default_vcpu_saturation_pct(),
             remote_paging_pct: default_remote_paging_pct(),
             gpu_high_pct: default_gpu_high_pct(),
+            disk_high_pct: default_disk_high_pct(),
+            disk_hot_vm_bps: default_disk_hot_vm_bps(),
             idle_cpu_pct: default_idle_cpu_pct(),
             idle_duration_secs: default_idle_duration_secs(),
             target_max_ram_pct: default_target_max_ram_pct(),
@@ -196,6 +208,14 @@ pub struct MigrationVmStatePayload {
     #[serde(default)]
     pub gpu_vram_budget_mib: i64,
     #[serde(default)]
+    pub disk_read_bps: f64,
+    #[serde(default)]
+    pub disk_write_bps: f64,
+    #[serde(default = "default_io_weight")]
+    pub disk_io_weight: i64,
+    #[serde(default)]
+    pub disk_local_share_active: bool,
+    #[serde(default)]
     pub idle_duration_secs: Option<f64>,
 }
 
@@ -213,11 +233,17 @@ pub struct MigrationNodeStatePayload {
     #[serde(default)]
     pub gpu_free_vram_mib: i64,
     #[serde(default)]
+    pub disk_pressure_pct: f64,
+    #[serde(default)]
     pub local_vms: Vec<MigrationVmStatePayload>,
 }
 
 fn default_vcpu_total() -> i64 {
     24
+}
+
+fn default_io_weight() -> i64 {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +640,26 @@ pub fn evaluate_migrations(
                     });
                 }
             }
+
+            if node.disk_pressure_pct >= thresholds.disk_high_pct
+                && vm_disk_total_bps(vm) >= thresholds.disk_hot_vm_bps
+            {
+                if let Some(target) = best_target(thresholds, &node.node_id, vm, nodes) {
+                    candidates.push(MigrationCandidatePayload {
+                        vm: vm.clone(),
+                        source: node.node_id.clone(),
+                        target,
+                        mtype: "live".to_string(),
+                        reason: "disk_saturation".to_string(),
+                        urgency: 1,
+                        detail: format!(
+                            "PSI disque {:.1}% VM {:.1} Mio/s",
+                            node.disk_pressure_pct,
+                            vm_disk_total_bps(vm) / 1024.0 / 1024.0
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -764,23 +810,29 @@ fn node_can_accept_vm(
     };
     let ram_ok = new_avail_pct >= (100.0 - thresholds.target_max_ram_pct);
     let vcpu_ok = node_vcpu_used_pct(node) < thresholds.target_max_vcpu_pct;
+    let disk_ok = node.disk_pressure_pct < 15.0;
     let gpu_ok = vm.gpu_vram_budget_mib == 0
         || (node.gpu_total_vram_mib > 0 && node.gpu_free_vram_mib >= vm.gpu_vram_budget_mib);
-    ram_ok && vcpu_ok && gpu_ok
+    ram_ok && vcpu_ok && disk_ok && gpu_ok
 }
 
 fn placement_score_for_vm(node: &MigrationNodeStatePayload, vm: &MigrationVmStatePayload) -> f64 {
     let ram_free_ratio = 1.0 - node_ram_used_pct(node) / 100.0;
     let vcpu_free_ratio = 1.0 - node_vcpu_used_pct(node) / 100.0;
+    let disk_free_ratio = 1.0 - node.disk_pressure_pct / 100.0;
     if vm.gpu_vram_budget_mib <= 0 {
-        return ram_free_ratio * 0.6 + vcpu_free_ratio * 0.4;
+        return ram_free_ratio * 0.5 + vcpu_free_ratio * 0.3 + disk_free_ratio * 0.2;
     }
     let gpu_free_ratio = if node.gpu_total_vram_mib > 0 {
         node.gpu_free_vram_mib as f64 / node.gpu_total_vram_mib as f64
     } else {
         0.0
     };
-    ram_free_ratio * 0.45 + vcpu_free_ratio * 0.35 + gpu_free_ratio * 0.20
+    ram_free_ratio * 0.35 + vcpu_free_ratio * 0.25 + disk_free_ratio * 0.20 + gpu_free_ratio * 0.20
+}
+
+fn vm_disk_total_bps(vm: &MigrationVmStatePayload) -> f64 {
+    vm.disk_read_bps + vm.disk_write_bps
 }
 
 fn best_target(
@@ -966,7 +1018,11 @@ fn find_gpu_space_creation_plan(
             if let Some(eviction_target) =
                 best_gpu_eviction_target(&target.node_id, resident, nodes, &blocked)
             {
-                movable.push((resident.gpu_vram_budget_mib, resident.clone(), eviction_target));
+                movable.push((
+                    resident.gpu_vram_budget_mib,
+                    resident.clone(),
+                    eviction_target,
+                ));
             }
         }
 
@@ -1041,6 +1097,7 @@ mod tests {
                 vcpu_free: 2,
                 gpu_total_vram_mib: 0,
                 gpu_free_vram_mib: 0,
+                disk_pressure_pct: 0.0,
                 local_vms: vec![MigrationVmStatePayload {
                     vm_id: 1,
                     status: "running".into(),
@@ -1050,6 +1107,10 @@ mod tests {
                     avg_cpu_pct: 90.0,
                     throttle_ratio: 0.40,
                     gpu_vram_budget_mib: 0,
+                    disk_read_bps: 0.0,
+                    disk_write_bps: 0.0,
+                    disk_io_weight: 100,
+                    disk_local_share_active: false,
                     idle_duration_secs: None,
                 }],
             },
@@ -1061,6 +1122,7 @@ mod tests {
                 vcpu_free: 18,
                 gpu_total_vram_mib: 0,
                 gpu_free_vram_mib: 0,
+                disk_pressure_pct: 0.0,
                 local_vms: vec![],
             },
         ];
@@ -1088,6 +1150,10 @@ mod tests {
                 avg_cpu_pct: 10.0,
                 throttle_ratio: 0.0,
                 gpu_vram_budget_mib: 512,
+                disk_read_bps: 0.0,
+                disk_write_bps: 0.0,
+                disk_io_weight: 100,
+                disk_local_share_active: false,
                 idle_duration_secs: None,
             },
             nodes: vec![
@@ -1099,6 +1165,7 @@ mod tests {
                     vcpu_free: 4,
                     gpu_total_vram_mib: 8192,
                     gpu_free_vram_mib: 512,
+                    disk_pressure_pct: 0.0,
                     local_vms: vec![],
                 },
                 MigrationNodeStatePayload {
@@ -1109,6 +1176,7 @@ mod tests {
                     vcpu_free: 6,
                     gpu_total_vram_mib: 8192,
                     gpu_free_vram_mib: 4096,
+                    disk_pressure_pct: 0.0,
                     local_vms: vec![],
                 },
             ],
@@ -1137,6 +1205,10 @@ mod tests {
                 avg_cpu_pct: 10.0,
                 throttle_ratio: 0.0,
                 gpu_vram_budget_mib: 512,
+                disk_read_bps: 0.0,
+                disk_write_bps: 0.0,
+                disk_io_weight: 100,
+                disk_local_share_active: false,
                 idle_duration_secs: None,
             },
             nodes: vec![
@@ -1148,6 +1220,7 @@ mod tests {
                     vcpu_free: 4,
                     gpu_total_vram_mib: 8192,
                     gpu_free_vram_mib: 512,
+                    disk_pressure_pct: 0.0,
                     local_vms: vec![],
                 },
                 MigrationNodeStatePayload {
@@ -1158,6 +1231,7 @@ mod tests {
                     vcpu_free: 6,
                     gpu_total_vram_mib: 8192,
                     gpu_free_vram_mib: 2048,
+                    disk_pressure_pct: 0.0,
                     local_vms: vec![MigrationVmStatePayload {
                         vm_id: 20,
                         status: "running".into(),
@@ -1167,6 +1241,10 @@ mod tests {
                         avg_cpu_pct: 10.0,
                         throttle_ratio: 0.0,
                         gpu_vram_budget_mib: 2048,
+                        disk_read_bps: 0.0,
+                        disk_write_bps: 0.0,
+                        disk_io_weight: 100,
+                        disk_local_share_active: false,
                         idle_duration_secs: None,
                     }],
                 },
@@ -1178,6 +1256,7 @@ mod tests {
                     vcpu_free: 6,
                     gpu_total_vram_mib: 8192,
                     gpu_free_vram_mib: 2048,
+                    disk_pressure_pct: 0.0,
                     local_vms: vec![],
                 },
             ],

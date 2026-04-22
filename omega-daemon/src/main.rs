@@ -39,11 +39,13 @@ use omega_daemon::cluster_api::run_api_server;
 use omega_daemon::config::Config;
 use omega_daemon::control_api::build_control_router;
 use omega_daemon::cpu_cgroup::{CgroupCpuController, VmCpuConfig, VmCpuStat};
+use omega_daemon::disk_io_scheduler::{BOOSTED_IO_WEIGHT, DEFAULT_IO_WEIGHT, DONOR_IO_WEIGHT};
 use omega_daemon::eviction_engine::EvictionEngine;
 use omega_daemon::fault_bus::{FaultBus, FaultBusConsumer};
 use omega_daemon::gpu_drm_backend::DrmGpuBackend;
 use omega_daemon::gpu_multiplexer::{GpuBackend, GpuMultiplexer};
 use omega_daemon::gpu_runtime::GpuRuntime;
+use omega_daemon::io_cgroup::{CgroupIoController, VmDiskConfig, VmDiskStat};
 use omega_daemon::node_state::NodeState;
 use omega_daemon::qmp_vcpu::{HotplugResult, VcpuHotplugManager};
 use omega_daemon::store_server::run_store_server;
@@ -160,8 +162,10 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             let cpu_ctrl = CgroupCpuController::new();
+            let io_ctrl = CgroupIoController::new();
             let hotplug = VcpuHotplugManager::new(qmp_dir);
             let mut previous: HashMap<u32, (VmCpuStat, Instant)> = HashMap::new();
+            let mut previous_io: HashMap<u32, (VmDiskStat, Instant)> = HashMap::new();
 
             info!(
                 interval_ms = interval.as_millis() as u64,
@@ -174,12 +178,29 @@ async fn main() -> Result<()> {
 
                 for vm_state in state.vcpu_scheduler.vm_snapshot() {
                     if !local_ids.contains(&vm_state.vm_id) {
+                        previous.remove(&vm_state.vm_id);
+                        previous_io.remove(&vm_state.vm_id);
                         state.vcpu_scheduler.release_vm(vm_state.vm_id);
+                        state.disk_io_scheduler.release_vm(vm_state.vm_id);
+                        state.quota_registry.record_delete_vm(vm_state.vm_id);
+                        state.quota_registry.remove(vm_state.vm_id);
+                        if let Some(gpu) = &state.gpu_runtime {
+                            gpu.release_vm(vm_state.vm_id).await;
+                        }
+                        info!(
+                            vm_id = vm_state.vm_id,
+                            "VM non running localement — ressources CPU/RAM/GPU/I/O nettoyées"
+                        );
                     }
                 }
 
+                state
+                    .disk_io_scheduler
+                    .set_node_pressure_pct(io_ctrl.read_node_pressure_pct());
+
                 for vm in &local_vms {
                     ensure_vm_registered(&state, &hotplug, &cpu_ctrl, &qemu_conf_dir, vm.vmid);
+                    state.disk_io_scheduler.ensure_vm(vm.vmid);
 
                     let now = Instant::now();
                     if let Some(stat) = cpu_ctrl.read_cpu_stat(vm.vmid) {
@@ -195,6 +216,21 @@ async fn main() -> Result<()> {
                         }
                         previous.insert(vm.vmid, (stat, now));
                     }
+
+                    let now_io = Instant::now();
+                    if let Some(stat) = io_ctrl.read_io_stat(vm.vmid) {
+                        if let Some((before, started_at)) = previous_io.get(&vm.vmid) {
+                            let elapsed = started_at.elapsed().as_micros() as u64;
+                            let (read_bps, write_bps) =
+                                CgroupIoController::compute_bps(before, &stat, elapsed);
+                            state
+                                .disk_io_scheduler
+                                .update_vm_io(vm.vmid, read_bps, write_bps);
+                        } else {
+                            state.disk_io_scheduler.update_vm_io(vm.vmid, 0.0, 0.0);
+                        }
+                        previous_io.insert(vm.vmid, (stat, now_io));
+                    }
                 }
 
                 for vm_id in state.vcpu_scheduler.vms_needing_hotplug() {
@@ -206,6 +242,7 @@ async fn main() -> Result<()> {
                 }
 
                 reconcile_local_cpu_sharing(&state, &hotplug, &cpu_ctrl);
+                reconcile_local_disk_sharing(&state, &io_ctrl);
 
                 for (vm_id, reason) in state.vcpu_scheduler.vms_needing_migration() {
                     warn!(vm_id, reason = %reason, "VM candidate à la migration CPU");
@@ -257,6 +294,7 @@ async fn main() -> Result<()> {
         let _qmp_dir = cfg.qemu_pid_dir.replace("qemu-server", "qemu-server"); // même dossier
         let vm_tracker_ref = vm_tracker.clone();
         let _threshold = cfg.evict_threshold_pct;
+        let balloon_state = node_state.clone();
 
         // Le monitor balloon tourne dans un thread dédié (read QMP = bloquant)
         tokio::task::spawn_blocking(move || {
@@ -290,7 +328,15 @@ async fn main() -> Result<()> {
                     // En V4 : le controller lira cet état via /api/status et décidera
                     // En V5 : déclencher directement l'éviction CLOCK
                 },
-            );
+            )
+            .with_sample_hook({
+                let state = balloon_state.clone();
+                move |vmid: u32, stats: BalloonStats| {
+                    state
+                        .quota_registry
+                        .apply_balloon_update(vmid, stats.actual_bytes / 1024 / 1024);
+                }
+            });
             monitor.run_blocking(vmids);
         });
     }
@@ -427,17 +473,31 @@ fn ensure_vm_registered(
         .unwrap_or(1);
 
     let (conf_min_vcpus, conf_max_vcpus) = read_vm_cpu_profile(conf_dir, vm_id).unwrap_or((1, 1));
-    let min_vcpus = online_vcpus.max(conf_min_vcpus).max(1);
     let max_vcpus = qmp_vcpus
-        .map(|info| info.total_count.max(conf_max_vcpus).max(min_vcpus))
-        .unwrap_or(conf_max_vcpus.max(min_vcpus));
+        .map(|info| info.total_count)
+        .unwrap_or(conf_max_vcpus);
+    let (min_vcpus, current_vcpus, max_vcpus) =
+        derive_runtime_vcpu_profile(conf_min_vcpus, conf_max_vcpus, online_vcpus, max_vcpus);
 
-    match state.vcpu_scheduler.admit_vm(vm_id, min_vcpus, max_vcpus) {
+    match state.vcpu_scheduler.admit_vm(vm_id, current_vcpus, max_vcpus) {
         omega_daemon::vcpu_scheduler::VcpuDecision::Allocated { .. } => {
-            let _ = apply_cpu_envelope(state, cpu_ctrl, vm_id, min_vcpus);
+            if let Err(reason) = state.vcpu_scheduler.update_profile(vm_id, min_vcpus, max_vcpus) {
+                warn!(
+                    vm_id,
+                    min_vcpus,
+                    max_vcpus,
+                    current_vcpus,
+                    reason,
+                    "échec normalisation du profil vCPU après auto-enregistrement"
+                );
+            }
+            let _ = apply_cpu_envelope(state, cpu_ctrl, vm_id, current_vcpus);
             info!(
                 vm_id,
-                min_vcpus, max_vcpus, "VM enregistrée automatiquement dans le scheduler vCPU"
+                min_vcpus,
+                max_vcpus,
+                current_vcpus,
+                "VM enregistrée automatiquement dans le scheduler vCPU"
             );
         }
         omega_daemon::vcpu_scheduler::VcpuDecision::MigrateRequired { reason, .. } => {
@@ -448,6 +508,18 @@ fn ensure_vm_registered(
         }
         _ => {}
     }
+}
+
+fn derive_runtime_vcpu_profile(
+    conf_min_vcpus: usize,
+    conf_max_vcpus: usize,
+    online_vcpus: usize,
+    qmp_max_vcpus: usize,
+) -> (usize, usize, usize) {
+    let current_vcpus = online_vcpus.max(1);
+    let max_vcpus = qmp_max_vcpus.max(conf_max_vcpus).max(current_vcpus);
+    let min_vcpus = conf_min_vcpus.max(1).min(current_vcpus);
+    (min_vcpus, current_vcpus, max_vcpus)
 }
 
 fn read_vm_cpu_profile(conf_dir: &str, vm_id: u32) -> Option<(usize, usize)> {
@@ -464,7 +536,10 @@ fn read_vm_cpu_profile(conf_dir: &str, vm_id: u32) -> Option<(usize, usize)> {
             let nodes_dir = format!("{}/nodes", nodes_root);
             if let Ok(entries) = fs::read_dir(nodes_dir) {
                 for entry in entries.flatten() {
-                    let candidate = entry.path().join("qemu-server").join(format!("{vm_id}.conf"));
+                    let candidate = entry
+                        .path()
+                        .join("qemu-server")
+                        .join(format!("{vm_id}.conf"));
                     if let Ok(content) = fs::read_to_string(candidate) {
                         if let Some(profile) = parse_vm_cpu_profile(&content) {
                             return Some(profile);
@@ -629,9 +704,20 @@ mod tests {
 
     #[test]
     fn test_parse_vm_cpu_profile_defaults_min_to_max_without_vcpus_line() {
-        let profile =
-            parse_vm_cpu_profile("cores: 2\nsockets: 2\nmemory: 512\n").unwrap();
+        let profile = parse_vm_cpu_profile("cores: 2\nsockets: 2\nmemory: 512\n").unwrap();
         assert_eq!(profile, (4, 4));
+    }
+
+    #[test]
+    fn test_derive_runtime_vcpu_profile_keeps_config_min_when_vm_is_currently_scaled_up() {
+        let profile = derive_runtime_vcpu_profile(1, 4, 4, 4);
+        assert_eq!(profile, (1, 4, 4));
+    }
+
+    #[test]
+    fn test_derive_runtime_vcpu_profile_caps_min_to_current_when_runtime_is_lower() {
+        let profile = derive_runtime_vcpu_profile(4, 8, 2, 8);
+        assert_eq!(profile, (2, 2, 8));
     }
 }
 
@@ -658,7 +744,9 @@ fn apply_downscale_if_idle(
     };
 
     match hotplug.remove_vcpu(vm_id, vm_state.min_vcpus) {
-        HotplugResult::Removed { new_count: qmp_count } => {
+        HotplugResult::Removed {
+            new_count: qmp_count,
+        } => {
             if let Err(e) = apply_cpu_envelope(state, cpu_ctrl, vm_id, qmp_count) {
                 warn!(vm_id, error = %e, "échec mise à jour cpu.max après hot-unplug");
             }
@@ -681,7 +769,10 @@ fn apply_downscale_if_idle(
         }
         HotplugResult::Unavailable { reason } => {
             let _ = state.vcpu_scheduler.rollback_downscale(vm_id, slot);
-            warn!(vm_id, reason, "hot-unplug QMP indisponible — rollback scheduler");
+            warn!(
+                vm_id,
+                reason, "hot-unplug QMP indisponible — rollback scheduler"
+            );
             VcpuDecision::MigrateRequired { vm_id, reason }
         }
         HotplugResult::NoSlots { .. } | HotplugResult::Added { .. } => {
@@ -725,8 +816,7 @@ fn reconcile_local_cpu_sharing(
                 VcpuDecision::Downscaled { .. } => {
                     info!(
                         borrower_vm = *borrower,
-                        donor_vm,
-                        "réclamation locale d'un vCPU depuis une VM idle"
+                        donor_vm, "réclamation locale d'un vCPU depuis une VM idle"
                     );
                     let _ = apply_hotplug_if_possible(state, hotplug, cpu_ctrl, *borrower);
                 }
@@ -783,6 +873,56 @@ fn reconcile_local_cpu_sharing(
             cpu_weight = target_weight,
             local_share_active,
             "politique de partage CPU local appliquée"
+        );
+    }
+}
+
+fn reconcile_local_disk_sharing(state: &Arc<NodeState>, io_ctrl: &CgroupIoController) {
+    let stressed: HashSet<u32> = state
+        .disk_io_scheduler
+        .local_share_borrowers()
+        .into_iter()
+        .collect();
+    let donor_peers: HashSet<u32> = state
+        .disk_io_scheduler
+        .idle_peers()
+        .into_iter()
+        .filter(|vm_id| !stressed.contains(vm_id))
+        .collect();
+
+    for vm_state in state.disk_io_scheduler.vm_snapshot() {
+        let (target_weight, local_share_active) = if stressed.contains(&vm_state.vm_id) {
+            (BOOSTED_IO_WEIGHT, true)
+        } else if donor_peers.contains(&vm_state.vm_id) {
+            (DONOR_IO_WEIGHT, true)
+        } else {
+            (DEFAULT_IO_WEIGHT, false)
+        };
+
+        if vm_state.io_weight == target_weight && vm_state.local_share_active == local_share_active
+        {
+            continue;
+        }
+
+        if let Err(e) = io_ctrl.apply(&VmDiskConfig::new(vm_state.vm_id).with_weight(target_weight))
+        {
+            warn!(
+                vm_id = vm_state.vm_id,
+                error = %e,
+                "échec mise à jour io.weight"
+            );
+            continue;
+        }
+
+        state
+            .disk_io_scheduler
+            .set_vm_weight(vm_state.vm_id, target_weight, local_share_active);
+
+        info!(
+            vm_id = vm_state.vm_id,
+            io_weight = target_weight,
+            local_share_active,
+            "partage disque local réconcilié"
         );
     }
 }
