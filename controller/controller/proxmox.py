@@ -94,25 +94,36 @@ class ProxmoxClient:
 
     def __init__(
         self,
-        base_url:   str  = "https://127.0.0.1:8006",
-        api_token:  str  = "",
-        verify_ssl: bool = False,
-        timeout:    float = 10.0,
+        base_url:          str   = "https://127.0.0.1:8006",
+        api_token:         str   = "",
+        verify_ssl:        bool  = False,
+        timeout:           float = 10.0,
+        with_local_disks:  bool  = False,
     ):
-        self.base_url   = base_url.rstrip("/")
-        self.api_token  = api_token
-        self.verify_ssl = verify_ssl
-        self.timeout    = timeout
-        self._stub_mode = not bool(api_token)
+        self.base_url          = base_url.rstrip("/")
+        self.api_token         = api_token
+        self.verify_ssl        = verify_ssl
+        self.timeout           = timeout
+        self.with_local_disks  = with_local_disks
+        self._stub_mode        = not bool(api_token)
 
         self._session = requests.Session()
         self._session.verify = verify_ssl
 
         if api_token:
             self._session.headers["Authorization"] = f"PVEAPIToken={api_token}"
-            logger.info("ProxmoxClient configuré avec token API, URL=%s", base_url)
+            logger.info(
+                "ProxmoxClient configuré — URL=%s with_local_disks=%s",
+                base_url, with_local_disks,
+            )
         else:
-            logger.warning("ProxmoxClient : pas de token — mode STUB actif (aucune action réelle)")
+            logger.warning(
+                "=" * 60 + "\n"
+                "  ATTENTION : ProxmoxClient en MODE STUB\n"
+                "  Aucune migration ne sera réellement exécutée.\n"
+                "  Fournir --proxmox-token pour activer les migrations réelles.\n"
+                + "=" * 60
+            )
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}/api2/json/{path.lstrip('/')}"
@@ -321,6 +332,10 @@ class ProxmoxClient:
         }
         if bwlimit > 0:
             body["bwlimit"] = bwlimit
+        # Stockage local : les disques ne sont pas accessibles depuis le nœud cible,
+        # il faut les copier (migration plus lente, requiert de l'espace disque cible).
+        if self.with_local_disks:
+            body["with-local-disks"] = 1
 
         return self._post(f"nodes/{source_node}/qemu/{vmid}/migrate", body)
 

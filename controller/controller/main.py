@@ -251,6 +251,8 @@ def monitor(
 @click.option("--proxmox-url", default="https://127.0.0.1:8006", show_default=True,
               help="URL Proxmox VE API utilisée pour lire la configuration VM")
 @click.option("--proxmox-token", default="", help="Token Proxmox VE API (sinon mode stub)")
+@click.option("--with-local-disks", is_flag=True, default=False,
+              help="Stockage local (LVM/ZFS) : active with-local-disks dans qm migrate")
 @click.option("--auto-admit/--no-auto-admit", default=True, show_default=True,
               help="Configure automatiquement quotas et budgets des nouvelles VMs")
 @click.option("--dry-run", is_flag=True, default=False,
@@ -263,6 +265,7 @@ def daemon(
     max_concurrent_migrations: int,
     proxmox_url: str,
     proxmox_token: str,
+    with_local_disks: bool,
     auto_admit: bool,
     dry_run: bool,
 ) -> None:
@@ -280,7 +283,11 @@ def daemon(
     }
     policy = MigrationPolicy(MigrationThresholds())
     admission = AdmissionController()
-    proxmox = ProxmoxClient(base_url=proxmox_url, api_token=proxmox_token)
+    proxmox = ProxmoxClient(
+        base_url=proxmox_url,
+        api_token=proxmox_token,
+        with_local_disks=with_local_disks,
+    )
     vcpu_pool = ClusterVcpuPoolPlanner(VcpuPoolConfig())
     last_vcpu_migrations: Dict[int, float] = {}
     last_gpu_migrations: Dict[int, float] = {}
@@ -868,25 +875,6 @@ def _find_vcpu_consolidation_plan(
     """
     VCPU_MIGRATION_COOLDOWN = 120.0
 
-    # Simuler les états après chaque déplacement (on clone pour ne pas modifier)
-    def simulated_vcpu_free(node_id: str, evicted: List[Tuple[VmState, str, str]]) -> int:
-        base = node_states[node_id].vcpu_free
-        for ev_vm, ev_src, ev_tgt in evicted:
-            if ev_src == node_id:
-                base += max(1, ev_vm.max_mem_mib // 512)  # estimation vCPUs libérés
-            if ev_tgt == node_id:
-                base -= max(1, ev_vm.max_mem_mib // 512)
-        return max(0, base)
-
-    def can_host(node: MigNodeState, vm: VmState, extra_vcpus: int, extra_mem_mib: int) -> bool:
-        if node.vcpu_free < extra_vcpus:
-            return False
-        if node.mem_available_kb < extra_mem_mib * 1024:
-            return False
-        if gpu_budget_mib > 0 and node.gpu_free_vram_mib < gpu_budget_mib:
-            return False
-        return True
-
     # Trier les candidats par vCPUs libres décroissant (le meilleur d'abord)
     candidates = [
         (node_id, state)
@@ -898,8 +886,7 @@ def _find_vcpu_consolidation_plan(
     for target_node, target_state in candidates:
         needed_free = desired_vcpus - target_state.vcpu_free
         if needed_free <= 0:
-            # Ce nœud a déjà assez de place — _best_reconciliation_target aurait dû
-            # le trouver ; on le saute.
+            # Ce nœud a déjà assez de place — _best_reconciliation_target aurait dû le trouver.
             continue
 
         # VMs sur ce nœud cible, triées par consommation vCPU estimée décroissante
@@ -911,51 +898,54 @@ def _find_vcpu_consolidation_plan(
 
         plan: List[Tuple[VmState, str, str]] = []
         freed = 0
-        simulated = {nid: s.vcpu_free for nid, s in node_states.items()}
+        # Simulation : vcpu_free et mem_available_kb ajustés après chaque déplacement
+        sim_vcpu = {nid: s.vcpu_free for nid, s in node_states.items()}
+        sim_mem  = {nid: s.mem_available_kb for nid, s in node_states.items()}
 
         for candidate_vm in vms_on_target:
             if candidate_vm.vm_id == needy_vm.vm_id:
                 continue
 
-            # Respecter le cooldown de migration
             last_mig = last_vcpu_migrations.get(candidate_vm.vm_id)
             if last_mig is not None and now - last_mig < VCPU_MIGRATION_COOLDOWN:
                 continue
 
-            # Estimer les vCPUs qu'on libère en déplaçant cette VM
-            # (au moins 1, au plus max_vcpus estimé par heuristique)
-            vcpus_freed_estimate = max(1, int(candidate_vm.avg_cpu_pct / 25) + 1)
+            # Estimation des vCPUs libérés : basée sur avg_cpu_pct (1 slot par tranche de 25%)
+            vcpus_est = max(1, int(candidate_vm.avg_cpu_pct / 25) + 1)
+            mem_mib   = candidate_vm.max_mem_mib
 
-            # Chercher une destination pour cette VM
+            # Chercher une destination en utilisant les valeurs simulées (pas les valeurs initiales)
             destinations = [
-                (nid, s)
+                nid
                 for nid, s in node_states.items()
                 if nid != target_node
                 and nid != needy_source
-                and can_host(s, candidate_vm, vcpus_freed_estimate,
-                             candidate_vm.max_mem_mib)
-                and simulated.get(nid, 0) >= vcpus_freed_estimate
+                and sim_vcpu.get(nid, 0) >= vcpus_est
+                and sim_mem.get(nid, 0) >= mem_mib * 1024
+                and (gpu_budget_mib == 0 or s.gpu_free_vram_mib >= gpu_budget_mib)
             ]
             if not destinations:
                 continue
 
-            # Prendre la destination avec le plus de vCPUs libres
-            destinations.sort(key=lambda x: x[1].vcpu_free, reverse=True)
-            dest_id = destinations[0][0]
+            # Prendre la destination avec le plus de vCPUs libres simulés
+            destinations.sort(key=lambda nid: sim_vcpu.get(nid, 0), reverse=True)
+            dest_id = destinations[0]
 
             plan.append((candidate_vm, target_node, dest_id))
-            freed += vcpus_freed_estimate
-            simulated[target_node] = max(0, simulated.get(target_node, 0) - vcpus_freed_estimate)
-            simulated[dest_id] = max(0, simulated.get(dest_id, 0) - vcpus_freed_estimate)
+            freed += vcpus_est
+            # Mise à jour de la simulation pour les prochaines itérations
+            sim_vcpu[target_node] = sim_vcpu.get(target_node, 0) + vcpus_est
+            sim_vcpu[dest_id]     = max(0, sim_vcpu.get(dest_id, 0) - vcpus_est)
+            sim_mem[dest_id]      = max(0, sim_mem.get(dest_id, 0) - mem_mib * 1024)
 
             if freed >= needed_free:
                 # Plan complet — vérifier que needy_vm pourra bien aller sur target_node
-                projected_free = target_state.vcpu_free + freed
-                if projected_free >= desired_vcpus and can_host(
-                    target_state, needy_vm, desired_vcpus, needy_vm.max_mem_mib
-                ):
+                projected_vcpu_free = sim_vcpu.get(target_node, 0)
+                projected_mem_free  = sim_mem.get(target_node, 0)
+                if (projected_vcpu_free >= desired_vcpus
+                        and projected_mem_free >= needy_vm.max_mem_mib * 1024):
                     return (target_node, plan)
-                break  # ce nœud ne convient pas, essayer le suivant
+                break  # ce nœud ne convient pas même après évictions, essayer le suivant
 
     return None
 

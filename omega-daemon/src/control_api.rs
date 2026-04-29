@@ -277,6 +277,7 @@ async fn migrate_vm(
         target: req.target.clone(),
         mtype: req.mtype.clone(),
         reason,
+        with_local_disks: false,
     };
 
     let executor = MigrationExecutor::new(Arc::clone(&state));

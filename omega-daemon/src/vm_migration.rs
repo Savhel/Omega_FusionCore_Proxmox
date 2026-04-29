@@ -87,6 +87,9 @@ pub struct MigrationRequest {
     pub target: String,
     pub mtype: MigrationType,
     pub reason: MigrationReason,
+    /// Activer `--with-local-disks` pour les clusters sans Ceph (LVM, ZFS local).
+    #[serde(default)]
+    pub with_local_disks: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,7 +117,7 @@ pub struct MigrationStatus {
 /// Chaque migration tourne dans une tâche Tokio de fond.
 /// Le résultat est accessible via `status(task_id)`.
 ///
-/// Stockage Ceph RBD uniquement — pas de `--with-local-disks`.
+/// Supporte Ceph RBD (défaut) et stockage local via `MigrationRequest::with_local_disks`.
 pub struct MigrationExecutor {
     node_state: Arc<NodeState>,
     tasks: Arc<Mutex<HashMap<u64, MigrationStatus>>>,
@@ -265,13 +268,11 @@ impl MigrationExecutor {
 
 // ─── Construction des arguments qm migrate ───────────────────────────────────
 
-/// Construit la liste d'arguments pour `qm migrate` (Ceph RBD).
+/// Construit la liste d'arguments pour `qm migrate`.
 ///
 /// - live : `migrate {vmid} {target} --online`
 /// - cold : `migrate {vmid} {target}`
-///
-/// Pas de `--with-local-disks` — les disques sont sur Ceph, déjà accessibles
-/// depuis le nœud cible.
+/// - stockage local : ajoute `--with-local-disks` (LVM, ZFS local — copie les disques)
 pub fn build_qm_args(req: &MigrationRequest) -> Vec<String> {
     let mut args = vec![
         "migrate".to_string(),
@@ -280,6 +281,9 @@ pub fn build_qm_args(req: &MigrationRequest) -> Vec<String> {
     ];
     if req.mtype == MigrationType::Live {
         args.push("--online".to_string());
+    }
+    if req.with_local_disks {
+        args.push("--with-local-disks".to_string());
     }
     args
 }
@@ -398,6 +402,7 @@ impl MigrationPolicy {
                     reason: MigrationReason::ExcessiveRemotePaging {
                         remote_pct: vm.remote_pct(),
                     },
+                    with_local_disks: false,
                 });
             }
         }
@@ -424,6 +429,7 @@ impl MigrationPolicy {
                         node_used_pct: usage_pct,
                         target_free_pct: 0.0, // rempli par le controller
                     },
+                    with_local_disks: false,
                 });
             }
         }
@@ -444,6 +450,7 @@ impl MigrationPolicy {
                         node_used_pct: usage_pct,
                         target_free_pct: 0.0,
                     },
+                    with_local_disks: false,
                 });
             }
         }
@@ -457,11 +464,12 @@ impl MigrationPolicy {
                     vm_id,
                     source: self.node_id.clone(),
                     target: String::from("auto"),
-                    mtype: MigrationType::Live, // VM throttlée = active = live
+                    mtype: MigrationType::Live,
                     reason: MigrationReason::CpuSaturation {
                         throttle_ratio,
                         target_vcpu_free: free_slots,
                     },
+                    with_local_disks: false,
                 });
             }
         }
@@ -541,7 +549,7 @@ mod tests {
             source: "node-a".into(),
             target: "node-b".into(),
             mtype,
-            reason: MigrationReason::AdminRequest,
+            reason: MigrationReason::AdminRequest, with_local_disks: false,
         }
     }
 
@@ -631,7 +639,7 @@ mod tests {
             source: "node-a".into(),
             target: "node-b".into(),
             mtype: MigrationType::Live,
-            reason: MigrationReason::AdminRequest,
+            reason: MigrationReason::AdminRequest, with_local_disks: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"live\""));
@@ -689,7 +697,7 @@ mod tests {
             source: "node-a".into(),
             target: "node-b".into(),
             mtype: MigrationType::Cold,
-            reason: MigrationReason::AdminRequest,
+            reason: MigrationReason::AdminRequest, with_local_disks: false,
         };
         let req2 = MigrationRequest {
             vm_id: 102,

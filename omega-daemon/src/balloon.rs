@@ -413,6 +413,9 @@ pub struct BalloonManager {
     deflate_threshold_pct: f64,
     /// Ne jamais donner moins de X% de max_mem au guest (plancher absolu)
     min_guest_pct: f64,
+    /// Bande morte : ignorer les transitions inflate↔deflate inférieures à cette durée (secondes).
+    /// Évite le ping-pong quand un guest oscille autour du seuil.
+    hysteresis_secs: u64,
 }
 
 impl BalloonManager {
@@ -423,6 +426,7 @@ impl BalloonManager {
             inflate_threshold_pct: 20.0,
             deflate_threshold_pct: 10.0,
             min_guest_pct: 50.0,
+            hysteresis_secs: 60,
         }
     }
 
@@ -508,24 +512,40 @@ impl BalloonManager {
         F: Fn() -> Vec<(u32, u64)>,
         G: Fn(u32, u64),
     {
+        use std::collections::HashMap;
+        use std::time::Instant;
+
         info!(
             interval_secs = self.interval_secs,
             inflate_threshold_pct = self.inflate_threshold_pct,
             deflate_threshold_pct = self.deflate_threshold_pct,
             min_guest_pct = self.min_guest_pct,
+            hysteresis_secs = self.hysteresis_secs,
             "BalloonManager démarré"
         );
+
+        // Horodatage du dernier ajustement par vmid — sert à l'hysteresis
+        let mut last_adjust: HashMap<u32, Instant> = HashMap::new();
 
         loop {
             std::thread::sleep(Duration::from_secs(self.interval_secs));
 
             for (vmid, max_mem_mib) in vmids_fn() {
+                // Respecter l'hysteresis : ne pas ré-ajuster trop vite
+                if let Some(&t) = last_adjust.get(&vmid) {
+                    if t.elapsed().as_secs() < self.hysteresis_secs {
+                        trace!(vmid, "BalloonManager : hysteresis actif, skip");
+                        continue;
+                    }
+                }
+
                 let client = QmpClient::for_vm(vmid, &self.qmp_dir);
                 match client.query_stats() {
                     Ok(Some(stats)) => {
                         if let Some(new_actual_mib) =
                             self.reconcile_vm(vmid, &stats, max_mem_mib)
                         {
+                            last_adjust.insert(vmid, Instant::now());
                             on_adjust(vmid, new_actual_mib);
                         }
                     }

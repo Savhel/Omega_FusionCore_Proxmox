@@ -15,9 +15,12 @@ import socket
 import struct
 from unittest.mock import MagicMock, patch
 
-from controller.controller.metrics import MemInfo, MemPressure, MetricsCollector
-from controller.controller.policy import PolicyEngine, PolicyInput
-from controller.controller.store_client import StoreClient, StoreStatus, poll_all_stores
+import pytest
+pytest.importorskip("pytest_benchmark", reason="pytest-benchmark non installé — pip install pytest-benchmark")
+
+from controller.metrics import MemInfo, MemPressure, MetricsCollector
+from controller.policy import PolicyEngine, PolicyInput
+from controller.store_client import StoreClient, StoreStatus, poll_all_stores
 
 
 # ─── Policy engine ────────────────────────────────────────────────────────────
