@@ -173,6 +173,53 @@ qm set 9004 --delete ide2
 qm set 9004 --boot order=scsi0
 ```
 
+### 3.5.1 Vérifier le réseau dans le guest Debian
+
+Dans la VM, vérifier immédiatement après installation :
+
+```bash
+ip a
+ip route
+```
+
+Si l’interface `ens18` est `DOWN`, la lever :
+
+```bash
+ip link set ens18 up
+```
+
+Si `dhclient` n’est pas installé dans le netinst minimal, poser temporairement une IP statique :
+
+```bash
+ip link set ens18 up
+ip addr add 10.10.0.50/24 dev ens18
+ip route add default via 10.10.0.1
+echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+```
+
+Tests immédiats :
+
+```bash
+ping 10.10.0.1
+ping 8.8.8.8
+ping deb.debian.org
+```
+
+Pour rendre la configuration persistante sur Debian :
+
+```bash
+cat > /etc/network/interfaces <<'EOF'
+auto lo
+iface lo inet loopback
+
+auto ens18
+iface ens18 inet static
+    address 10.10.0.50/24
+    gateway 10.10.0.1
+    dns-nameservers 8.8.8.8 1.1.1.1
+EOF
+```
+
 ### 3.6 Préparer le hotplug CPU
 
 Pour les tests d’élasticité CPU :
@@ -570,6 +617,21 @@ input("RAM allouee, appuie sur Entree pour liberer...")
 EOF
 ```
 
+Si la VM a seulement `512` Mio de RAM, ne pas utiliser `1400M` ou `1536M`. Utiliser plutôt :
+
+```bash
+python3 - <<'EOF'
+a = bytearray(200 * 1024 * 1024)
+input("200 Mio alloues, appuie sur Entree pour liberer...")
+EOF
+```
+
+Ou :
+
+```bash
+stress-ng --vm 1 --vm-bytes 200M --timeout 120s
+```
+
 ### Observation
 
 Sur le nœud :
@@ -605,6 +667,10 @@ journalctl -u omega-daemon -f
 - la VM devient instable trop vite
   - réduire `--vm-bytes`
   - vérifier `qm config 9004`
+- `python3` lève `MemoryError`
+  - la VM n’a simplement pas assez de RAM pour la taille demandée
+  - réduire fortement la taille du test
+  - ou augmenter `qm set <vmid> --memory ...`
 
 ## 6.3 Test GPU simple
 
@@ -720,6 +786,14 @@ journalctl -u omega-daemon -f
 - les VMs idle locales peuvent voir leur `io.weight` baisser temporairement ;
 - si le nœud reste mauvais, le cluster peut proposer une migration.
 
+Sur certains backends, en particulier des VMs sur `ceph-vms` / Ceph RBD, le cgroup
+de la VM peut ne pas exposer `io.weight`. Dans ce cas, le daemon bascule
+automatiquement en mode :
+
+- observation disque uniquement ;
+- plus de tentative répétée d’écriture `io.weight` ;
+- migration/placement disk-aware conservés.
+
 ### Échec typique / diagnostic immédiat
 
 - `disk_pressure_pct` ne bouge pas
@@ -728,6 +802,8 @@ journalctl -u omega-daemon -f
   - vérifier `curl -s http://10.10.0.13:9300/control/disk/status | python3 -m json.tool`
 - `io.weight` ne change jamais
   - relire `journalctl -u omega-daemon -n 200 --no-pager`
+  - vérifier si `control/disk/status` expose `io_control_supported: false`
+  - si oui, le backend ne supporte pas ce levier local et le fallback est normal
 
 ## 6.5 Test migration simple
 
@@ -1179,7 +1255,7 @@ journalctl -u omega-controller -f
 
 ## 7. Catalogue Des Erreurs Réellement Rencontrées
 
-Cette section résume les erreurs réellement rencontrées sur le cluster réel jusqu’au 20 avril 2026.
+Cette section résume les erreurs réellement rencontrées sur le cluster réel jusqu’au 22 avril 2026.
 
 ### 7.1 Réseau/NAT des VMs et nœuds
 
@@ -1195,6 +1271,102 @@ Cette section résume les erreurs réellement rencontrées sur le cluster réel 
 - garder le réseau cluster privé ;
 - ajouter un NAT sortant via l’interface qui porte réellement la route par défaut ;
 - ne pas faire de bridge direct sur le Wi-Fi.
+
+Commandes réellement utilisées sur l’hôte Proxmox :
+
+```bash
+ip route | grep default
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o eno2 -j MASQUERADE
+iptables -A FORWARD -s 10.10.0.0/24 -o eno2 -j ACCEPT
+iptables -A FORWARD -d 10.10.0.0/24 -m state --state ESTABLISHED,RELATED -i eno2 -j ACCEPT
+```
+
+Diagnostics utiles :
+
+```bash
+sysctl net.ipv4.ip_forward
+iptables -t nat -L -n -v
+iptables -L -n -v
+```
+
+### 7.1.1 Dépôt `cdrom:` Debian netinst encore actif
+
+#### Erreur
+
+```text
+The repository 'cdrom://[...] trixie Release' does not have a Release file
+```
+
+#### Cause
+- l’install Debian netinst a laissé `deb cdrom:` actif dans les sources APT ;
+- `apt update` continue donc d’interroger l’ISO.
+
+#### Correction
+
+```bash
+rm -f /etc/apt/sources.list.d/cdrom.list
+cat > /etc/apt/sources.list <<'EOF'
+deb http://deb.debian.org/debian trixie main contrib non-free-firmware
+deb http://deb.debian.org/debian trixie-updates main contrib non-free-firmware
+deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
+EOF
+grep -R "^deb cdrom" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null
+apt update
+```
+
+Point d’attention :
+- la commande `cat <<'EOF'` seule n’écrit rien ;
+- il faut bien `cat > /etc/apt/sources.list <<'EOF'`.
+
+### 7.1.2 `ping 8.8.8.8` : `Network is unreachable`
+
+#### Symptôme
+- `ping 8.8.8.8` échoue avec `Network is unreachable` ;
+- `apt update` échoue ensuite sur la résolution DNS ;
+- `ip route` est vide dans la VM.
+
+#### Cause
+- l’interface invité `ens18` est `DOWN` ;
+- aucune IP et aucune route par défaut n’existent encore dans le guest.
+
+#### Vérification
+
+```bash
+ip a
+ip route
+```
+
+Sortie réellement observée :
+- `ens18 ... state DOWN`
+- aucune adresse IPv4 ;
+- aucune route.
+
+#### Correction rapide
+
+```bash
+ip link set ens18 up
+ip addr add 10.10.0.50/24 dev ens18
+ip route add default via 10.10.0.1
+echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+```
+
+Puis :
+
+```bash
+ping 10.10.0.1
+ping 8.8.8.8
+ping deb.debian.org
+```
+
+### 7.1.3 `dhclient: command not found`
+
+#### Cause
+- image Debian netinst minimale sans client DHCP installé.
+
+#### Correction
+- soit installer ensuite un client DHCP une fois le réseau revenu ;
+- soit utiliser directement une configuration statique temporaire comme dans la section précédente.
 
 ### 7.2 Token API Proxmox
 
@@ -1458,6 +1630,33 @@ systemctl restart omega-daemon
 - attendre que le nœud soit vide ;
 - seulement ensuite l’éteindre.
 
+### 7.20 Test RAM trop gros dans une petite VM
+
+#### Erreur
+
+```text
+MemoryError
+```
+
+#### Cause
+- tentative d’allouer `1400 * 1024 * 1024` octets dans une VM configurée avec seulement `512` Mio ;
+- ce n’est pas un bug Omega.
+
+#### Correction
+- augmenter la RAM de la VM :
+
+```bash
+qm stop 9004
+qm set 9004 --memory 2048
+qm start 9004
+```
+
+- ou réduire la charge mémoire :
+
+```bash
+stress-ng --vm 1 --vm-bytes 200M --timeout 120s
+```
+
 ---
 
 ## 8. Ce Que Le Système Fait Automatiquement
@@ -1483,7 +1682,8 @@ systemctl restart omega-daemon
 - nettoyage du budget GPU local si la VM n’est plus running localement.
 
 ### Disque
-- arbitrage I/O local via `io.weight` ;
+- arbitrage I/O local via `io.weight` quand le backend/cgroup le supporte ;
+- fallback automatique vers télémétrie + migration quand `io.weight` n’est pas disponible ;
 - prise en compte de la pression disque dans le score de migration ;
 - aucune suppression des données disque des VMs.
 

@@ -34,7 +34,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use node_bc_store::metrics::StoreMetrics;
 use node_bc_store::store::PageStore;
 
-use omega_daemon::balloon::{BalloonMonitor, BalloonStats};
+use omega_daemon::balloon::{BalloonManager, BalloonMonitor, BalloonStats};
+use omega_daemon::cgroup_cpu_monitor::{CgroupCpuMonitor, MonitorConfig};
 use omega_daemon::cluster_api::run_api_server;
 use omega_daemon::config::Config;
 use omega_daemon::control_api::build_control_router;
@@ -152,6 +153,20 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ─── Tâche 4b.0 : Monitor CPU haute fréquence 1 ms ──────────────────
+    //
+    // Le CgroupCpuMonitor lit cpu.stat toutes les 1 ms en Rust (sans GIL).
+    // Il émet des CpuPressureEvent quand avg_usage >= 80% ou throttle >= 10%.
+    // La boucle 4b consomme ces événements pour déclencher hotplug immédiatement,
+    // sans attendre l'intervalle de polling (100ms+).
+    let mut cpu_pressure_rx = if cfg.monitor_vms {
+        let (monitor, rx) = CgroupCpuMonitor::new(MonitorConfig::default());
+        monitor.spawn();
+        Some(rx)
+    } else {
+        None
+    };
+
     // ─── Tâche 4b : Monitoring CPU local + hotplug réel ─────────────────
     if cfg.monitor_vms {
         let state = node_state.clone();
@@ -159,6 +174,8 @@ async fn main() -> Result<()> {
         let interval = Duration::from_millis(cfg.cpu_monitor_interval_ms.max(100));
         let qmp_dir = cfg.qemu_pid_dir.clone();
         let qemu_conf_dir = cfg.qemu_conf_dir.clone();
+        // Ownership du Receiver 1ms transféré dans la tâche
+        let mut cpu_pressure_rx = cpu_pressure_rx.take();
 
         tokio::spawn(async move {
             let cpu_ctrl = CgroupCpuController::new();
@@ -173,6 +190,26 @@ async fn main() -> Result<()> {
             );
 
             loop {
+                // Drainer les événements haute fréquence du monitor 1 ms.
+                // Chaque CpuPressureEvent signale une VM sous pression —
+                // on met à jour ses métriques et on tente un hotplug immédiat,
+                // sans attendre la prochaine itération du polling 100ms.
+                if let Some(rx) = cpu_pressure_rx.as_mut() {
+                    while let Ok(ev) = rx.try_recv() {
+                        state.vcpu_scheduler.update_from_cgroup(
+                            ev.vm_id,
+                            ev.avg_usage_pct,
+                            ev.avg_throttle,
+                        );
+                        // Tentative hotplug immédiate si pression détectée
+                        if ev.avg_usage_pct >= omega_daemon::cgroup_cpu_monitor::USAGE_THRESHOLD
+                            || ev.avg_throttle >= omega_daemon::cgroup_cpu_monitor::THROTTLE_THRESHOLD
+                        {
+                            apply_hotplug_if_possible(&state, &hotplug, &cpu_ctrl, ev.vm_id);
+                        }
+                    }
+                }
+
                 let local_vms = tracker.local_running_vms_snapshot();
                 let local_ids: HashSet<u32> = local_vms.iter().map(|vm| vm.vmid).collect();
 
@@ -338,6 +375,34 @@ async fn main() -> Result<()> {
                 }
             });
             monitor.run_blocking(vmids);
+        });
+    }
+
+    // ─── Tâche 8 : Balloon Manager proactif — V5 ─────────────────────────
+    // Gonfle le balloon des guests sur-provisionnés pour récupérer la RAM inutilisée,
+    // et le dégonfle dès qu'un guest est sous pression (scénario S5).
+    if cfg.monitor_vms {
+        let vm_tracker_ref = vm_tracker.clone();
+        let quota_ref = node_state.quota_registry.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let manager = BalloonManager::new(
+                "/var/run/qemu-server".to_string(),
+                30, // réconciliation toutes les 30s
+            );
+
+            manager.run_blocking(
+                move || {
+                    vm_tracker_ref
+                        .local_vms_snapshot()
+                        .iter()
+                        .map(|vm| (vm.vmid, vm.max_mem_mib))
+                        .collect()
+                },
+                move |vmid, new_actual_mib| {
+                    quota_ref.apply_balloon_update(vmid, new_actual_mib);
+                },
+            );
         });
     }
 
@@ -904,13 +969,32 @@ fn reconcile_local_disk_sharing(state: &Arc<NodeState>, io_ctrl: &CgroupIoContro
             continue;
         }
 
+        if matches!(io_ctrl.io_weight_supported(vm_state.vm_id), Some(false)) {
+            let changed = state.disk_io_scheduler.mark_io_control_unsupported(
+                vm_state.vm_id,
+                "io.weight non disponible dans le cgroup VM (backend/cgroup non supporté)".into(),
+            );
+            if changed {
+                info!(
+                    vm_id = vm_state.vm_id,
+                    "partage disque local désactivé automatiquement — io.weight indisponible"
+                );
+            }
+            continue;
+        }
+
         if let Err(e) = io_ctrl.apply(&VmDiskConfig::new(vm_state.vm_id).with_weight(target_weight))
         {
-            warn!(
-                vm_id = vm_state.vm_id,
-                error = %e,
-                "échec mise à jour io.weight"
-            );
+            let changed = state
+                .disk_io_scheduler
+                .mark_io_control_unsupported(vm_state.vm_id, e.to_string());
+            if changed {
+                warn!(
+                    vm_id = vm_state.vm_id,
+                    error = %e,
+                    "io.weight indisponible — fallback vers télémétrie + migration"
+                );
+            }
             continue;
         }
 

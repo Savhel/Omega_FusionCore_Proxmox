@@ -38,13 +38,19 @@ de la création jusqu'au fonctionnement sous pression, pour les trois ressources
 
 Le cluster comporte 3 nœuds identiques. Chaque nœud exécute un `omega-daemon`.
 Les nœuds communiquent entre eux via TLS pour le paging RAM distant. Le disque reste
-sur Ceph RBD partagé, mais l'arbitrage de contention locale se fait via `io.weight`.
+sur Ceph RBD partagé. Quand le cgroup de la VM expose `io.weight`, le daemon arbitre
+la contention locale via cette priorité I/O. Sinon il bascule automatiquement vers
+un mode backend-aware :
+
+- observation des métriques disque uniquement ;
+- aucune tentative répétée d’écriture `io.weight` ;
+- placement et migration disk-aware conservés.
 
 ## Partie 0 — Source de vérité par ressource
 
 - RAM : quotas et budgets réels dans `quota.rs`, ajustés depuis `virtio-balloon` via QMP
 - CPU : topologie et hotplug réels via QMP, bande passante via `cpu.max`/`cpu.weight`
-- Disque : compteurs réels via `io.stat`, pression nœud via PSI I/O, priorités via `io.weight`
+- Disque : compteurs réels via `io.stat` quand disponibles, pression nœud via PSI I/O, priorités via `io.weight` seulement si le backend/cgroup le permet
 - GPU : capacité nœud via backend DRM (`/dev/dri/renderD*`), budgets VM via métadonnées Proxmox
 
 ---

@@ -156,19 +156,27 @@ class StoreStatus:
 
 def poll_all_stores(store_addrs: list[str], timeout: float = 2.0) -> list[StoreStatus]:
     """
-    Interroge tous les stores et retourne leur statut.
+    Interroge tous les stores **en parallèle** et retourne leur statut.
 
-    `store_addrs` est une liste de "host:port".
+    Chaque store est interrogé dans un thread dédié via ThreadPoolExecutor.
+    L'ordre de la liste retournée correspond à l'ordre de `store_addrs`.
     """
-    results = []
-    for addr in store_addrs:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def poll_one(addr: str) -> StoreStatus:
         host, port_str = addr.rsplit(":", 1)
         port = int(port_str)
         try:
             with StoreClient(host, port, timeout) as client:
                 ok    = client.ping()
                 stats = client.get_stats() if ok else None
-                results.append(StoreStatus(addr=addr, reachable=ok, stats=stats))
-        except Exception as e:
-            results.append(StoreStatus(addr=addr, reachable=False, stats=None))
-    return results
+                return StoreStatus(addr=addr, reachable=ok, stats=stats)
+        except Exception:
+            return StoreStatus(addr=addr, reachable=False, stats=None)
+
+    if not store_addrs:
+        return []
+
+    with ThreadPoolExecutor(max_workers=len(store_addrs)) as ex:
+        # map() préserve l'ordre de store_addrs
+        return list(ex.map(poll_one, store_addrs))

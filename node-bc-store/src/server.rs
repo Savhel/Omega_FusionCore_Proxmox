@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::metrics::StoreMetrics;
-use crate::protocol::{Message, Opcode};
+use crate::protocol::{BatchPutResponse, Message, Opcode, PAGE_SIZE};
 use crate::store::{PageKey, PageStore};
 
 /// Point d'entrée du serveur.
@@ -174,6 +174,36 @@ fn dispatch(msg: &Message, store: &Arc<PageStore>, max_pages: u64, node_id: &str
                 json.to_string()
             };
             Message::stats_response(metrics_snap)
+        }
+
+        Opcode::BatchPutPage => {
+            // Payload : [(page_id: u64)(data: PAGE_SIZE)] × msg.page_id
+            let count   = msg.page_id as usize;
+            let entry_sz = 8 + PAGE_SIZE;
+
+            if msg.payload.len() != count * entry_sz {
+                return Message::error_msg(&format!(
+                    "BATCH_PUT payload invalide : {} octets pour {} pages",
+                    msg.payload.len(), count
+                ));
+            }
+            if max_pages > 0 && store.len() as u64 + count as u64 > max_pages {
+                return Message::error_msg("store plein : limite max_pages dépassée");
+            }
+
+            let mut stored = 0u32;
+            let mut failed = 0u32;
+            for i in 0..count {
+                let off    = i * entry_sz;
+                let pid    = u64::from_be_bytes(msg.payload[off..off + 8].try_into().unwrap());
+                let data   = msg.payload[off + 8..off + entry_sz].to_vec();
+                let key    = PageKey::new(msg.vm_id, pid);
+                match store.put(key, data) {
+                    Ok(_)  => stored += 1,
+                    Err(_) => failed += 1,
+                }
+            }
+            BatchPutResponse::ok_message(msg.vm_id, stored, failed)
         }
 
         // Ces opcodes sont des réponses, pas des requêtes : protocole invalide

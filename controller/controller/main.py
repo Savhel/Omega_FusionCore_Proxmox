@@ -729,6 +729,7 @@ def _reconcile_cluster_resources(
             last_vcpu_migrations=last_vcpu_migrations,
             now=now,
             dry_run=dry_run,
+            node_urls=node_urls,
         )
         if migration_started:
             continue
@@ -837,6 +838,126 @@ def _best_reconciliation_target(
         reverse=True,
     )
     return candidates[0].node_id
+
+
+def _find_vcpu_consolidation_plan(
+    needy_vm: VmState,
+    needy_source: str,
+    desired_vcpus: int,
+    gpu_budget_mib: int,
+    node_states: Dict[str, MigNodeState],
+    last_vcpu_migrations: Dict[int, float],
+    now: float,
+) -> Optional[Tuple[str, List[Tuple[VmState, str, str]]]]:
+    """
+    Bin-packing vCPU : trouve un plan de réorganisation qui libère assez de
+    vCPUs sur un nœud cible en déplaçant d'autres VMs vers d'autres nœuds.
+
+    Retourne (target_node, [(vm_à_déplacer, nœud_source, nœud_destination), ...])
+    ou None si aucun plan n'est faisable.
+
+    Algorithme :
+      Pour chaque nœud T candidat (trié par vcpu_free desc) :
+        1. Calculer combien de vCPUs T doit encore libérer.
+        2. Pour chaque VM sur T (triée par vcpu_usage desc) :
+             - Chercher un nœud destination D ≠ T, ≠ needy_source
+               qui peut accueillir cette VM (RAM + GPU).
+             - Si trouvé, l'ajouter au plan d'éviction.
+             - Arrêter dès que T a assez de vCPUs libres pour needy_vm.
+        3. Si un plan complet est trouvé, retourner (T, plan).
+    """
+    VCPU_MIGRATION_COOLDOWN = 120.0
+
+    # Simuler les états après chaque déplacement (on clone pour ne pas modifier)
+    def simulated_vcpu_free(node_id: str, evicted: List[Tuple[VmState, str, str]]) -> int:
+        base = node_states[node_id].vcpu_free
+        for ev_vm, ev_src, ev_tgt in evicted:
+            if ev_src == node_id:
+                base += max(1, ev_vm.max_mem_mib // 512)  # estimation vCPUs libérés
+            if ev_tgt == node_id:
+                base -= max(1, ev_vm.max_mem_mib // 512)
+        return max(0, base)
+
+    def can_host(node: MigNodeState, vm: VmState, extra_vcpus: int, extra_mem_mib: int) -> bool:
+        if node.vcpu_free < extra_vcpus:
+            return False
+        if node.mem_available_kb < extra_mem_mib * 1024:
+            return False
+        if gpu_budget_mib > 0 and node.gpu_free_vram_mib < gpu_budget_mib:
+            return False
+        return True
+
+    # Trier les candidats par vCPUs libres décroissant (le meilleur d'abord)
+    candidates = [
+        (node_id, state)
+        for node_id, state in node_states.items()
+        if node_id != needy_source
+    ]
+    candidates.sort(key=lambda x: x[1].vcpu_free, reverse=True)
+
+    for target_node, target_state in candidates:
+        needed_free = desired_vcpus - target_state.vcpu_free
+        if needed_free <= 0:
+            # Ce nœud a déjà assez de place — _best_reconciliation_target aurait dû
+            # le trouver ; on le saute.
+            continue
+
+        # VMs sur ce nœud cible, triées par consommation vCPU estimée décroissante
+        vms_on_target = sorted(
+            target_state.local_vms,
+            key=lambda v: v.avg_cpu_pct * v.max_mem_mib,
+            reverse=True,
+        )
+
+        plan: List[Tuple[VmState, str, str]] = []
+        freed = 0
+        simulated = {nid: s.vcpu_free for nid, s in node_states.items()}
+
+        for candidate_vm in vms_on_target:
+            if candidate_vm.vm_id == needy_vm.vm_id:
+                continue
+
+            # Respecter le cooldown de migration
+            last_mig = last_vcpu_migrations.get(candidate_vm.vm_id)
+            if last_mig is not None and now - last_mig < VCPU_MIGRATION_COOLDOWN:
+                continue
+
+            # Estimer les vCPUs qu'on libère en déplaçant cette VM
+            # (au moins 1, au plus max_vcpus estimé par heuristique)
+            vcpus_freed_estimate = max(1, int(candidate_vm.avg_cpu_pct / 25) + 1)
+
+            # Chercher une destination pour cette VM
+            destinations = [
+                (nid, s)
+                for nid, s in node_states.items()
+                if nid != target_node
+                and nid != needy_source
+                and can_host(s, candidate_vm, vcpus_freed_estimate,
+                             candidate_vm.max_mem_mib)
+                and simulated.get(nid, 0) >= vcpus_freed_estimate
+            ]
+            if not destinations:
+                continue
+
+            # Prendre la destination avec le plus de vCPUs libres
+            destinations.sort(key=lambda x: x[1].vcpu_free, reverse=True)
+            dest_id = destinations[0][0]
+
+            plan.append((candidate_vm, target_node, dest_id))
+            freed += vcpus_freed_estimate
+            simulated[target_node] = max(0, simulated.get(target_node, 0) - vcpus_freed_estimate)
+            simulated[dest_id] = max(0, simulated.get(dest_id, 0) - vcpus_freed_estimate)
+
+            if freed >= needed_free:
+                # Plan complet — vérifier que needy_vm pourra bien aller sur target_node
+                projected_free = target_state.vcpu_free + freed
+                if projected_free >= desired_vcpus and can_host(
+                    target_state, needy_vm, desired_vcpus, needy_vm.max_mem_mib
+                ):
+                    return (target_node, plan)
+                break  # ce nœud ne convient pas, essayer le suivant
+
+    return None
 
 
 def _best_partial_reconciliation_target(
@@ -1399,6 +1520,7 @@ def _ensure_vm_vcpu_profile(
     last_vcpu_migrations: Dict[int, float],
     now: float,
     dry_run: bool,
+    node_urls: Optional[Dict[str, str]] = None,
 ) -> bool:
     profile = _normalize_vcpu_profile(metadata)
     if profile is None:
@@ -1520,6 +1642,47 @@ def _ensure_vm_vcpu_profile(
             resolution = "partial_fit"
 
         if not target:
+            # Aucun nœud ne peut accueillir la VM directement.
+            # Tentative de consolidation bin-packing : réorganiser des VMs sur
+            # d'autres nœuds pour créer assez de vCPUs libres sur un seul nœud.
+            consolidation = _find_vcpu_consolidation_plan(
+                needy_vm=vm,
+                needy_source=source_node,
+                desired_vcpus=desired_min,
+                gpu_budget_mib=gpu_budget_mib,
+                node_states=node_states,
+                last_vcpu_migrations=last_vcpu_migrations,
+                now=now,
+            )
+            if consolidation:
+                target_node, evictions = consolidation
+                log.warning(
+                    "consolidation vCPU bin-packing : réorganisation de %d VM(s) "
+                    "pour libérer %d vCPUs sur %s",
+                    len(evictions), required_extra, target_node,
+                    vm_id=vm.vm_id,
+                    source=source_node,
+                    evictions=[
+                        {"vm_id": ev_vm.vm_id, "from": ev_src, "to": ev_tgt}
+                        for ev_vm, ev_src, ev_tgt in evictions
+                    ],
+                )
+                if not dry_run:
+                    for ev_vm, ev_src, ev_tgt in evictions:
+                        ev_url = node_urls.get(ev_src, source_url)
+                        _start_auto_migration(
+                            source_url=ev_url,
+                            node_states=node_states,
+                            source_node=ev_src,
+                            vm=ev_vm,
+                            target=ev_tgt,
+                            detail="réorganisation bin-packing vCPU",
+                            tracker=last_vcpu_migrations,
+                            now=now,
+                            dry_run=False,
+                        )
+                return True
+
             log.warning(
                 "profil vCPU en déficit, VM conservée en attente",
                 vm_id=vm.vm_id,

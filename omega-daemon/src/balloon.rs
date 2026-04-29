@@ -234,6 +234,49 @@ impl QmpClient {
         Ok(())
     }
 
+    /// Demande à QEMU de modifier la taille visible du balloon.
+    ///
+    /// `target_bytes` = RAM que le guest doit voir après l'opération.
+    /// - Inflation : `target_bytes < actual_bytes` → le balloon retire des pages au guest
+    /// - Déflation : `target_bytes > actual_bytes` → le balloon rend des pages au guest
+    pub fn set_balloon_target(&self, target_bytes: u64) -> Result<()> {
+        if !self.sock_path.exists() {
+            return Ok(());
+        }
+
+        let mut stream = UnixStream::connect(&self.sock_path)
+            .with_context(|| format!("connexion QMP vmid={}", self.vmid))?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+
+        self.send_json(&mut stream, &json!({"execute": "qmp_capabilities"}))?;
+        let _ = self.read_response(&mut reader)?;
+
+        self.send_json(
+            &mut stream,
+            &json!({
+                "execute": "balloon",
+                "arguments": {"value": target_bytes}
+            }),
+        )?;
+        let resp = self.read_response(&mut reader)?;
+
+        if let Some(err) = resp.get("error") {
+            bail!("set_balloon_target vmid={}: {:?}", self.vmid, err);
+        }
+
+        info!(
+            vmid = self.vmid,
+            target_mib = target_bytes / 1024 / 1024,
+            "balloon target mis à jour"
+        );
+        Ok(())
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────
 
     fn send_json(&self, stream: &mut UnixStream, cmd: &Value) -> Result<()> {
@@ -348,6 +391,146 @@ impl BalloonMonitor {
                     }
                     Ok(None) => trace!(vmid, "balloon non disponible"),
                     Err(e) => debug!(vmid, error = %e, "erreur lecture balloon"),
+                }
+            }
+        }
+    }
+}
+
+// ─── Gestionnaire proactif de balloon (Scenario S5) ───────────────────────────
+
+/// Gestionnaire proactif balloon — gonfle pour récupérer la RAM inutilisée des guests
+/// et dégonfle quand un guest est sous pression.
+///
+/// Contrairement à `BalloonMonitor` (observateur passif), `BalloonManager` envoie
+/// des commandes QMP `balloon` pour ajuster la RAM visible des guests.
+pub struct BalloonManager {
+    qmp_dir: String,
+    interval_secs: u64,
+    /// Gonfler si RAM disponible guest > X% de sa RAM actuelle
+    inflate_threshold_pct: f64,
+    /// Dégonfler si RAM disponible guest < X% de sa RAM actuelle
+    deflate_threshold_pct: f64,
+    /// Ne jamais donner moins de X% de max_mem au guest (plancher absolu)
+    min_guest_pct: f64,
+}
+
+impl BalloonManager {
+    pub fn new(qmp_dir: String, interval_secs: u64) -> Self {
+        Self {
+            qmp_dir,
+            interval_secs,
+            inflate_threshold_pct: 20.0,
+            deflate_threshold_pct: 10.0,
+            min_guest_pct: 50.0,
+        }
+    }
+
+    /// Évalue et applique une action balloon pour une VM.
+    ///
+    /// Retourne le nouveau `actual` en MiB si une commande QMP a été envoyée.
+    pub fn reconcile_vm(
+        &self,
+        vmid: u32,
+        stats: &BalloonStats,
+        max_mem_mib: u64,
+    ) -> Option<u64> {
+        if stats.actual_bytes == 0 || max_mem_mib == 0 {
+            return None;
+        }
+
+        let max_mem_bytes = max_mem_mib * 1024 * 1024;
+        // RAM minimale garantie au guest (50% de max_mem par défaut)
+        let floor_bytes = (max_mem_bytes as f64 * self.min_guest_pct / 100.0) as u64;
+        // Seuil minimal de changement : 64 MiB (évite les micro-ajustements)
+        let min_delta = 64 * 1024 * 1024_u64;
+
+        let available_pct =
+            stats.available_bytes as f64 / stats.actual_bytes as f64 * 100.0;
+
+        let client = QmpClient::for_vm(vmid, &self.qmp_dir);
+
+        if available_pct > self.inflate_threshold_pct
+            && stats.actual_bytes > floor_bytes + min_delta
+        {
+            // Guest a de la RAM inutilisée → gonfler le balloon pour en récupérer la moitié
+            let reclaimable = stats.available_bytes / 2;
+            let new_target = stats.actual_bytes
+                .saturating_sub(reclaimable)
+                .max(floor_bytes);
+
+            if stats.actual_bytes.saturating_sub(new_target) >= min_delta {
+                info!(
+                    vmid,
+                    available_pct = format!("{:.1}%", available_pct),
+                    current_mib = stats.actual_bytes / 1024 / 1024,
+                    new_target_mib = new_target / 1024 / 1024,
+                    "BALLOON inflate — récupération RAM inutilisée"
+                );
+                if let Err(e) = client.set_balloon_target(new_target) {
+                    warn!(vmid, error = %e, "inflation balloon échouée");
+                    return None;
+                }
+                return Some(new_target / 1024 / 1024);
+            }
+        } else if available_pct < self.deflate_threshold_pct {
+            // Guest sous pression → dégonfler pour lui rendre de la RAM
+            let inflated = max_mem_bytes.saturating_sub(stats.actual_bytes);
+            if inflated >= min_delta {
+                // Rendre au minimum 64 MiB, au maximum la moitié de ce qu'on a pris
+                let give_back = (inflated / 2).max(min_delta);
+                let new_target = (stats.actual_bytes + give_back).min(max_mem_bytes);
+
+                info!(
+                    vmid,
+                    available_pct = format!("{:.1}%", available_pct),
+                    current_mib = stats.actual_bytes / 1024 / 1024,
+                    new_target_mib = new_target / 1024 / 1024,
+                    "BALLOON deflate — restitution RAM au guest sous pression"
+                );
+                if let Err(e) = client.set_balloon_target(new_target) {
+                    warn!(vmid, error = %e, "déflation balloon échouée");
+                    return None;
+                }
+                return Some(new_target / 1024 / 1024);
+            }
+        }
+
+        None
+    }
+
+    /// Boucle proactive — à lancer dans un thread dédié via `tokio::task::spawn_blocking`.
+    ///
+    /// - `vmids_fn` : closure appelée à chaque cycle, retourne `(vmid, max_mem_mib)` pour chaque VM locale
+    /// - `on_adjust` : callback appelé après chaque ajustement réussi avec `(vmid, new_actual_mib)`
+    pub fn run_blocking<F, G>(self, vmids_fn: F, on_adjust: G)
+    where
+        F: Fn() -> Vec<(u32, u64)>,
+        G: Fn(u32, u64),
+    {
+        info!(
+            interval_secs = self.interval_secs,
+            inflate_threshold_pct = self.inflate_threshold_pct,
+            deflate_threshold_pct = self.deflate_threshold_pct,
+            min_guest_pct = self.min_guest_pct,
+            "BalloonManager démarré"
+        );
+
+        loop {
+            std::thread::sleep(Duration::from_secs(self.interval_secs));
+
+            for (vmid, max_mem_mib) in vmids_fn() {
+                let client = QmpClient::for_vm(vmid, &self.qmp_dir);
+                match client.query_stats() {
+                    Ok(Some(stats)) => {
+                        if let Some(new_actual_mib) =
+                            self.reconcile_vm(vmid, &stats, max_mem_mib)
+                        {
+                            on_adjust(vmid, new_actual_mib);
+                        }
+                    }
+                    Ok(None) => trace!(vmid, "balloon non disponible (manager)"),
+                    Err(e) => debug!(vmid, error = %e, "erreur lecture balloon (manager)"),
                 }
             }
         }

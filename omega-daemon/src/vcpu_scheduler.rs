@@ -166,7 +166,7 @@ impl VmVcpuState {
     /// suggère que la VM a encore besoin de plus de parallélisme pour survivre
     /// correctement après un retrait.
     pub fn safe_vcpu_floor(&self) -> usize {
-        let usage_floor = ((self.cpu_usage_pct / HOTPLUG_TRIGGER_PCT).ceil() as usize).max(1);
+        let usage_floor = ((self.cpu_usage_pct / DOWNSCALE_TRIGGER_PCT).ceil() as usize).max(1);
         self.min_vcpus
             .max(usage_floor)
             .min(self.current_vcpus.max(1))

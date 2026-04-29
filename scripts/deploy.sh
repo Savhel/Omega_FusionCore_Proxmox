@@ -20,17 +20,23 @@ set -euo pipefail
 : "${DEPLOY_DIR:=/opt/omega-remote-paging}"
 : "${STORE_PORT_B:=9100}"
 : "${STORE_PORT_C:=9101}"
+# Si NODE_A est défini, déploie aussi le launcher et installe le wrapper QEMU
+: "${OMEGA_STORES:=${NODE_B}:${STORE_PORT_B},${NODE_C}:${STORE_PORT_C}}"
+: "${OMEGA_INSTALL_VMIDS:=}"  # VMIDs séparés par virgule pour le hookscript
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STORE_BIN="${ROOT_DIR}/target/release/node-bc-store"
 AGENT_BIN="${ROOT_DIR}/target/release/node-a-agent"
+LAUNCHER_BIN="${ROOT_DIR}/target/release/omega-qemu-launcher"
+DAEMON_BIN="${ROOT_DIR}/target/release/omega-daemon"
 
 info()    { echo -e "\033[32m[INFO]\033[0m  $*"; }
 success() { echo -e "\033[32m[OK]\033[0m    $*"; }
 fail()    { echo -e "\033[31m[FAIL]\033[0m  $*" >&2; exit 1; }
 
-[[ -x "$STORE_BIN" ]] || fail "node-bc-store non compilé — lancez 'make build' d'abord"
-[[ -x "$AGENT_BIN" ]] || fail "node-a-agent non compilé — lancez 'make build' d'abord"
+[[ -x "$STORE_BIN"   ]] || fail "node-bc-store non compilé — lancez 'make build' d'abord"
+[[ -x "$AGENT_BIN"   ]] || fail "node-a-agent non compilé — lancez 'make build' d'abord"
+[[ -x "$LAUNCHER_BIN" ]] || fail "omega-qemu-launcher non compilé — lancez 'make build' d'abord"
 
 # ─── Fonction de déploiement d'un store ───────────────────────────────────────
 
@@ -92,21 +98,43 @@ deploy_store "$NODE_B" "$STORE_PORT_B" "node-b"
 deploy_store "$NODE_C" "$STORE_PORT_C" "node-c"
 
 echo
-info "Déploiement du binaire agent sur nœud A (local ou ${NODE_A:-<local>})..."
+info "Déploiement des binaires sur nœud A (local ou ${NODE_A:-<local>})..."
 if [[ -n "${NODE_A:-}" ]]; then
     ssh "${DEPLOY_USER}@${NODE_A}" "mkdir -p ${DEPLOY_DIR}/bin"
-    scp "$AGENT_BIN" "${DEPLOY_USER}@${NODE_A}:${DEPLOY_DIR}/bin/node-a-agent"
-    success "Agent déployé sur ${NODE_A}"
+    scp "$AGENT_BIN"    "${DEPLOY_USER}@${NODE_A}:${DEPLOY_DIR}/bin/node-a-agent"
+    scp "$LAUNCHER_BIN" "${DEPLOY_USER}@${NODE_A}:${DEPLOY_DIR}/bin/omega-qemu-launcher"
+    [[ -x "$DAEMON_BIN" ]] && scp "$DAEMON_BIN" "${DEPLOY_USER}@${NODE_A}:${DEPLOY_DIR}/bin/omega-daemon" || true
+
+    # Copier les scripts d'installation et lancer l'installation du wrapper QEMU
+    info "Copie des scripts d'installation sur ${NODE_A}..."
+    scp "${ROOT_DIR}/scripts/proxmox_hook.pl"       "${DEPLOY_USER}@${NODE_A}:/tmp/proxmox_hook.pl"
+    scp "${ROOT_DIR}/scripts/omega-proxmox-install.sh" "${DEPLOY_USER}@${NODE_A}:/tmp/omega-proxmox-install.sh"
+
+    info "Lancement de omega-proxmox-install.sh sur ${NODE_A}..."
+    ssh "${DEPLOY_USER}@${NODE_A}" "
+        INSTALL_DIR='${DEPLOY_DIR}/bin' \
+        OMEGA_STORES='${OMEGA_STORES}' \
+        OMEGA_VMIDS='${OMEGA_INSTALL_VMIDS}' \
+        SCRIPT_DIR=/tmp \
+        bash /tmp/omega-proxmox-install.sh
+    "
+    success "Nœud A (${NODE_A}) — launcher + wrapper QEMU installés"
 else
-    info "NODE_A non défini — agent non déployé (à lancer manuellement)"
+    info "NODE_A non défini — binaires et wrapper non déployés (à faire manuellement):"
+    info "  INSTALL_DIR=/usr/local/bin OMEGA_STORES='${OMEGA_STORES}' bash scripts/omega-proxmox-install.sh"
 fi
 
 echo
 success "=== Déploiement terminé ==="
 echo
-echo "Pour lancer l'agent sur le nœud A :"
-echo "  sudo ${DEPLOY_DIR}/bin/node-a-agent \\"
-echo "    --stores ${NODE_B}:${STORE_PORT_B},${NODE_C}:${STORE_PORT_C} \\"
-echo "    --vm-id 100 \\"
-echo "    --region-mib 512 \\"
-echo "    --mode daemon"
+echo "Récapitulatif :"
+echo "  Node B store  : ${NODE_B}:${STORE_PORT_B}"
+echo "  Node C store  : ${NODE_C}:${STORE_PORT_C}"
+if [[ -n "${NODE_A:-}" ]]; then
+echo "  Node A launcher: installé dans ${DEPLOY_DIR}/bin/"
+echo "  Wrapper QEMU  : /usr/bin/kvm → ${DEPLOY_DIR}/bin/kvm-omega"
+echo "  Hookscript    : /var/lib/vz/snippets/omega-hook.pl"
+fi
+echo
+echo "Pour enregistrer le hookscript sur une VM :"
+echo "  qm set <vmid> --hookscript local:snippets/omega-hook.pl"

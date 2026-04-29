@@ -44,6 +44,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use sled::{Db, IVec};
@@ -112,10 +113,13 @@ fn vm_prefix(vm_id: u32) -> [u8; 4] {
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
-/// Store de pages persistant : cache RAM + journal sled.
+/// Store de pages persistant : cache RAM (LRU) + journal sled.
+///
+/// Le cache chaud stocke `(données, timestamp_dernier_accès)`.
+/// L'éviction retire les pages les moins récemment accédées (LRU réel).
 pub struct PersistentPageStore {
-    /// Cache chaud — pages fréquemment accédées
-    hot_cache: DashMap<PageKey, Arc<[u8]>>,
+    /// Cache chaud — (page, timestamp dernier accès) pour LRU
+    hot_cache: DashMap<PageKey, (Arc<[u8]>, Instant)>,
     /// Base sled — journal durable sur disque
     db: Db,
     /// Configuration
@@ -177,9 +181,9 @@ impl PersistentPageStore {
             return Err(e.to_string());
         }
 
-        // Mise à jour cache chaud
+        // Mise à jour cache chaud avec timestamp courant
         let arc_data: Arc<[u8]> = data.into();
-        self.hot_cache.insert(key, arc_data);
+        self.hot_cache.insert(key, (arc_data, Instant::now()));
 
         // Éviction cache si dépassement
         if self.hot_cache.len() > self.cfg.max_hot_pages {
@@ -210,11 +214,12 @@ impl PersistentPageStore {
     pub fn get(&self, key: &PageKey) -> Option<Vec<u8>> {
         self.metrics.get_count.fetch_add(1, Ordering::Relaxed);
 
-        // 1. Cache chaud
-        if let Some(entry) = self.hot_cache.get(key) {
+        // 1. Cache chaud — mise à jour du timestamp LRU à chaque accès
+        if let Some(mut entry) = self.hot_cache.get_mut(key) {
+            entry.1 = Instant::now();
             self.metrics.hit_count.fetch_add(1, Ordering::Relaxed);
             debug!(vm_id = key.vm_id, page_id = key.page_id, "hit cache chaud");
-            return Some(entry.to_vec());
+            return Some(entry.0.to_vec());
         }
 
         // 2. Lecture depuis sled (accès froid)
@@ -222,9 +227,9 @@ impl PersistentPageStore {
         match self.db.get(raw_key) {
             Ok(Some(ivec)) => {
                 let data = ivec.to_vec();
-                // Remettre en cache chaud
+                // Remettre en cache chaud avec timestamp courant
                 let arc_data: Arc<[u8]> = data.clone().into();
-                self.hot_cache.insert(key.clone(), arc_data);
+                self.hot_cache.insert(key.clone(), (arc_data, Instant::now()));
                 self.metrics.hit_count.fetch_add(1, Ordering::Relaxed);
                 debug!(
                     vm_id = key.vm_id,
@@ -326,7 +331,7 @@ impl PersistentPageStore {
             if let Ok((raw_key, raw_val)) = result {
                 if let Some(key) = decode_key(&raw_key) {
                     let arc_data: Arc<[u8]> = raw_val.to_vec().into();
-                    self.hot_cache.insert(key, arc_data);
+                    self.hot_cache.insert(key, (arc_data, Instant::now()));
                     count += 1;
                 }
             }
@@ -345,28 +350,28 @@ impl PersistentPageStore {
         count
     }
 
-    /// Retire des pages du cache chaud quand il déborde.
+    /// Retire les pages LRU du cache chaud quand il déborde.
     ///
-    /// Stratégie simple : retirer les 10% les plus "froids" (première tranche
-    /// de la DashMap — ordre non garanti, approximation LRU acceptable).
+    /// Collecte tous les timestamps, trie par ancienneté, évince les 10% les plus vieux.
+    /// C'est un vrai LRU : on évince toujours les pages les moins récemment accédées.
     fn evict_cold_from_cache(&self) {
-        let target_evict = self.cfg.max_hot_pages / 10;
-        let mut evicted = 0usize;
+        let target_evict = (self.cfg.max_hot_pages / 10).max(1);
 
-        // Collecter des clés à retirer (on ne peut pas modifier pendant l'itération)
-        let to_remove: Vec<PageKey> = self
+        // Collecter les clés avec leurs timestamps (snapshot instantané)
+        let mut entries: Vec<(PageKey, Instant)> = self
             .hot_cache
             .iter()
-            .take(target_evict)
-            .map(|e| e.key().clone())
+            .map(|e| (e.key().clone(), e.value().1))
             .collect();
 
-        for key in to_remove {
+        // Trier par accès le plus ancien en premier
+        entries.sort_unstable_by_key(|(_, t)| *t);
+
+        for (key, _) in entries.into_iter().take(target_evict) {
             self.hot_cache.remove(&key);
-            evicted += 1;
         }
 
-        debug!(evicted, "pages retirées du cache chaud (débordement)");
+        debug!(evicted = target_evict, "LRU éviction cache chaud");
     }
 }
 

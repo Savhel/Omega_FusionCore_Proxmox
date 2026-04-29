@@ -29,6 +29,8 @@ pub struct VmDiskState {
     pub write_bps: f64,
     pub io_weight: u32,
     pub local_share_active: bool,
+    pub io_control_supported: bool,
+    pub io_control_reason: Option<String>,
     pub idle_since: Option<u64>,
     pub updated_at: u64,
 }
@@ -41,6 +43,8 @@ impl VmDiskState {
             write_bps: 0.0,
             io_weight: DEFAULT_IO_WEIGHT,
             local_share_active: false,
+            io_control_supported: true,
+            io_control_reason: None,
             idle_since: Some(now_secs()),
             updated_at: now_secs(),
         }
@@ -126,8 +130,22 @@ impl DiskIoScheduler {
         if let Some(vm) = self.vms.write().unwrap().get_mut(&vm_id) {
             vm.io_weight = weight.clamp(1, 10000);
             vm.local_share_active = local_share_active;
+            vm.io_control_supported = true;
+            vm.io_control_reason = None;
             vm.updated_at = now_secs();
         }
+    }
+
+    pub fn mark_io_control_unsupported(&self, vm_id: u32, reason: String) -> bool {
+        let mut vms = self.vms.write().unwrap();
+        let vm = vms.entry(vm_id).or_insert_with(|| VmDiskState::new(vm_id));
+        let changed = vm.io_control_supported || vm.io_control_reason.as_deref() != Some(reason.as_str());
+        vm.io_control_supported = false;
+        vm.io_control_reason = Some(reason);
+        vm.local_share_active = false;
+        vm.io_weight = DEFAULT_IO_WEIGHT;
+        vm.updated_at = now_secs();
+        changed
     }
 
     pub fn get_vm_state(&self, vm_id: u32) -> Option<VmDiskState> {
@@ -193,15 +211,23 @@ impl DiskIoScheduler {
             .iter()
             .filter(|vm| vm.local_share_active)
             .count();
+        let unsupported_count = status
+            .vm_states
+            .iter()
+            .filter(|vm| !vm.io_control_supported)
+            .count();
 
         let mut out = format!(
             "# HELP omega_disk_io_pressure_pct Pression I/O du nœud (PSI avg10)\n\
              omega_disk_io_pressure_pct{{node=\"{node}\"}} {pressure:.2}\n\
              # HELP omega_disk_local_share_vms Nombre de VMs en partage I/O local\n\
-             omega_disk_local_share_vms{{node=\"{node}\"}} {local_share_count}\n",
+             omega_disk_local_share_vms{{node=\"{node}\"}} {local_share_count}\n\
+             # HELP omega_disk_io_control_unsupported_vms Nombre de VMs sans support io.weight\n\
+             omega_disk_io_control_unsupported_vms{{node=\"{node}\"}} {unsupported_count}\n",
             node = node_id,
             pressure = status.node_pressure_pct,
             local_share_count = local_share_count,
+            unsupported_count = unsupported_count,
         );
 
         for vm in &status.vm_states {

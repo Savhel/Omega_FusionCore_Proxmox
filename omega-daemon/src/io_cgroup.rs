@@ -112,8 +112,16 @@ impl CgroupIoController {
             )
         })?;
 
+        let io_weight_path = cgroup.join("io.weight");
+        if !io_weight_path.exists() {
+            anyhow::bail!(
+                "io.weight non disponible pour la VM {} (backend/cgroup non supporté)",
+                config.vm_id
+            );
+        }
+
         fs::write(
-            cgroup.join("io.weight"),
+            io_weight_path,
             format!("default {}", config.weight.clamp(1, 10000)),
         )
         .with_context(|| format!("écriture io.weight VM {}", config.vm_id))?;
@@ -124,6 +132,11 @@ impl CgroupIoController {
             "io.weight appliqué"
         );
         Ok(())
+    }
+
+    pub fn io_weight_supported(&self, vm_id: u32) -> Option<bool> {
+        let cgroup = self.find_vm_cgroup(vm_id)?;
+        Some(cgroup.join("io.weight").exists())
     }
 
     pub fn read_node_pressure_pct(&self) -> f64 {
@@ -259,6 +272,16 @@ mod tests {
         let (read_bps, write_bps) = CgroupIoController::compute_bps(&before, &after, 1_000_000);
         assert_eq!(read_bps, 1000.0);
         assert_eq!(write_bps, 2000.0);
+    }
+
+    #[test]
+    fn test_io_weight_supported_detects_missing_file() {
+        let root = temp_root();
+        let vm = root.join("qemu.slice").join("9004.scope");
+        fs::create_dir_all(&vm).unwrap();
+
+        let ctrl = CgroupIoController::with_root(&root);
+        assert_eq!(ctrl.io_weight_supported(9004), Some(false));
     }
 
     #[test]

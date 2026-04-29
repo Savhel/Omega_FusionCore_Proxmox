@@ -1,41 +1,48 @@
 #!/usr/bin/perl
 # proxmox_hook.pl — Hookscript Proxmox V3 pour omega-remote-paging
 #
-# Proxmox appelle ce script à chaque phase du cycle de vie d'une VM.
-# Ce hook notifie le omega-daemon local qu'une VM démarre ou s'arrête.
+# Gère le cycle de vie de omega-qemu-launcher (agent memfd) et notifie
+# omega-daemon (monitoring, éviction, nettoyage pages distantes).
 #
 # INSTALLATION :
-#   1. Copier dans le répertoire snippets du stockage local Proxmox :
-#      cp scripts/proxmox_hook.pl /var/lib/vz/snippets/omega-agent-hook.pl
-#      chmod +x /var/lib/vz/snippets/omega-agent-hook.pl
+#   1. Lancer scripts/omega-proxmox-install.sh — il installe ce fichier et
+#      configure le wrapper QEMU automatiquement.
 #
-#   2. Configurer la VM (via qm ou l'UI Proxmox) :
-#      qm set {VMID} --hookscript local:snippets/omega-agent-hook.pl
+#   2. Ou manuellement :
+#      cp scripts/proxmox_hook.pl /var/lib/vz/snippets/omega-hook.pl
+#      chmod +x /var/lib/vz/snippets/omega-hook.pl
+#      qm set {VMID} --hookscript local:snippets/omega-hook.pl
 #
-#   3. Le omega-daemon doit tourner sur le nœud avec le canal de contrôle actif
-#      sur le port 9300 (configurable via OMEGA_CONTROL_PORT).
-#
-# PHASES Proxmox disponibles :
-#   pre-start   : avant le démarrage (QEMU pas encore lancé)
-#   post-start  : après le démarrage (QEMU en cours, VMID connu)
-#   pre-stop    : avant l'arrêt (propre ou SIGTERM)
-#   post-stop   : après l'arrêt
+# PHASES Proxmox :
+#   pre-start   : prépare l'agent memfd (omega-qemu-launcher prepare)
+#   post-start  : notifie omega-daemon (monitoring RAM + GPU + CPU)
+#   pre-stop    : signale l'arrêt imminent à omega-daemon
+#   post-stop   : arrête l'agent memfd + nettoie les pages distantes
 
 use strict;
 use warnings;
+use POSIX qw(strftime);
 
-# Paramètres Proxmox
 my ($vmid, $phase) = @ARGV;
+die "Usage: $0 <vmid> <phase>\n" unless defined $vmid && defined $phase;
 
-# Configuration omega-daemon
-my $OMEGA_CONTROL_HOST  = $ENV{OMEGA_CONTROL_HOST}  // "127.0.0.1";
-my $OMEGA_CONTROL_PORT  = $ENV{OMEGA_CONTROL_PORT}  // "9300";
-my $OMEGA_LOG_FILE      = $ENV{OMEGA_LOG_FILE}       // "/var/log/omega-hook.log";
+# ─── Configuration (variables d'environnement ou valeurs par défaut) ──────────
+
+my $OMEGA_CONTROL_HOST      = $ENV{OMEGA_CONTROL_HOST}      // "127.0.0.1";
+my $OMEGA_CONTROL_PORT      = $ENV{OMEGA_CONTROL_PORT}      // "9300";
+my $OMEGA_LOG_FILE          = $ENV{OMEGA_LOG_FILE}          // "/var/log/omega-hook.log";
+my $OMEGA_LAUNCHER_BIN      = $ENV{OMEGA_LAUNCHER_BIN}      // "/usr/local/bin/omega-qemu-launcher";
+my $OMEGA_RUN_DIR           = $ENV{OMEGA_RUN_DIR}           // "/var/lib/omega-qemu";
+my $OMEGA_STORES            = $ENV{OMEGA_STORES}            // "127.0.0.1:9100,127.0.0.1:9101";
+my $OMEGA_START_TIMEOUT     = $ENV{OMEGA_START_TIMEOUT}     // "30";
+my $OMEGA_AGENT_STOP_TIMEOUT = $ENV{OMEGA_AGENT_STOP_TIMEOUT} // "15";
+my $OMEGA_SKIP_DAEMON_CHECK = $ENV{OMEGA_SKIP_DAEMON_CHECK} // "0";
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 sub log_msg {
     my ($level, $msg) = @_;
-    my $ts = `date -u +"%Y-%m-%dT%H:%M:%SZ"`;
-    chomp $ts;
+    my $ts   = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime);
     my $line = "[$ts] [$level] vmid=$vmid phase=$phase $msg\n";
     print STDERR $line;
     if (open my $fh, '>>', $OMEGA_LOG_FILE) {
@@ -44,103 +51,153 @@ sub log_msg {
     }
 }
 
-sub curl_post {
-    my ($path, $body) = @_;
+sub curl_json {
+    my ($method, $path, $body) = @_;
     my $url = "http://${OMEGA_CONTROL_HOST}:${OMEGA_CONTROL_PORT}${path}";
-    my $cmd = qq(curl -s -f -X POST "$url" )
-            . qq(-H 'Content-Type: application/json' )
-            . qq(-d '$body' )
-            . qq(--connect-timeout 2 --max-time 5 2>&1);
-    my $result = `$cmd`;
-    my $rc     = $? >> 8;
-    return ($rc, $result);
+    my @cmd = (
+        'curl', '-s', '-f', '-X', $method, $url,
+        '-H', 'Content-Type: application/json',
+        '--connect-timeout', '2', '--max-time', '5',
+    );
+    push @cmd, '-d', $body if defined $body;
+    my $out = qx(@cmd 2>&1);
+    return ($? >> 8, $out);
 }
 
-sub curl_delete {
-    my ($path) = @_;
-    my $url = "http://${OMEGA_CONTROL_HOST}:${OMEGA_CONTROL_PORT}${path}";
-    my $cmd = qq(curl -s -f -X DELETE "$url" --connect-timeout 2 --max-time 5 2>&1);
-    my $result = `$cmd`;
-    my $rc     = $? >> 8;
-    return ($rc, $result);
+# Exécute omega-qemu-launcher avec les arguments donnés.
+# Retourne (exit_code, stdout+stderr).
+sub run_launcher {
+    my (@args) = @_;
+    unless (-x $OMEGA_LAUNCHER_BIN) {
+        log_msg("WARN", "omega-qemu-launcher introuvable : $OMEGA_LAUNCHER_BIN");
+        return (1, "binary not found");
+    }
+    my $cmd = join(' ', map { "'$_'" } ($OMEGA_LAUNCHER_BIN, @args));
+    my $out = qx($cmd 2>&1);
+    return ($? >> 8, $out);
 }
 
-# ─── Dispatch selon la phase ──────────────────────────────────────────────────
+# Lit la RAM guest de la VM via qm config (champ memory).
+sub get_vm_memory_mib {
+    my $out = qx(qm config $vmid 2>/dev/null);
+    if ($out =~ /^memory:\s*(\d+)/m) {
+        return int($1);
+    }
+    return undef;
+}
 
-if ($phase eq 'post-start') {
-    # La VM vient de démarrer — notifier omega-daemon pour commencer le monitoring
-    log_msg("INFO", "VM démarrée — notification omega-daemon");
+# ─── pre-start ────────────────────────────────────────────────────────────────
+# Démarre l'agent memfd AVANT que QEMU soit lancé.
+# omega-qemu-launcher prepare : fork l'agent, attend les métadonnées memfd,
+# écrit state.json pour que le wrapper kvm-omega le lise.
 
-    # Configurer le polling balloon stats (toutes les 15s)
-    my ($rc, $out) = curl_post(
-        "/control/evict/$vmid",
-        "{\"count\": 0}"  # count=0 → démarrer le monitoring sans éviction forcée
+sub phase_pre_start {
+    log_msg("INFO", "pré-démarrage — préparation agent memfd");
+
+    # Vérification omega-daemon (avertissement seulement — non bloquant)
+    unless ($OMEGA_SKIP_DAEMON_CHECK) {
+        my ($rc, $out) = curl_json('GET', '/control/status', undef);
+        if ($rc != 0) {
+            log_msg("WARN", "omega-daemon non joignable sur ${OMEGA_CONTROL_HOST}:${OMEGA_CONTROL_PORT} (monitoring désactivé)");
+        } else {
+            log_msg("INFO", "omega-daemon disponible");
+        }
+    }
+
+    my $size_mib = get_vm_memory_mib();
+    unless (defined $size_mib) {
+        log_msg("WARN", "impossible de lire la RAM de vmid=$vmid via qm config — agent memfd ignoré");
+        exit 0;
+    }
+
+    log_msg("INFO", "RAM guest = ${size_mib} MiB — lancement agent memfd");
+
+    my ($rc, $out) = run_launcher(
+        'prepare',
+        '--vm-id',              $vmid,
+        '--size-mib',           $size_mib,
+        '--stores',             $OMEGA_STORES,
+        '--run-dir',            $OMEGA_RUN_DIR,
+        '--start-timeout-secs', $OMEGA_START_TIMEOUT,
     );
 
     if ($rc == 0) {
-        log_msg("INFO", "omega-daemon notifié (post-start ok)");
+        log_msg("INFO", "agent memfd prêt pour vmid=$vmid");
     } else {
-        log_msg("WARN", "omega-daemon non joignable (port 9300) — monitoring désactivé : $out");
+        log_msg("ERROR", "omega-qemu-launcher prepare a échoué (rc=$rc) : $out");
+        # Non fatal : QEMU peut démarrer sans le backend omega (dégradé)
     }
+}
 
-    # Passer l'env OMEGA_VM_ID=vmid au processus agent s'il tourne séparément
-    # (pour les déploiements où node-a-agent tourne à côté de omega-daemon)
-    if (-x "/opt/omega-remote-paging/bin/node-a-agent") {
-        my $peers = $ENV{OMEGA_PEERS} // "";
-        my $stores = $ENV{OMEGA_STORES} // "127.0.0.1:9100,127.0.0.1:9101";
-        log_msg("INFO", "démarrage node-a-agent pour vmid=$vmid (stores=$stores)");
+# ─── post-start ───────────────────────────────────────────────────────────────
+# QEMU tourne. Notifie omega-daemon pour démarrer le monitoring RAM/CPU/GPU.
 
-        # Lance l'agent en mode daemon en arrière-plan
-        my $cmd = sprintf(
-            'OMEGA_VM_ID=%d /opt/omega-remote-paging/bin/node-a-agent '
-          . '--vm-id %d --stores "%s" --mode daemon '
-          . '>> /var/log/omega-agent-%d.log 2>&1 &',
-            $vmid, $vmid, $stores, $vmid
-        );
-        system($cmd);
+sub phase_post_start {
+    log_msg("INFO", "post-démarrage — notification omega-daemon");
+
+    my ($rc, $out) = curl_json('POST', "/control/evict/$vmid", '{"count":0}');
+    if ($rc == 0) {
+        log_msg("INFO", "omega-daemon notifié (monitoring activé)");
+    } else {
+        log_msg("WARN", "omega-daemon non joignable (post-start) : $out");
     }
+}
 
-} elsif ($phase eq 'pre-stop') {
-    # La VM va s'arrêter — sauvegarder l'état avant de couper
-    log_msg("INFO", "VM en arrêt — signalement omega-daemon");
+# ─── pre-stop ─────────────────────────────────────────────────────────────────
+# La VM va s'arrêter. Signale omega-daemon pour permettre de rapatrier des pages.
 
-    # Optionnel : on pourrait rapatrier toutes les pages distantes avant l'arrêt
-    # pour éviter de les perdre. En V4 : on le signale juste.
-    my ($rc, $out) = curl_post(
-        "/control/evict/$vmid",
-        "{\"count\": 0, \"vm_id\": $vmid}"
-    );
+sub phase_pre_stop {
+    log_msg("INFO", "pré-arrêt — signalement omega-daemon");
 
+    my ($rc, $out) = curl_json('POST', "/control/evict/$vmid",
+                               "{\"count\":0,\"vm_id\":$vmid}");
     if ($rc != 0) {
         log_msg("WARN", "impossible de notifier omega-daemon (pre-stop) : $out");
     }
+}
 
-} elsif ($phase eq 'post-stop') {
-    # La VM est arrêtée — nettoyer les pages distantes orphelines
-    log_msg("INFO", "VM arrêtée — nettoyage des pages distantes");
+# ─── post-stop ────────────────────────────────────────────────────────────────
+# QEMU est arrêté. Arrêter l'agent memfd et supprimer les pages distantes.
 
-    my ($rc, $out) = curl_delete("/control/pages/$vmid");
+sub phase_post_stop {
+    log_msg("INFO", "post-arrêt — arrêt agent memfd + nettoyage pages distantes");
 
-    if ($rc == 0) {
+    # 1. Arrêter l'agent omega-qemu-launcher (SIGTERM + attente)
+    my ($rc_stop, $out_stop) = run_launcher(
+        'stop',
+        '--vm-id',        $vmid,
+        '--run-dir',      $OMEGA_RUN_DIR,
+        '--timeout-secs', $OMEGA_AGENT_STOP_TIMEOUT,
+    );
+
+    if ($rc_stop == 0) {
+        log_msg("INFO", "agent memfd arrêté pour vmid=$vmid");
+    } else {
+        log_msg("WARN", "arrêt agent memfd échoué ou agent déjà mort (rc=$rc_stop) : $out_stop");
+    }
+
+    # 2. Nettoyer les pages distantes sur les stores B/C
+    my ($rc_del, $out_del) = curl_json('DELETE', "/control/pages/$vmid", undef);
+    if ($rc_del == 0) {
         log_msg("INFO", "pages distantes supprimées pour vmid=$vmid");
     } else {
-        log_msg("WARN", "nettoyage pages échoué : $out");
+        log_msg("WARN", "nettoyage pages échoué (daemon peut-être arrêté) : $out_del");
     }
 
-} elsif ($phase eq 'pre-start') {
-    # Avant démarrage : vérifier que le omega-daemon est disponible
-    log_msg("INFO", "pré-démarrage — vérification omega-daemon");
-
-    my $check = `curl -s -f http://${OMEGA_CONTROL_HOST}:${OMEGA_CONTROL_PORT}/control/status \
-                      --connect-timeout 1 2>/dev/null`;
-    if ($? == 0) {
-        log_msg("INFO", "omega-daemon disponible");
-    } else {
-        log_msg("WARN", "omega-daemon non joignable sur ${OMEGA_CONTROL_HOST}:${OMEGA_CONTROL_PORT}");
+    # 3. Supprimer le répertoire d'état local
+    my $vm_dir = "${OMEGA_RUN_DIR}/vm-${vmid}";
+    if (-d $vm_dir) {
+        system("rm -rf '$vm_dir'");
+        log_msg("INFO", "répertoire d'état supprimé : $vm_dir");
     }
-
-} else {
-    log_msg("DEBUG", "phase '$phase' ignorée");
 }
+
+# ─── Dispatch ─────────────────────────────────────────────────────────────────
+
+if    ($phase eq 'pre-start')  { phase_pre_start();  }
+elsif ($phase eq 'post-start') { phase_post_start(); }
+elsif ($phase eq 'pre-stop')   { phase_pre_stop();   }
+elsif ($phase eq 'post-stop')  { phase_post_stop();  }
+else  { log_msg("DEBUG", "phase '$phase' ignorée"); }
 
 exit 0;

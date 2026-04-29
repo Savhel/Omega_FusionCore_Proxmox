@@ -7,3 +7,4 @@ structlog>=23.0
 # Développement / tests
 pytest>=7.4
 pytest-mock>=3.11
+pytest-benchmark>=4.0

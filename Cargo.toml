@@ -1,8 +1,9 @@
 [workspace]
 members = [
-    "node-a-agent",    # V1 — conservé pour compatibilité
-    "node-bc-store",   # V1 — conservé comme library
-    "omega-daemon",    # V4 — daemon unifié multi-rôle
+    "node-a-agent",         # agent userfaultfd nœud A
+    "node-bc-store",        # stores distants B et C
+    "omega-daemon",         # daemon cluster complet (RAM/CPU/GPU/disque)
+    "omega-qemu-launcher",  # wrapper QEMU — injecte le memory-backend au démarrage
 ]
 resolver = "2"
 
@@ -40,3 +41,9 @@ async-trait        = "0.1"
 
 # Détection CPU physiques
 num_cpus           = "1"
+
+# Compression LZ4 rapide (pages mémoire VM)
+lz4_flex           = "0.11"
+
+# Benchmarks
+criterion          = { version = "0.5", features = ["html_reports"] }

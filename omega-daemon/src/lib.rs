@@ -1,4 +1,5 @@
 pub mod balloon;
+pub mod cgroup_cpu_monitor; // Monitor CPU 1 ms (Rust) — remplace cpu_cgroup_monitor.py
 pub mod cluster_api;
 pub mod config;
 pub mod control_api;
@@ -9,7 +10,8 @@ pub mod fault_bus; // L1 — canal IPC uffd ↔ moteur d'éviction
 pub mod gpu_drm_backend; // GPU réel : render node DRM (/dev/dri/renderD128)
 pub mod gpu_multiplexer; // Multiplexeur GPU bas niveau (une instance par nœud)
 pub mod gpu_protocol; // Protocole binaire VM ↔ daemon GPU
-pub mod gpu_runtime; // État GPU synchrone exposable via les APIs HTTP
+pub mod gpu_runtime;       // État GPU synchrone exposable via les APIs HTTP
+pub mod gpu_virgl_bridge;  // Bridge OMVG : QEMU virtio-gpu-omega ↔ gpu_multiplexer
 pub mod io_cgroup; // Disque réel : cgroups v2 (io.weight, io.stat, io.pressure)
 pub mod node_state;
 pub mod policy_engine;

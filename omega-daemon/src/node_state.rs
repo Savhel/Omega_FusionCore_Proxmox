@@ -72,6 +72,10 @@ pub struct VmStatusEntry {
     pub disk_io_weight: u32,
     /// La VM participe-t-elle à un partage I/O local temporaire ?
     pub disk_local_share_active: bool,
+    /// Le backend local expose-t-il `io.weight` pour cette VM ?
+    pub disk_io_control_supported: bool,
+    /// Raison du fallback si `io.weight` n'est pas disponible.
+    pub disk_io_control_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -156,14 +160,21 @@ impl NodeState {
                 })
                 .collect()
         };
-        let disk_stats: std::collections::HashMap<u32, (f64, f64, u32, bool)> = self
+        let disk_stats: std::collections::HashMap<u32, (f64, f64, u32, bool, bool, Option<String>)> = self
             .disk_io_scheduler
             .vm_snapshot()
             .into_iter()
             .map(|s| {
                 (
                     s.vm_id,
-                    (s.read_bps, s.write_bps, s.io_weight, s.local_share_active),
+                    (
+                        s.read_bps,
+                        s.write_bps,
+                        s.io_weight,
+                        s.local_share_active,
+                        s.io_control_supported,
+                        s.io_control_reason,
+                    ),
                 )
             })
             .collect();
@@ -173,11 +184,18 @@ impl NodeState {
             .map(|vm| {
                 let (avg_cpu_pct, throttle_ratio) =
                     vcpu_stats.get(&vm.vmid).copied().unwrap_or((0.0, 0.0));
-                let (disk_read_bps, disk_write_bps, disk_io_weight, disk_local_share_active) =
+                let (
+                    disk_read_bps,
+                    disk_write_bps,
+                    disk_io_weight,
+                    disk_local_share_active,
+                    disk_io_control_supported,
+                    disk_io_control_reason,
+                ) =
                     disk_stats
                         .get(&vm.vmid)
-                        .copied()
-                        .unwrap_or((0.0, 0.0, 100, false));
+                        .cloned()
+                        .unwrap_or((0.0, 0.0, 100, false, true, None));
                 let gpu_vram_budget_mib = self
                     .gpu_runtime
                     .as_ref()
@@ -197,6 +215,8 @@ impl NodeState {
                     disk_write_bps,
                     disk_io_weight,
                     disk_local_share_active,
+                    disk_io_control_supported,
+                    disk_io_control_reason,
                 }
             })
             .collect();

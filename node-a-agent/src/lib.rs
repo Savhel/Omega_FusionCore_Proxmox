@@ -1,5 +1,10 @@
+pub mod clock_eviction;
 pub mod config;
 pub mod memory;
 pub mod metrics;
+pub mod prefetch;
 pub mod remote;
+pub mod replication;
+pub mod shared_memory;
 pub mod uffd;
+pub mod uffd_pool;

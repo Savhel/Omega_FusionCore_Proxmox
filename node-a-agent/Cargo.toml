@@ -20,9 +20,16 @@ anyhow             = { workspace = true }
 thiserror          = { workspace = true }
 libc               = { workspace = true }
 bytes              = { workspace = true }
+dashmap            = { workspace = true }
+lz4_flex           = { workspace = true }
 
 # Partagé avec node-bc-store pour le protocole réseau
 node-bc-store = { path = "../node-bc-store" }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile  = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "eviction_bench"
+harness = false

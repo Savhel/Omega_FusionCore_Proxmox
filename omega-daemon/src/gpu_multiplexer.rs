@@ -453,6 +453,55 @@ impl GpuMultiplexer {
         }
     }
 
+    // ─── API utilisée par gpu_virgl_bridge ───────────────────────────────────
+
+    /// Alias de `release_vm` pour le bridge OMVG (CTX_DESTROY ou déconnexion).
+    pub async fn remove_vm(&self, vm_id: u32) {
+        self.release_vm(vm_id).await;
+    }
+
+    /// Soumet un command stream virgl brut au backend GPU.
+    ///
+    /// `data` = octets virgl bruts (CS format, tels qu'émis par le guest via Mesa).
+    pub async fn submit_raw(&self, vm_id: u32, data: &[u8], priority: crate::gpu_protocol::Priority) -> Result<Vec<u8>, GpuError> {
+        // On passe par le backend DRM directement pour la voie virgl
+        let result = self.backend.submit(data).await?;
+        {
+            let mut stats = self.state.stats.lock().await;
+            stats.total_commands += 1;
+        }
+        debug!(vm_id, bytes = data.len(), "submit_raw ok");
+        Ok(result)
+    }
+
+    /// Crée une ressource 3D virgl (texture/buffer) pour une VM.
+    pub async fn resource_create(&self, vm_id: u32, desc: &[u8]) -> Result<(), GpuError> {
+        // Encode la création comme une commande backend générique
+        self.backend.submit(desc).await?;
+        debug!(vm_id, "resource_create ok");
+        Ok(())
+    }
+
+    /// Libère une ressource virgl d'une VM.
+    pub async fn resource_unref(&self, vm_id: u32, resource_id: u32) {
+        debug!(vm_id, resource_id, "resource_unref");
+        // Le suivi des handles est dans le budget VRAM — pas de tracking virgl fin ici
+    }
+
+    /// Transfert CPU↔GPU (upload/readback d'une ressource virgl).
+    pub async fn resource_transfer(&self, vm_id: u32, desc: &[u8]) -> Result<(), GpuError> {
+        self.backend.submit(desc).await?;
+        debug!(vm_id, "resource_transfer ok");
+        Ok(())
+    }
+
+    /// Flush d'une ressource vers le framebuffer (affichage guest).
+    pub async fn flush_resource(&self, vm_id: u32, desc: &[u8]) -> Result<(), GpuError> {
+        self.backend.submit(desc).await?;
+        debug!(vm_id, "flush_resource ok");
+        Ok(())
+    }
+
     /// Snapshot des budgets VRAM (pour l'API HTTP).
     pub async fn budgets_snapshot(&self) -> Vec<VmVramBudget> {
         self.state.budgets.read().await.values().cloned().collect()
