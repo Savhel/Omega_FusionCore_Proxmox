@@ -253,15 +253,21 @@ AdmissionController :
 Options pour débloquer la situation :
 ```
 
-**Option A — Balloon : compresser les VMs existantes**
+**Option A — Balloon : compresser les VMs existantes** *(implémentée)*
 ```
-omega-daemon détecte que certaines VMs utilisent moins que leur max_mem.
-BalloonMonitor envoie une commande balloon pour réduire leur RAM guest.
+BalloonManager (tâche proactive toutes les 30s dans omega-daemon) détecte
+que certaines VMs utilisent moins que leur max_mem.
+  → seuil inflation : RAM disponible guest > 20% de sa RAM actuelle
+  → seuil déflation : RAM disponible guest < 10% (priorité guest)
+  → plancher garanti : jamais en-dessous de 50% de max_mem
+
 Ex : VM 200 configurée à 16 Go mais n'utilise que 9 Go
-     → balloon réduit à 10 Go → 6 Go récupérés
-     → QuotaRegistry.adjust_for_balloon(vm_id=200, balloon=10240)
-        remote_budget de VM 200 passe de 0 à 6 Go
-     → Nœud 1 a maintenant 8 Go libres
+     (available = 7 Go = 43% > seuil 20%)
+     → BalloonManager gonfle : new_target = 9 Go - (7 Go / 2) = 5.5 Go
+     → QmpClient::set_balloon_target(5_905_580_032)  [QMP balloon commande]
+     → QuotaRegistry::apply_balloon_update(vm_id=200, actual_mib=5632)
+        remote_budget de VM 200 passe de 0 à ~10 Go
+     → Nœud 1 a maintenant ~10 Go libres
      → Admission de la VM 10 Go acceptée
 ```
 
