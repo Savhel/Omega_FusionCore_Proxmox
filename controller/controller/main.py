@@ -242,9 +242,11 @@ def monitor(
 # ─── Commande : daemon ───────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--node-a", required=True, help="URL API contrôle nœud A (ex: http://192.168.10.1:9300)")
-@click.option("--node-b", required=True, help="URL API contrôle nœud B")
-@click.option("--node-c", required=True, help="URL API contrôle nœud C")
+@click.option("--node", "nodes", multiple=True, required=True,
+              help="URL API contrôle d'un nœud (répéter pour chaque nœud, ex: --node http://10.10.0.11:9300 --node http://10.10.0.12:9300)")
+@click.option("--node-a", default="", hidden=True, help="Compatibilité ancienne syntaxe")
+@click.option("--node-b", default="", hidden=True, help="Compatibilité ancienne syntaxe")
+@click.option("--node-c", default="", hidden=True, help="Compatibilité ancienne syntaxe")
 @click.option("--poll-interval", default=5, show_default=True, help="Intervalle de polling en secondes")
 @click.option("--max-concurrent-migrations", default=1, show_default=True,
               help="Nombre maximum de migrations simultanées par cycle")
@@ -258,6 +260,7 @@ def monitor(
 @click.option("--dry-run", is_flag=True, default=False,
               help="Évalue et journalise les recommandations sans déclencher les migrations")
 def daemon(
+    nodes: tuple,
     node_a: str,
     node_b: str,
     node_c: str,
@@ -275,11 +278,20 @@ def daemon(
 
     Appelle GET /control/status sur chaque nœud, évalue MigrationPolicy,
     puis POST /control/migrate sur le nœud source pour chaque recommandation.
+
+    Supporte N nœuds : --node http://ip1:9300 --node http://ip2:9300 ...
+    Ancienne syntaxe --node-a/b/c toujours acceptée pour compatibilité.
     """
+    # Construire node_urls depuis --node (nouvelle syntaxe) ou --node-a/b/c (ancienne)
+    all_urls: list[str] = list(nodes)
+    for legacy in (node_a, node_b, node_c):
+        if legacy and legacy.rstrip("/") not in [u.rstrip("/") for u in all_urls]:
+            all_urls.append(legacy)
+    if not all_urls:
+        raise click.UsageError("Au moins un --node est requis")
     node_urls: Dict[str, str] = {
-        "node-a": node_a.rstrip("/"),
-        "node-b": node_b.rstrip("/"),
-        "node-c": node_c.rstrip("/"),
+        f"node-{chr(ord('a') + i)}": url.rstrip("/")
+        for i, url in enumerate(all_urls)
     }
     policy = MigrationPolicy(MigrationThresholds())
     admission = AdmissionController()
@@ -378,15 +390,12 @@ def migrate(source: str, vm_id: int, target: str, mtype: str) -> None:
 
 
 @cli.command("drain-node")
-@click.option("--node-a", required=True, help="URL API contrôle nœud A (ex: http://192.168.10.1:9300)")
-@click.option("--node-b", required=True, help="URL API contrôle nœud B")
-@click.option("--node-c", required=True, help="URL API contrôle nœud C")
-@click.option(
-    "--source-node",
-    required=True,
-    type=click.Choice(["node-a", "node-b", "node-c"]),
-    help="Nœud à évacuer avant maintenance/arrêt",
-)
+@click.option("--node", "nodes", multiple=True, required=True,
+              help="URL API contrôle d'un nœud (répéter pour chaque nœud)")
+@click.option("--node-a", default="", hidden=True)
+@click.option("--node-b", default="", hidden=True)
+@click.option("--node-c", default="", hidden=True)
+@click.option("--source-node", required=True, help="ID du nœud à évacuer (ex: node-a, node-b, ...)")
 @click.option("--poll-interval", default=5, show_default=True, help="Intervalle de polling en secondes")
 @click.option("--timeout", default=900, show_default=True, help="Temps max d'attente en secondes")
 @click.option(
@@ -397,6 +406,7 @@ def migrate(source: str, vm_id: int, target: str, mtype: str) -> None:
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Affiche seulement le plan d'évacuation")
 def drain_node(
+    nodes: tuple,
     node_a: str,
     node_b: str,
     node_c: str,
@@ -407,10 +417,13 @@ def drain_node(
     dry_run: bool,
 ) -> None:
     """Évacue toutes les VMs d'un nœud avant maintenance."""
+    all_urls: list[str] = list(nodes)
+    for legacy in (node_a, node_b, node_c):
+        if legacy and legacy.rstrip("/") not in [u.rstrip("/") for u in all_urls]:
+            all_urls.append(legacy)
     node_urls: Dict[str, str] = {
-        "node-a": node_a.rstrip("/"),
-        "node-b": node_b.rstrip("/"),
-        "node-c": node_c.rstrip("/"),
+        f"node-{chr(ord('a') + i)}": url.rstrip("/")
+        for i, url in enumerate(all_urls)
     }
     started: Dict[int, float] = {}
     deadline = time.monotonic() + max(1, timeout)

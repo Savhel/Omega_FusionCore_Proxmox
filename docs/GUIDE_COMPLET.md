@@ -107,6 +107,12 @@ echo 1 > /proc/sys/vm/unprivileged_userfaultfd
 echo 'vm.unprivileged_userfaultfd = 1' >> /etc/sysctl.conf
 ```
 
+> **Cluster virtuel KVM (lab nested)** : ces prérequis s'appliquent également à l'intérieur
+> des VMs Proxmox qui tournent sous KVM. `userfaultfd` est souvent absent par défaut dans
+> les kernels nested — vérifier et activer sur chaque nœud. Les performances seront dégradées
+> (double overhead de virtualisation) mais suffisantes pour tester. Voir `docs/cluster-kvm.md`
+> pour la mise en place du lab.
+
 ### Sur la machine de compilation (peut être l'un des nœuds)
 
 ```bash
@@ -327,9 +333,9 @@ pip install -r controller/requirements.txt
 
 ```bash
 python3 -m controller.main daemon \
-    --node-a http://192.168.1.1:9300 \
-    --node-b http://192.168.1.2:9300 \
-    --node-c http://192.168.1.3:9300 \
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    --node http://192.168.1.3:9300 \
     --poll-interval 5 \
     --dry-run
 ```
@@ -344,9 +350,9 @@ Si `dry-run` fonctionne, lancer pour de vrai :
 
 ```bash
 python3 -m controller.main daemon \
-    --node-a http://192.168.1.1:9300 \
-    --node-b http://192.168.1.2:9300 \
-    --node-c http://192.168.1.3:9300 \
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    --node http://192.168.1.3:9300 \
     --poll-interval 5 \
     --proxmox-url https://192.168.1.1:8006 \
     --proxmox-token "root@pam!omega=<ton-token-api>"
@@ -364,9 +370,9 @@ After=network.target omega-daemon.service
 Type=simple
 WorkingDirectory=/opt/omega-remote-paging
 ExecStart=python3 -m controller.main daemon \
-    --node-a http://192.168.1.1:9300 \
-    --node-b http://192.168.1.2:9300 \
-    --node-c http://192.168.1.3:9300 \
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    --node http://192.168.1.3:9300 \
     --poll-interval 5 \
     --proxmox-url https://192.168.1.1:8006 \
     --log-format json
@@ -530,6 +536,8 @@ curl -s $BASE_CTRL/control/vcpu/status | python3 -m json.tool
 
 ## 12. Cluster 2 nœuds, 4 nœuds ou plus
 
+Le controller supporte N nœuds via `--node` répétable. Le daemon Rust supporte aussi N peers dans `OMEGA_PEERS`.
+
 ### 2 nœuds — sans réplication
 
 ```bash
@@ -539,38 +547,51 @@ OMEGA_STORES="192.168.1.2:9100" bash scripts/omega-proxmox-install.sh
 # Machine 2 : évince vers machine 1
 OMEGA_STORES="192.168.1.1:9100" bash scripts/omega-proxmox-install.sh
 
-# omega-daemon sur chaque machine (adapter les IPs)
+# omega-daemon — OMEGA_PEERS dans /etc/default/omega-daemon
 OMEGA_PEERS=192.168.1.2:9200   # sur machine 1
 OMEGA_PEERS=192.168.1.1:9200   # sur machine 2
 
-# Controller (adapter --node-b = --node-c = même machine)
+# Controller
 python3 -m controller.main daemon \
-    --node-a http://192.168.1.1:9300 \
-    --node-b http://192.168.1.2:9300 \
-    --node-c http://192.168.1.2:9300   # répéter node-b si pas de node-c
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300
 ```
 
 ### 4 nœuds
 
 ```bash
-# Machine 1 — évince vers 2 et 3 (les 2 moins chargés)
-OMEGA_STORES="192.168.1.2:9100,192.168.1.3:9100" \
+# Installation sur chaque machine (adapter OMEGA_STORES = les autres nœuds)
+OMEGA_STORES="192.168.1.2:9100,192.168.1.3:9100,192.168.1.4:9100" \
     bash scripts/omega-proxmox-install.sh
 
-# Machine 4 — évince vers 2 et 3 aussi (ou 1 et 3, selon préférence)
-OMEGA_STORES="192.168.1.2:9100,192.168.1.3:9100" \
-    bash scripts/omega-proxmox-install.sh
+# omega-daemon — lister tous les autres nœuds en peers
+OMEGA_PEERS=192.168.1.2:9200,192.168.1.3:9200,192.168.1.4:9200   # sur machine 1
 
-# omega-daemon sur machine 1 : lister les 3 autres en peers
-OMEGA_PEERS=192.168.1.2:9200,192.168.1.3:9200,192.168.1.4:9200
-
-# Controller avec 4 nœuds
+# Controller avec 4 nœuds — ajouter autant de --node que nécessaire
 python3 -m controller.main daemon \
-    --node-a http://192.168.1.1:9300 \
-    --node-b http://192.168.1.2:9300 \
-    --node-c http://192.168.1.3:9300
-# Note : le controller supporte --node-a/b/c par design Python actuel.
-# Pour 4+ nœuds, lancer deux instances du controller ou ajouter le 4e en --node-a bis.
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    --node http://192.168.1.3:9300 \
+    --node http://192.168.1.4:9300
+```
+
+### N nœuds (générique)
+
+```bash
+# Controller — répéter --node pour chaque nœud du cluster
+python3 -m controller.main daemon \
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    # ... autant de nœuds que nécessaire
+    --poll-interval 5
+
+# drain-node — même syntaxe, --source-node = node-a, node-b, node-c, node-d, ...
+python3 -m controller.main drain-node \
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    --node http://192.168.1.3:9300 \
+    --source-node node-b \
+    --dry-run
 ```
 
 ---
@@ -593,9 +614,9 @@ python3 -m controller.main migrate \
 
 # Vider un nœud avant maintenance (migre toutes ses VMs)
 python3 -m controller.main drain-node \
-    --node-a http://192.168.1.1:9300 \
-    --node-b http://192.168.1.2:9300 \
-    --node-c http://192.168.1.3:9300 \
+    --node http://192.168.1.1:9300 \
+    --node http://192.168.1.2:9300 \
+    --node http://192.168.1.3:9300 \
     --source-node node-a \
     --dry-run          # enlever --dry-run pour exécuter réellement
 
@@ -721,4 +742,4 @@ Un seul nœud (au choix) :
 
 ---
 
-*omega-remote-paging — mis à jour le 2026-04-29*
+*omega-remote-paging — mis à jour le 2026-05-02*
