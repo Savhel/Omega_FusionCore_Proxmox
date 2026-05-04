@@ -60,7 +60,7 @@ struct PrepareArgs {
     #[arg(long)]
     agent_bin: Option<PathBuf>,
 
-    #[arg(long, default_value = "/tmp/omega-qemu")]
+    #[arg(long, default_value = "/var/lib/omega-qemu", env = "OMEGA_RUN_DIR")]
     run_dir: PathBuf,
 
     #[arg(long)]
@@ -96,7 +96,7 @@ struct StateSelector {
     #[arg(long)]
     vm_id: u32,
 
-    #[arg(long, default_value = "/tmp/omega-qemu")]
+    #[arg(long, default_value = "/var/lib/omega-qemu", env = "OMEGA_RUN_DIR")]
     run_dir: PathBuf,
 
     #[arg(long)]
@@ -140,7 +140,7 @@ struct ExecProxmoxArgs {
     #[arg(long, env = "OMEGA_AGENT_BIN")]
     agent_bin: Option<PathBuf>,
 
-    #[arg(long, default_value = "/tmp/omega-qemu", env = "OMEGA_RUN_DIR")]
+    #[arg(long, default_value = "/var/lib/omega-qemu", env = "OMEGA_RUN_DIR")]
     run_dir: PathBuf,
 
     #[arg(long, default_value = "ram0", env = "OMEGA_OBJECT_ID")]
@@ -205,7 +205,7 @@ struct WriteProxmoxWrapperArgs {
     #[arg(long)]
     agent_bin: Option<PathBuf>,
 
-    #[arg(long, default_value = "/tmp/omega-qemu")]
+    #[arg(long, default_value = "/var/lib/omega-qemu", env = "OMEGA_RUN_DIR")]
     run_dir: PathBuf,
 
     #[arg(long, default_value = "ram0")]
@@ -225,6 +225,10 @@ struct WriteProxmoxWrapperArgs {
 
     #[arg(long)]
     memfd_name: Option<String>,
+
+    /// Chemin vers omega-uffd-bridge.so (si fourni, injecté via LD_PRELOAD dans QEMU).
+    #[arg(long)]
+    bridge_lib: Option<PathBuf>,
 
     #[arg(long)]
     output: PathBuf,
@@ -333,6 +337,8 @@ fn prepare(args: PrepareArgs) -> Result<QemuLaunchState> {
         .arg(&args.log_format)
         .arg("--store-timeout-ms")
         .arg(args.store_timeout_ms.to_string())
+        .arg("--run-dir")
+        .arg(&args.run_dir)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .stdin(Stdio::null())
@@ -361,8 +367,8 @@ fn prepare(args: PrepareArgs) -> Result<QemuLaunchState> {
     let qemu_args = build_qemu_args(
         &args.object_id,
         args.size_mib,
-        &metadata_path,
-    );
+        &metadata,
+    )?;
 
     let state = QemuLaunchState {
         vm_id: args.vm_id,
@@ -450,7 +456,17 @@ fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
 
     let state = prepare(prepare_args)?;
     let final_qemu_args =
-        inject_omega_qemu_args(&args.qemu_args, &state.object_id, state.size_mib, &state.metadata_path)?;
+        inject_omega_qemu_args(&args.qemu_args, &state.object_id, state.size_mib, &state.metadata)?;
+
+    // On garde -daemonize (passé par Proxmox).
+    // Séquence QEMU avec -daemonize :
+    //   1. QEMU fork → parent + daemon
+    //   2. daemon : init tous les devices, crée QMP socket + pidfile, signale parent
+    //   3. parent : reçoit le signal, sort 0
+    //   4. cmd.status() ici retourne (rapidement, <3s)
+    // → Proxmox voit exit 0 avant son timeout → plus de "got timeout"
+    // → QEMU daemon reste dans le scope cgroup → scope actif jusqu'à qm stop
+    // → Nettoyage agent : hookscript post-stop appelle omega-qemu-launcher stop
 
     let mut cmd = Command::new(&args.qemu_bin);
     cmd.args(&final_qemu_args)
@@ -466,8 +482,6 @@ fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
     let status = cmd
         .status()
         .with_context(|| format!("exécution de {}", args.qemu_bin.display()))?;
-
-    let _ = stop_agent(&state, Duration::from_secs(10));
 
     Ok(status.code().unwrap_or(1))
 }
@@ -543,6 +557,17 @@ fn write_proxmox_wrapper(args: WriteProxmoxWrapperArgs) -> Result<PathBuf> {
             shell_escape_str(&memfd_name)
         ));
     }
+    if let Some(bridge_lib) = args.bridge_lib {
+        lines.push(format!(
+            "export LD_PRELOAD='{}'",
+            shell_escape_path(&bridge_lib)
+        ));
+    }
+    // Proxmox vérifie la version QEMU avec --version/-version avant chaque démarrage.
+    // Le passer directement au vrai binaire pour éviter l'échec de exec-proxmox.
+    lines.push(format!(
+        "if [ \"${{1:-}}\" = \"--version\" ] || [ \"${{1:-}}\" = \"-version\" ]; then exec \"$OMEGA_REAL_QEMU_BIN\" \"$@\"; fi"
+    ));
     lines.push(format!(
         "exec {} exec-proxmox -- \"$@\"",
         shell_escape_path(&launcher)
@@ -617,31 +642,32 @@ fn wait_for_metadata(path: &Path, timeout: Duration) -> Result<MemoryBackendMeta
 fn build_qemu_args(
     object_id: &str,
     size_mib: usize,
-    metadata_path: &Path,
-) -> Vec<String> {
-    vec![
+    metadata: &MemoryBackendMetadata,
+) -> Result<Vec<String>> {
+    Ok(vec![
         "-object".into(),
-        build_omega_object_arg(object_id, size_mib, metadata_path),
+        build_omega_object_arg(object_id, size_mib, metadata)?,
         "-machine".into(),
         format!("memory-backend={object_id}"),
-    ]
+    ])
 }
 
-fn build_omega_object_arg(object_id: &str, size_mib: usize, metadata_path: &Path) -> String {
-    format!(
-        "memory-backend-omega,id={object_id},size={}M,share=on,metadata-path={}",
+fn build_omega_object_arg(object_id: &str, size_mib: usize, metadata: &MemoryBackendMetadata) -> Result<String> {
+    let proc_fd_path = metadata.proc_fd_path.as_deref()
+        .context("proc_fd_path absent des métadonnées — le backend memfd est requis")?;
+    Ok(format!(
+        "memory-backend-file,id={object_id},size={}M,mem-path={proc_fd_path},share=on",
         size_mib,
-        metadata_path.display()
-    )
+    ))
 }
 
 fn inject_omega_qemu_args(
     qemu_args: &[String],
     object_id: &str,
     size_mib: usize,
-    metadata_path: &Path,
+    metadata: &MemoryBackendMetadata,
 ) -> Result<Vec<String>> {
-    let object_arg = build_omega_object_arg(object_id, size_mib, metadata_path);
+    let object_arg = build_omega_object_arg(object_id, size_mib, metadata)?;
     let mut out = Vec::with_capacity(qemu_args.len() + 4);
     let mut saw_machine = false;
     let mut saw_object = false;
@@ -650,7 +676,7 @@ fn inject_omega_qemu_args(
         let current = &qemu_args[idx];
         if current == "-object" {
             if let Some(next) = qemu_args.get(idx + 1) {
-                if next.contains("memory-backend-omega") {
+                if next.contains("memory-backend-file") && next.contains(&format!("id={object_id}")) {
                     saw_object = true;
                 }
                 out.push(current.clone());
@@ -859,11 +885,17 @@ mod tests {
 
     #[test]
     fn qemu_args_are_built_consistently() {
-        let args = build_qemu_args("ram0", 2048, Path::new("/tmp/vm-9004/memory.json"));
+        let meta = MemoryBackendMetadata {
+            backend: node_a_agent::shared_memory::MemoryBackendKind::Memfd,
+            size_bytes: 2048 * 1024 * 1024,
+            pid: 12345,
+            proc_fd_path: Some("/proc/12345/fd/5".to_string()),
+        };
+        let args = build_qemu_args("ram0", 2048, &meta).unwrap();
         assert_eq!(args[0], "-object");
-        assert!(args[1].contains("memory-backend-omega,id=ram0"));
+        assert!(args[1].contains("memory-backend-file,id=ram0"));
         assert!(args[1].contains("size=2048M"));
-        assert!(args[1].contains("metadata-path=/tmp/vm-9004/memory.json"));
+        assert!(args[1].contains("mem-path=/proc/12345/fd/5"));
         assert_eq!(args[2], "-machine");
         assert_eq!(args[3], "memory-backend=ram0");
     }
@@ -910,6 +942,12 @@ mod tests {
 
     #[test]
     fn injects_memory_backend_into_machine_arg() {
+        let meta = MemoryBackendMetadata {
+            backend: node_a_agent::shared_memory::MemoryBackendKind::Memfd,
+            size_bytes: 512 * 1024 * 1024,
+            pid: 12345,
+            proc_fd_path: Some("/proc/12345/fd/5".to_string()),
+        };
         let args = vec![
             "-machine".to_string(),
             "type=pc-i440fx-9.0".to_string(),
@@ -920,10 +958,10 @@ mod tests {
             &args,
             "ram0",
             512,
-            Path::new("/tmp/omega-qemu/vm-9004/memory.json"),
+            &meta,
         )
         .unwrap();
-        assert!(patched.iter().any(|arg| arg.contains("memory-backend-omega,id=ram0")));
+        assert!(patched.iter().any(|arg| arg.contains("memory-backend-file,id=ram0")));
         assert!(patched
             .windows(2)
             .any(|w| w[0] == "-machine" && w[1].contains("memory-backend=ram0")));
@@ -944,6 +982,7 @@ mod tests {
             log_level: "info".into(),
             store_timeout_ms: 2000,
             memfd_name: None,
+            bridge_lib: None,
             output: output.clone(),
         })
         .unwrap();

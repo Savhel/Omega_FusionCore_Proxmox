@@ -15,6 +15,9 @@ Métriques exposées via l'opcode `STATS_REQUEST` (réponse JSON).
 | `miss_count`           | counter | GET_PAGE n'ayant rien trouvé (NOT_FOUND)             |
 | `hit_rate_pct`         | gauge   | `hit_count / get_count × 100` — en pourcentage       |
 | `active_connections`   | gauge   | Connexions TCP actives en ce moment                  |
+| `pages_orphaned_deleted` | counter | Pages supprimées par OrphanCleaner (VMs disparues du cluster) |
+| `disk_available_mib`   | gauge   | Espace disque disponible sur le nœud store (via `statvfs`) |
+| `ceph_enabled`         | gauge   | 1 si le backend Ceph RADOS est actif, 0 si store RAM  |
 
 ### Exemple de réponse STATS
 
@@ -38,7 +41,7 @@ Métriques exposées via l'opcode `STATS_REQUEST` (réponse JSON).
 
 ## node-a-agent
 
-Métriques atomiques internes (loggées à la fin du mode demo, ou accessibles V2 via HTTP).
+Métriques atomiques internes (loggées à la fin du mode demo, ou accessibles via HTTP sur le port 9300).
 
 | Métrique               | Description                                               |
 |------------------------|-----------------------------------------------------------|
@@ -48,6 +51,9 @@ Métriques atomiques internes (loggées à la fin du mode demo, ou accessibles V
 | `pages_evicted`        | Pages envoyées vers les stores via PUT_PAGE               |
 | `pages_fetched`        | Pages récupérées depuis les stores via GET_PAGE            |
 | `fetch_zeros`          | Pages retournées comme zéro (page absente du store)       |
+| `vcpu_current`         | Nombre de vCPUs actuellement attribués à la VM            |
+| `vcpu_utilization_pct` | Charge CPU mesurée via cgroup v2 `usage_usec` (ou fallback `/proc/<pid>/stat`) |
+| `cpu_pressure`         | Indicateur booléen de pression CPU (AtomicBool) — déclenche candidature à la migration |
 
 ### Santé attendue en fonctionnement normal
 

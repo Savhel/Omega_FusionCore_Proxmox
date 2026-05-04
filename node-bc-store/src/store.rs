@@ -10,6 +10,7 @@ use crate::metrics::StoreMetrics;
 use crate::protocol::PAGE_SIZE;
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Clé unique d'une page dans le store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -28,7 +29,7 @@ impl PageKey {
 ///
 /// Conçu pour être partagé via `Arc<PageStore>` entre toutes les connexions.
 pub struct PageStore {
-    pages: DashMap<PageKey, Box<[u8]>>,
+    pages: DashMap<PageKey, (Box<[u8]>, Instant)>,
     metrics: Arc<StoreMetrics>,
 }
 
@@ -53,7 +54,7 @@ impl PageStore {
         }
 
         let existed = self.pages.contains_key(&key);
-        self.pages.insert(key, data.into_boxed_slice());
+        self.pages.insert(key, (data.into_boxed_slice(), Instant::now()));
 
         if existed {
             // Mise à jour : ne compte pas comme une nouvelle page
@@ -77,12 +78,13 @@ impl PageStore {
             .get_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        match self.pages.get(key) {
-            Some(entry) => {
+        match self.pages.get_mut(key) {
+            Some(mut entry) => {
                 self.metrics
                     .hit_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Some(entry.value().to_vec())
+                entry.value_mut().1 = Instant::now();
+                Some(entry.value().0.to_vec())
             }
             None => {
                 self.metrics
@@ -134,6 +136,29 @@ impl PageStore {
             .collect()
     }
 
+    /// Retourne tous les vm_ids qui ont au moins une page dans ce store.
+    pub fn list_vm_ids(&self) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        for entry in self.pages.iter() {
+            seen.insert(entry.key().vm_id);
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Supprime toutes les pages d'une VM (nettoyage post-crash ou migration).
+    pub fn delete_vm(&self, vm_id: u32) -> usize {
+        let keys = self.keys_for_vm(vm_id);
+        let count = keys.len();
+        for key in &keys {
+            self.pages.remove(key);
+        }
+        if count > 0 {
+            self.metrics.pages_stored.fetch_sub(count as u64, std::sync::atomic::Ordering::Relaxed);
+            self.metrics.delete_count.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        count
+    }
+
     /// Retourne un map vm_id → nombre de pages (pour l'API /api/pages).
     pub fn page_counts_by_vm(&self) -> std::collections::HashMap<u32, u64> {
         let mut counts = std::collections::HashMap::new();
@@ -141,6 +166,21 @@ impl PageStore {
             *counts.entry(entry.key().vm_id).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// Éviction LRU vraie : retire les `count` pages les moins récemment accédées.
+    pub fn evict_lru(&self, count: usize) -> usize {
+        let mut entries: Vec<(PageKey, Instant)> = self.pages
+            .iter()
+            .map(|e| (e.key().clone(), e.value().1))
+            .collect();
+        entries.sort_unstable_by_key(|(_, ts)| *ts);
+        let to_evict = entries.into_iter().take(count).collect::<Vec<_>>();
+        let n = to_evict.len();
+        for (key, _) in to_evict {
+            self.pages.remove(&key);
+        }
+        n
     }
 }
 

@@ -21,7 +21,15 @@ thiserror          = { workspace = true }
 libc               = { workspace = true }
 bytes              = { workspace = true }
 dashmap            = { workspace = true }
-lz4_flex           = { workspace = true }
+lz4_flex       = { workspace = true }
+futures        = { workspace = true }
+axum           = { workspace = true }
+tokio-util     = { workspace = true }
+num_cpus       = { workspace = true }
+
+# TLS — canal de paging chiffré (client)
+tokio-rustls   = { workspace = true }
+rustls         = { workspace = true }
 
 # Partagé avec node-bc-store pour le protocole réseau
 node-bc-store = { path = "../node-bc-store" }

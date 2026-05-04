@@ -44,7 +44,7 @@ Dans un cluster Proxmox homogène, **toutes les machines sont équivalentes**. C
 ```
 ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
 │   Machine 1         │   │   Machine 2         │   │   Machine 3         │
-│   192.168.1.1       │   │   192.168.1.2       │   │   192.168.1.3       │
+│   10.10.0.11       │   │   10.10.0.12       │   │   10.10.0.13       │
 │                     │   │                     │   │                     │
 │  VMs (QEMU)         │   │  VMs (QEMU)         │   │  VMs (QEMU)         │
 │  node-a-agent×N     │   │  node-a-agent×N     │   │  node-a-agent×N     │
@@ -153,54 +153,93 @@ Lancer les tests pour vérifier que tout compile correctement :
 
 ```bash
 make test-rust
-# Résultat attendu : 152 tests, 0 échecs
+# Résultat attendu : 244 tests, 0 échecs
 ```
 
 ---
 
 ## 6. Étape 2 — Installation sur chaque nœud
 
-À faire sur chaque machine (adapter les IPs).
-
-### Machine 1 (192.168.1.1)
-
-```bash
-cd omega-remote-paging
-
-# Installer le daemon, le wrapper QEMU et le hookscript
-OMEGA_STORES="192.168.1.2:9100,192.168.1.3:9100" \
-INSTALL_DIR="/usr/local/bin" \
-OMEGA_RUN_DIR="/var/lib/omega-qemu" \
-    bash scripts/omega-proxmox-install.sh
-```
-
-### Machine 2 (192.168.1.2)
-
-```bash
-OMEGA_STORES="192.168.1.1:9100,192.168.1.3:9100" \
-INSTALL_DIR="/usr/local/bin" \
-OMEGA_RUN_DIR="/var/lib/omega-qemu" \
-    bash scripts/omega-proxmox-install.sh
-```
-
-### Machine 3 (192.168.1.3)
-
-```bash
-OMEGA_STORES="192.168.1.1:9100,192.168.1.2:9100" \
-INSTALL_DIR="/usr/local/bin" \
-OMEGA_RUN_DIR="/var/lib/omega-qemu" \
-    bash scripts/omega-proxmox-install.sh
-```
-
-Ce script fait automatiquement :
+Le script `omega-proxmox-install.sh` fait automatiquement :
 1. Copie les binaires dans `/usr/local/bin/`
 2. Sauvegarde `/usr/bin/kvm` → `/usr/bin/kvm.real`
-3. Génère `/usr/local/bin/kvm-omega` (le wrapper)
+3. Génère `/usr/local/bin/kvm-omega` (le wrapper QEMU)
 4. Crée le symlink `/usr/bin/kvm` → `kvm-omega`
 5. Copie le hookscript dans `/var/lib/vz/snippets/omega-hook.pl`
 6. Crée le service systemd `omega-daemon`
 
-Vérifier que le wrapper est en place :
+Il y a deux façons de l'exécuter.
+
+---
+
+### Méthode A — Depuis la machine de dev (recommandée)
+
+Tout se fait depuis ta machine de développement. Ne copie que les binaires nécessaires —
+**ne pas faire `rsync` du dossier `target/`** (plusieurs Go, remplit le disque du nœud).
+
+Le script d'install cherche les binaires dans `target/release/` relatif à son emplacement.
+Il faut donc les y déposer, puis laisser le script les installer dans `/usr/local/bin/`.
+
+**Pour chaque nœud, 4 commandes dans l'ordre :**
+
+```bash
+# ── pve1 (10.10.0.11) ──────────────────────────────────────────
+ssh root@10.10.0.11 "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
+
+scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher root@10.10.0.11:/opt/omega-remote-paging/target/release/
+
+scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl root@10.10.0.11:/opt/omega-remote-paging/scripts/
+
+ssh root@10.10.0.11 "cd /opt/omega-remote-paging && OMEGA_STORES='10.10.0.12:9100,10.10.0.13:9100' INSTALL_DIR='/usr/local/bin' OMEGA_RUN_DIR='/var/lib/omega-qemu' bash scripts/omega-proxmox-install.sh"
+```
+
+```bash
+# ── pve2 (10.10.0.12) ──────────────────────────────────────────
+ssh root@10.10.0.12 "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
+
+scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher root@10.10.0.12:/opt/omega-remote-paging/target/release/
+
+scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl root@10.10.0.12:/opt/omega-remote-paging/scripts/
+
+ssh root@10.10.0.12 "cd /opt/omega-remote-paging && OMEGA_STORES='10.10.0.11:9100,10.10.0.13:9100' INSTALL_DIR='/usr/local/bin' OMEGA_RUN_DIR='/var/lib/omega-qemu' bash scripts/omega-proxmox-install.sh"
+```
+
+```bash
+# ── pve3 (10.10.0.13) ──────────────────────────────────────────
+ssh root@10.10.0.13 "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
+
+scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher root@10.10.0.13:/opt/omega-remote-paging/target/release/
+
+scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl root@10.10.0.13:/opt/omega-remote-paging/scripts/
+
+ssh root@10.10.0.13 "cd /opt/omega-remote-paging && OMEGA_STORES='10.10.0.11:9100,10.10.0.12:9100' INSTALL_DIR='/usr/local/bin' OMEGA_RUN_DIR='/var/lib/omega-qemu' bash scripts/omega-proxmox-install.sh"
+```
+
+### Nettoyage complet (rollback ou réinstallation)
+
+Pour repartir de zéro sur tous les nœuds :
+
+```bash
+for node in 10.10.0.11 10.10.0.12 10.10.0.13; do
+    echo "=== Nettoyage $node ==="
+    ssh root@${node} "
+        systemctl stop omega-daemon 2>/dev/null || true
+        systemctl disable omega-daemon 2>/dev/null || true
+        rm -f /etc/systemd/system/omega-daemon.service
+        systemctl daemon-reload
+        rm -f /usr/local/bin/omega-daemon /usr/local/bin/node-a-agent
+        rm -f /usr/local/bin/omega-qemu-launcher /usr/local/bin/kvm-omega
+        rm -f /var/lib/vz/snippets/omega-hook.pl
+        rm -rf /opt/omega-remote-paging /var/lib/omega-qemu /etc/omega-store
+        [ -f /usr/bin/kvm.real ] && mv /usr/bin/kvm.real /usr/bin/kvm || true
+        echo OK
+    "
+done
+```
+
+---
+
+Vérifier que le wrapper est en place après l'installation :
 
 ```bash
 ls -la /usr/bin/kvm
@@ -215,8 +254,8 @@ Créer `/etc/default/omega-daemon` (adapter les IPs sur chaque machine) :
 # Sur la machine 1 :
 cat > /etc/default/omega-daemon <<'EOF'
 OMEGA_NODE_ID=pve-node1
-OMEGA_NODE_ADDR=192.168.1.1
-OMEGA_PEERS=192.168.1.2:9200,192.168.1.3:9200
+OMEGA_NODE_ADDR=10.10.0.11
+OMEGA_PEERS=10.10.0.12:9200,10.10.0.13:9200
 OMEGA_EVICT_THRESHOLD_PCT=75
 OMEGA_GPU_ENABLED=true
 RUST_LOG=info
@@ -225,8 +264,8 @@ EOF
 # Sur la machine 2 :
 cat > /etc/default/omega-daemon <<'EOF'
 OMEGA_NODE_ID=pve-node2
-OMEGA_NODE_ADDR=192.168.1.2
-OMEGA_PEERS=192.168.1.1:9200,192.168.1.3:9200
+OMEGA_NODE_ADDR=10.10.0.12
+OMEGA_PEERS=10.10.0.11:9200,10.10.0.13:9200
 OMEGA_EVICT_THRESHOLD_PCT=75
 OMEGA_GPU_ENABLED=true
 RUST_LOG=info
@@ -235,8 +274,8 @@ EOF
 # Sur la machine 3 :
 cat > /etc/default/omega-daemon <<'EOF'
 OMEGA_NODE_ID=pve-node3
-OMEGA_NODE_ADDR=192.168.1.3
-OMEGA_PEERS=192.168.1.1:9200,192.168.1.2:9200
+OMEGA_NODE_ADDR=10.10.0.13
+OMEGA_PEERS=10.10.0.11:9200,10.10.0.12:9200
 OMEGA_EVICT_THRESHOLD_PCT=75
 OMEGA_GPU_ENABLED=true
 RUST_LOG=info
@@ -255,6 +294,69 @@ sed -i '/\[Service\]/a EnvironmentFile=/etc/default/omega-daemon' \
     /etc/systemd/system/omega-daemon.service
 
 systemctl daemon-reload
+```
+
+### Variables d'environnement — node-a-agent (par VM)
+
+Ces variables sont passées à `node-a-agent` par le hookscript ou dans le fichier d'environnement de l'agent.
+
+#### vCPU élastique
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `AGENT_VM_VCPUS` | — | Nombre maximum de vCPUs allouables à la VM |
+| `AGENT_VM_INITIAL_VCPUS` | — | Nombre de vCPUs au démarrage de la VM |
+| `AGENT_VCPU_HIGH_THRESHOLD_PCT` | 80 | Charge CPU (%) au-dessus de laquelle ajouter des vCPUs |
+| `AGENT_VCPU_LOW_THRESHOLD_PCT` | 20 | Charge CPU (%) en dessous de laquelle retirer des vCPUs |
+| `AGENT_VCPU_SCALE_INTERVAL_SECS` | 30 | Intervalle en secondes entre deux évaluations de charge |
+| `AGENT_VCPU_OVERCOMMIT_RATIO` | 3 | Overcommit maximum (ex. : 3 = 3 VMs par pCPU) |
+
+#### GPU placement et partage
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `AGENT_GPU_REQUIRED` | false | La VM requiert un GPU — déclenche le GPU placement daemon |
+| `AGENT_GPU_PLACEMENT_INTERVAL_SECS` | 60 | Intervalle de vérification du placement GPU |
+
+### Variables d'environnement — node-bc-store
+
+Ces variables configurent le comportement du store sur chaque nœud.
+
+#### Nettoyage des pages orphelines
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `STORE_ORPHAN_CHECK_INTERVAL_SECS` | 300 | Intervalle (en secondes) entre deux passages du nettoyeur d'orphelins |
+| `STORE_ORPHAN_GRACE_SECS` | 600 | Délai de grâce (en secondes) avant suppression d'une VM absente du cluster |
+
+#### Backend Ceph
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `STORE_CEPH_CONF` | `/etc/ceph/ceph.conf` | Chemin vers la configuration Ceph |
+| `STORE_CEPH_POOL` | `omega-pages` | Pool Ceph utilisé pour stocker les pages |
+
+#### Réseau
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `STORE_STATUS_LISTEN` | `0.0.0.0:9200` | Adresse d'écoute du serveur HTTP status |
+
+### Détection automatique Ceph
+
+Le store détecte automatiquement si Ceph est disponible :
+
+1. **À la compilation** : `build.rs` exécute `pkg-config librados`. Si la bibliothèque est trouvée, elle émet `cargo:rustc-cfg=ceph_detected` et le code Ceph est compilé. Si elle est absente, seul le store RAM est compilé — aucune erreur de compilation.
+
+2. **Au démarrage** : même si `ceph_detected` est actif à la compilation, le store vérifie la présence de `/etc/ceph/ceph.conf` (ou du chemin configuré dans `STORE_CEPH_CONF`). Si le fichier est absent, le store démarre en mode RAM.
+
+3. **Réplication** : quand tous les stores du cluster rapportent `ceph_enabled: true` dans leur endpoint `/status`, la réplication write-through entre stores est automatiquement désactivée (Ceph assure lui-même la redondance).
+
+```bash
+# Vérifier si Ceph est actif sur un store
+curl -s http://127.0.0.1:9200/status | python3 -m json.tool | grep ceph_enabled
+# → "ceph_enabled": true   si Ceph actif
+# → "ceph_enabled": false  si mode RAM
 ```
 
 ---
@@ -284,32 +386,87 @@ journalctl -u omega-daemon -n 30
 ### Vérifier la connectivité entre nœuds
 
 ```bash
-# Depuis la machine 1, vérifier que les machines 2 et 3 répondent
-curl -s http://192.168.1.2:9200/api/node | python3 -m json.tool
-curl -s http://192.168.1.3:9200/api/node | python3 -m json.tool
-# Doit afficher le JSON d'état du nœud distant
+# Depuis la machine 1 — vérifier que les machines 2 et 3 répondent
+curl -s http://10.10.0.12:9200/api/status
+curl -s http://10.10.0.13:9200/api/status
+# Doit afficher un JSON avec node_id, mem_usage_pct, pages_stored, etc.
 
 # Vérifier les stores TCP
-nc -zv 192.168.1.2 9100 && echo "store machine2 OK"
-nc -zv 192.168.1.3 9100 && echo "store machine3 OK"
+nc -zv 10.10.0.12 9100 && echo "store machine2 OK"
+nc -zv 10.10.0.13 9100 && echo "store machine3 OK"
 ```
+
+> **Note** : `python3 -m json.tool` peut être utilisé pour formater le JSON, mais nécessite
+> python3 sur le nœud. Sur Proxmox (Debian), l'installer si absent : `apt install -y python3`.
+> Le controller Python sera installé à l'étape 5 — inutile de l'attendre pour cette vérification.
 
 ---
 
 ## 8. Étape 4 — Enregistrer les VMs
 
-Le hookscript doit être enregistré sur chaque VM pour que le cycle de vie soit géré.
+Le hookscript démarre/arrête l'agent omega au démarrage/arrêt de chaque VM.
+Il est inutile de le faire manuellement à chaque création de VM — un timer systemd
+le fait automatiquement sur toute nouvelle VM détectée.
+
+### Enregistrement automatique (recommandé)
+
+Copier le script sur chaque nœud (depuis la machine de dev) :
 
 ```bash
-# Enregistrer une VM spécifique
-qm set 100 --hookscript local:snippets/omega-hook.pl
-qm set 101 --hookscript local:snippets/omega-hook.pl
-
-# Enregistrer TOUTES les VMs du nœud d'un coup
-for vmid in $(qm list | awk 'NR>1 {print $1}'); do
-    qm set "$vmid" --hookscript local:snippets/omega-hook.pl
-    echo "VM $vmid ✓"
+for node in 10.10.0.11 10.10.0.12 10.10.0.13; do
+    scp scripts/omega-auto-hook.sh root@${node}:/usr/local/bin/
+    ssh root@${node} "chmod +x /usr/local/bin/omega-auto-hook.sh"
 done
+```
+
+Créer le timer systemd sur chaque nœud :
+
+```bash
+# Sur chaque nœud
+cat > /etc/systemd/system/omega-auto-hook.service <<'EOF'
+[Unit]
+Description=Omega — enregistrement automatique hookscript sur nouvelles VMs
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omega-auto-hook.sh
+EOF
+
+cat > /etc/systemd/system/omega-auto-hook.timer <<'EOF'
+[Unit]
+Description=Omega — vérification hookscript toutes les 5 secondes
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=5
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now omega-auto-hook.timer
+```
+
+Vérifier que le timer tourne :
+
+```bash
+systemctl status omega-auto-hook.timer
+# Attendu : active (waiting)
+```
+
+À partir de là, toute nouvelle VM créée sur le nœud recevra automatiquement
+le hookscript dans les 5 secondes qui suivent.
+
+### Enregistrement manuel (ponctuel)
+
+Pour forcer l'enregistrement immédiatement sans attendre le timer :
+
+```bash
+bash /usr/local/bin/omega-auto-hook.sh
+
+# Ou sur une VM spécifique
+qm set 100 --hookscript local:snippets/omega-hook.pl
 
 # Vérifier
 qm config 100 | grep hookscript
@@ -322,6 +479,33 @@ qm config 100 | grep hookscript
 
 Le controller est le cerveau du cluster. Il tourne sur **une seule machine** (peu importe laquelle).
 
+### Créer le token API Proxmox
+
+Le controller a besoin d'un token Proxmox pour lire la configuration des VMs et déclencher les migrations.
+
+**Dans l'interface web Proxmox** (`https://10.10.0.11:8006`) :
+
+1. `Datacenter` → `Permissions` → `API Tokens` → **Add**
+2. Remplir :
+
+| Champ | Valeur |
+|-------|--------|
+| User | `root@pam` |
+| Token ID | `omega` |
+| Privilege Separation | **décocher** |
+
+3. Cliquer **Add** — Proxmox affiche le token **une seule fois** :
+```
+root@pam!omega=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+> **Copier immédiatement** — il ne sera plus affiché après fermeture de la fenêtre.
+
+Vérifier via CLI que le token existe :
+```bash
+pveum user token list root@pam
+# → doit afficher : omega
+```
+
 ### Installer les dépendances Python
 
 ```bash
@@ -333,9 +517,9 @@ pip install -r controller/requirements.txt
 
 ```bash
 python3 -m controller.main daemon \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
-    --node http://192.168.1.3:9300 \
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
+    --node http://10.10.0.13:9300 \
     --poll-interval 5 \
     --dry-run
 ```
@@ -350,12 +534,12 @@ Si `dry-run` fonctionne, lancer pour de vrai :
 
 ```bash
 python3 -m controller.main daemon \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
-    --node http://192.168.1.3:9300 \
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
+    --node http://10.10.0.13:9300 \
     --poll-interval 5 \
-    --proxmox-url https://192.168.1.1:8006 \
-    --proxmox-token "root@pam!omega=<ton-token-api>"
+    --proxmox-url https://10.10.0.11:8006 \
+    --proxmox-token 'root@pam!omega=<ton-token-api>'
 ```
 
 ### En service systemd (pour le garder actif)
@@ -370,11 +554,11 @@ After=network.target omega-daemon.service
 Type=simple
 WorkingDirectory=/opt/omega-remote-paging
 ExecStart=python3 -m controller.main daemon \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
-    --node http://192.168.1.3:9300 \
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
+    --node http://10.10.0.13:9300 \
     --poll-interval 5 \
-    --proxmox-url https://192.168.1.1:8006 \
+    --proxmox-url https://10.10.0.11:8006 \
     --log-format json
 Restart=always
 RestartSec=10
@@ -416,8 +600,10 @@ grep "vmid=100" /var/log/omega-hook.log
 
 ```bash
 # Depuis le nœud 1, voir l'état du cluster entier
-curl -s http://127.0.0.1:9200/api/cluster | python3 -m json.tool
-# Doit afficher les 3 nœuds avec leurs métriques
+for node in 10.10.0.11 10.10.0.12 10.10.0.13; do
+    echo "=== $node ==="
+    curl -s http://${node}:9200/api/status | python3 -m json.tool | grep -E "node_id|mem_usage_pct|pages_stored|vcpu_free"
+done
 ```
 
 ### Test 3 — Simuler une pression mémoire et observer l'éviction
@@ -450,7 +636,7 @@ curl -s http://127.0.0.1:9200/api/gpu | python3 -m json.tool
 ### Test 6 — Tous les tests unitaires
 
 ```bash
-# Tests Rust (152 tests)
+# Tests Rust (244 tests)
 make test-rust
 
 # Tests Python (controller)
@@ -466,7 +652,7 @@ make test-python
 ```bash
 # Statut de tous les nœuds en une commande
 python3 -m controller.main status \
-    --stores 192.168.1.1:9100,192.168.1.2:9100,192.168.1.3:9100
+    --stores 10.10.0.11:9100,10.10.0.12:9100,10.10.0.13:9100
 ```
 
 ### Monitoring continu (terminal dédié)
@@ -474,7 +660,7 @@ python3 -m controller.main status \
 ```bash
 # Boucle de monitoring toutes les 10 secondes
 python3 -m controller.main monitor \
-    --stores 192.168.1.1:9100,192.168.1.2:9100,192.168.1.3:9100 \
+    --stores 10.10.0.11:9100,10.10.0.12:9100,10.10.0.13:9100 \
     --interval 10
 
 # Sortie typique :
@@ -514,10 +700,7 @@ BASE_DAEMON="http://127.0.0.1:9200"
 BASE_CTRL="http://127.0.0.1:9300"
 
 # État détaillé du nœud local
-curl -s $BASE_DAEMON/api/node | python3 -m json.tool
-
-# État de tout le cluster (tous les nœuds peers)
-curl -s $BASE_DAEMON/api/cluster | python3 -m json.tool
+curl -s $BASE_DAEMON/api/status | python3 -m json.tool
 
 # État GPU
 curl -s $BASE_DAEMON/api/gpu | python3 -m json.tool
@@ -542,37 +725,37 @@ Le controller supporte N nœuds via `--node` répétable. Le daemon Rust support
 
 ```bash
 # Machine 1 : évince vers machine 2 (un seul store, pas de réplica)
-OMEGA_STORES="192.168.1.2:9100" bash scripts/omega-proxmox-install.sh
+OMEGA_STORES="10.10.0.12:9100" bash scripts/omega-proxmox-install.sh
 
 # Machine 2 : évince vers machine 1
-OMEGA_STORES="192.168.1.1:9100" bash scripts/omega-proxmox-install.sh
+OMEGA_STORES="10.10.0.11:9100" bash scripts/omega-proxmox-install.sh
 
 # omega-daemon — OMEGA_PEERS dans /etc/default/omega-daemon
-OMEGA_PEERS=192.168.1.2:9200   # sur machine 1
-OMEGA_PEERS=192.168.1.1:9200   # sur machine 2
+OMEGA_PEERS=10.10.0.12:9200   # sur machine 1
+OMEGA_PEERS=10.10.0.11:9200   # sur machine 2
 
 # Controller
 python3 -m controller.main daemon \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300
 ```
 
 ### 4 nœuds
 
 ```bash
 # Installation sur chaque machine (adapter OMEGA_STORES = les autres nœuds)
-OMEGA_STORES="192.168.1.2:9100,192.168.1.3:9100,192.168.1.4:9100" \
+OMEGA_STORES="10.10.0.12:9100,10.10.0.13:9100,10.10.0.14:9100" \
     bash scripts/omega-proxmox-install.sh
 
 # omega-daemon — lister tous les autres nœuds en peers
-OMEGA_PEERS=192.168.1.2:9200,192.168.1.3:9200,192.168.1.4:9200   # sur machine 1
+OMEGA_PEERS=10.10.0.12:9200,10.10.0.13:9200,10.10.0.14:9200   # sur machine 1
 
 # Controller avec 4 nœuds — ajouter autant de --node que nécessaire
 python3 -m controller.main daemon \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
-    --node http://192.168.1.3:9300 \
-    --node http://192.168.1.4:9300
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
+    --node http://10.10.0.13:9300 \
+    --node http://10.10.0.14:9300
 ```
 
 ### N nœuds (générique)
@@ -580,16 +763,16 @@ python3 -m controller.main daemon \
 ```bash
 # Controller — répéter --node pour chaque nœud du cluster
 python3 -m controller.main daemon \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
     # ... autant de nœuds que nécessaire
     --poll-interval 5
 
 # drain-node — même syntaxe, --source-node = node-a, node-b, node-c, node-d, ...
 python3 -m controller.main drain-node \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
-    --node http://192.168.1.3:9300 \
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
+    --node http://10.10.0.13:9300 \
     --source-node node-b \
     --dry-run
 ```
@@ -607,16 +790,16 @@ omega-qemu-launcher stop --vm-id 100
 
 # Déclencher une migration manuelle
 python3 -m controller.main migrate \
-    --source http://192.168.1.1:9300 \
+    --source http://10.10.0.11:9300 \
     --vm-id 100 \
     --target pve-node2 \
     --type live
 
 # Vider un nœud avant maintenance (migre toutes ses VMs)
 python3 -m controller.main drain-node \
-    --node http://192.168.1.1:9300 \
-    --node http://192.168.1.2:9300 \
-    --node http://192.168.1.3:9300 \
+    --node http://10.10.0.11:9300 \
+    --node http://10.10.0.12:9300 \
+    --node http://10.10.0.13:9300 \
     --source-node node-a \
     --dry-run          # enlever --dry-run pour exécuter réellement
 
@@ -648,7 +831,7 @@ cat /var/lib/omega-qemu/vm-100/agent.log
 omega-qemu-launcher prepare \
     --vm-id 100 \
     --size-mib 2048 \
-    --stores "192.168.1.2:9100,192.168.1.3:9100"
+    --stores "10.10.0.12:9100,10.10.0.13:9100"
 ```
 
 ### omega-daemon ne démarre pas
@@ -665,7 +848,7 @@ journalctl -u omega-daemon -n 50 --no-pager
 
 ```bash
 # Vérifier que le port 9100 est ouvert sur les autres nœuds
-nc -zv 192.168.1.2 9100
+nc -zv 10.10.0.12 9100
 
 # Vérifier le firewall Proxmox
 iptables -L -n | grep 9100
@@ -679,9 +862,9 @@ iptables -A INPUT -p tcp --dport 9300 -j ACCEPT
 
 ```bash
 # Tester manuellement chaque nœud
-curl -s http://192.168.1.1:9300/control/status
-curl -s http://192.168.1.2:9300/control/status
-curl -s http://192.168.1.3:9300/control/status
+curl -s http://10.10.0.11:9300/control/status
+curl -s http://10.10.0.12:9300/control/status
+curl -s http://10.10.0.13:9300/control/status
 # Chacun doit répondre un JSON avec "status": "ok"
 ```
 
@@ -742,4 +925,75 @@ Un seul nœud (au choix) :
 
 ---
 
-*omega-remote-paging — mis à jour le 2026-05-02*
+## 16. Comportement en cas de crash — récupération automatique
+
+### Que se passe-t-il si l'agent crashe en cours d'éviction ?
+
+L'agent `node-a-agent` tient le handler uffd de la VM. Si le process crashe :
+
+1. **La VM freeze** sur la prochaine page fault (le handler est mort — uffd ne répond plus).
+2. **systemd redémarre l'agent** en 2 secondes (`RestartSec=2s`).
+3. **L'agent reprend sa connexion** aux stores (les pages sont toujours là).
+4. **Le nouveau handler uffd** re-mappe les pages en mémoire à la demande.
+5. **La VM reprend** automatiquement — fenêtre de freeze < 3 secondes.
+
+> **Note** : Les pages déjà évincées sur les stores ne sont pas perdues. Seules les pages
+> en mémoire locale qui n'avaient pas encore été évincées peuvent être perdues si le crash
+> survient pendant un batch PUT (cas extrêmement rare — window < 5 ms).
+
+### Que se passe-t-il si le store crashe ?
+
+Si un store (`node-bc-store`) crashe :
+
+1. Les agents en mode réplication basculent sur l'autre store (si `--stores ip1:9100,ip2:9100`).
+2. Les recalls en attente depuis le store crashé échouent → l'agent retente sur le store alternatif.
+3. systemd redémarre le store en 3 secondes (`RestartSec=3s`).
+4. Le store repart **vide** (les pages RAM sont perdues — pas de persistance disque par défaut).
+   - Avec `STORE_DATA_PATH` et `persistent_store`, les pages sont récupérées depuis le disque.
+
+> **Recommandation production** : activer la réplication sur 2 stores (`--stores ip1,ip2`)
+> pour que le crash d'un store n'entraîne aucune perte de pages.
+
+### Que se passe-t-il si le nœud compute redémarre ?
+
+1. Les VMs s'arrêtent (Proxmox shutdown).
+2. L'orphan cleaner (`node-bc-store`) détecte les VMs disparues après 10 minutes de grâce.
+3. Les pages orphelines sont supprimées automatiquement.
+4. Au redémarrage des VMs, l'agent repart proprement avec un nouveau handler uffd.
+
+### Forcer un nettoyage manuel
+
+```bash
+# Supprimer les pages d'une VM spécifique sur tous les stores
+for store_ip in 10.10.0.12 10.10.0.13; do
+    curl -X DELETE "http://${store_ip}:9200/vm/100"
+done
+
+# Vérifier qu'il ne reste plus de pages
+curl -s http://10.10.0.12:9200/status | python3 -c "import sys,json; print(json.load(sys.stdin))"
+```
+
+### Vérifier l'état de santé après un incident
+
+```bash
+# État de tous les stores
+for n in 10.10.0.12 10.10.0.13; do
+    echo "=== $n ==="
+    curl -s "http://${n}:9200/status" | python3 -m json.tool
+done
+
+# Logs de l'agent (dernière minute)
+journalctl -u omega-agent@100 --since "1 minute ago"
+
+# Vérifier que les VMs tournent normalement
+qm status 100
+```
+
+---
+
+*omega-remote-paging — mis à jour le 2026-05-04*
+
+
+
+
+

@@ -381,6 +381,34 @@ pub fn spawn_fault_handler_thread(
         .expect("impossible de créer le thread uffd-handler")
 }
 
+/// Injecte une page de façon proactive (sans faute pendante) — utilisé pour le recall LIFO.
+///
+/// Mode UFFDIO_COPY_MODE_DONTWAKE (bit 0) : ne réveille pas de thread en attente.
+/// EEXIST (errno 17) est ignoré silencieusement : la page est déjà présente.
+///
+/// # Safety
+/// `fd` doit être un fd userfaultfd valide. `page_data` doit pointer vers 4096 octets valides.
+/// L'adresse `dst_addr` doit être alignée sur PAGE_SIZE et dans la région enregistrée.
+pub unsafe fn recall_inject(fd: RawFd, dst_addr: u64, page_data: &[u8; 4096]) -> Result<()> {
+    const UFFDIO_COPY_MODE_DONTWAKE: u64 = 1;
+    let mut copy = UffdioCopy {
+        dst:  dst_addr,
+        src:  page_data.as_ptr() as u64,
+        len:  4096,
+        mode: UFFDIO_COPY_MODE_DONTWAKE,
+        copy: 0,
+    };
+    let ret = libc::ioctl(fd, UFFDIO_COPY, &mut copy as *mut _);
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            return Ok(()); // page déjà présente — race bénigne
+        }
+        bail!("UFFDIO_COPY recall @ 0x{dst_addr:x} : {err}");
+    }
+    Ok(())
+}
+
 /// Exécute UFFDIO_COPY directement via un fd raw (évite d'avoir un UffdHandle owning).
 ///
 /// # Safety

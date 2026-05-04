@@ -33,7 +33,7 @@ my $OMEGA_CONTROL_PORT      = $ENV{OMEGA_CONTROL_PORT}      // "9300";
 my $OMEGA_LOG_FILE          = $ENV{OMEGA_LOG_FILE}          // "/var/log/omega-hook.log";
 my $OMEGA_LAUNCHER_BIN      = $ENV{OMEGA_LAUNCHER_BIN}      // "/usr/local/bin/omega-qemu-launcher";
 my $OMEGA_RUN_DIR           = $ENV{OMEGA_RUN_DIR}           // "/var/lib/omega-qemu";
-my $OMEGA_STORES            = $ENV{OMEGA_STORES}            // "127.0.0.1:9100,127.0.0.1:9101";
+my $OMEGA_STORES            = $ENV{OMEGA_STORES}            // "10.10.0.12:9100,10.10.0.13:9100";
 my $OMEGA_START_TIMEOUT     = $ENV{OMEGA_START_TIMEOUT}     // "30";
 my $OMEGA_AGENT_STOP_TIMEOUT = $ENV{OMEGA_AGENT_STOP_TIMEOUT} // "15";
 my $OMEGA_SKIP_DAEMON_CHECK = $ENV{OMEGA_SKIP_DAEMON_CHECK} // "0";
@@ -60,7 +60,10 @@ sub curl_json {
         '--connect-timeout', '2', '--max-time', '5',
     );
     push @cmd, '-d', $body if defined $body;
-    my $out = qx(@cmd 2>&1);
+    # Chaque argument est entouré de guillemets simples pour éviter que le shell
+    # découpe "Content-Type: application/json" en deux tokens lors de l'interpolation.
+    my $cmd_str = join(' ', map { "'$_'" } @cmd) . " 2>&1";
+    my $out = qx($cmd_str);
     return ($? >> 8, $out);
 }
 
@@ -161,6 +164,37 @@ sub phase_pre_stop {
 
 sub phase_post_stop {
     log_msg("INFO", "post-arrêt — arrêt agent memfd + nettoyage pages distantes");
+
+    # Si la VM a été immédiatement redémarrée (post-stop asynchrone de Proxmox),
+    # ne pas tuer le nouvel agent ni supprimer ses fichiers d'état.
+    #
+    # On vérifie d'abord le pidfile QEMU (/var/run/qemu-server/{vmid}.pid) :
+    # il est créé dès que le daemon QEMU démarre, bien avant que qm status
+    # soit "running" — c'est la garde la plus précoce contre la course.
+    # On vérifie ensuite qm status pour couvrir les états "starting"/"paused".
+    my $pidfile = "/var/run/qemu-server/${vmid}.pid";
+    if (-f $pidfile) {
+        log_msg("WARN", "VM $vmid pidfile présent ($pidfile) — post-stop ignoré (nouvelle instance QEMU en cours)");
+        return;
+    }
+    my $vm_status = qx(qm status $vmid 2>/dev/null);
+    if ($vm_status =~ /running|starting|paused/) {
+        log_msg("WARN", "VM $vmid statut '$vm_status' — post-stop ignoré (évite de tuer le nouvel agent)");
+        return;
+    }
+
+    # Petite pause pour laisser le temps à un éventuel redémarrage immédiat
+    # d'écrire son pidfile avant que l'on tue l'agent.
+    sleep(2);
+    if (-f $pidfile) {
+        log_msg("WARN", "VM $vmid pidfile apparu pendant la pause — post-stop abandonné");
+        return;
+    }
+    my $vm_status2 = qx(qm status $vmid 2>/dev/null);
+    if ($vm_status2 =~ /running|starting|paused/) {
+        log_msg("WARN", "VM $vmid statut '$vm_status2' après pause — post-stop abandonné");
+        return;
+    }
 
     # 1. Arrêter l'agent omega-qemu-launcher (SIGTERM + attente)
     my ($rc_stop, $out_stop) = run_launcher(

@@ -18,11 +18,20 @@ serde_json         = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
 thiserror          = { workspace = true }
+libc               = { workspace = true }
 dashmap            = { workspace = true }
 bytes              = { workspace = true }
 sled               = { workspace = true }
+axum               = { workspace = true }
+tokio-util         = { workspace = true }
 
-lz4_flex  = { workspace = true }
+lz4_flex       = { workspace = true }
+
+# TLS — canal de paging chiffré
+tokio-rustls   = { workspace = true }
+rustls         = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen          = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

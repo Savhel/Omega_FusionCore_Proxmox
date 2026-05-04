@@ -39,6 +39,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 : "${OMEGA_OBJECT_ID:=ram0}"
 : "${OMEGA_START_TIMEOUT:=30}"
 : "${OMEGA_STORE_TIMEOUT_MS:=2000}"
+: "${BRIDGE_LIB_DIR:=/usr/local/lib}"
+: "${BRIDGE_LIB:=${BRIDGE_LIB_DIR}/omega-uffd-bridge.so}"
 
 info()    { echo -e "\033[32m[INFO]\033[0m   $*"; }
 warn()    { echo -e "\033[33m[WARN]\033[0m   $*"; }
@@ -53,6 +55,7 @@ step()    { echo; echo -e "\033[34m──── $* ────\033[0m"; }
 LAUNCHER_SRC="${ROOT_DIR}/target/release/omega-qemu-launcher"
 AGENT_SRC="${ROOT_DIR}/target/release/node-a-agent"
 DAEMON_SRC="${ROOT_DIR}/target/release/omega-daemon"
+BRIDGE_SRC="${ROOT_DIR}/omega-uffd-bridge/omega-uffd-bridge.so"
 
 [[ -x "$LAUNCHER_SRC" ]] || fail "omega-qemu-launcher non compilé — lancez 'make build' d'abord"
 [[ -x "$AGENT_SRC"    ]] || fail "node-a-agent non compilé — lancez 'make build' d'abord"
@@ -64,6 +67,16 @@ step "Installation des binaires dans ${INSTALL_DIR}"
 install -m 755 "$LAUNCHER_SRC" "${INSTALL_DIR}/omega-qemu-launcher"
 install -m 755 "$AGENT_SRC"    "${INSTALL_DIR}/node-a-agent"
 [[ -x "$DAEMON_SRC" ]] && install -m 755 "$DAEMON_SRC" "${INSTALL_DIR}/omega-daemon" || true
+
+# Bridge LD_PRELOAD (optionnel — absence = pas d'interception uffd QEMU)
+if [[ -f "$BRIDGE_SRC" ]]; then
+    mkdir -p "$BRIDGE_LIB_DIR"
+    install -m 644 "$BRIDGE_SRC" "$BRIDGE_LIB"
+    ldconfig "$BRIDGE_LIB_DIR" 2>/dev/null || true
+    success "Bridge LD_PRELOAD installé : ${BRIDGE_LIB}"
+else
+    warn "omega-uffd-bridge.so non trouvé (${BRIDGE_SRC}) — compilez avec 'make build-bridge'"
+fi
 
 success "Binaires installés"
 
@@ -84,6 +97,11 @@ elif [[ -L "/usr/bin/kvm" ]]; then
 fi
 
 # Générer le wrapper shell via omega-qemu-launcher write-proxmox-wrapper
+BRIDGE_ARG=()
+if [[ -f "$BRIDGE_LIB" ]]; then
+    BRIDGE_ARG=(--bridge-lib "$BRIDGE_LIB")
+fi
+
 "${INSTALL_DIR}/omega-qemu-launcher" write-proxmox-wrapper \
     --stores         "$OMEGA_STORES" \
     --qemu-bin       "$OMEGA_REAL_KVM" \
@@ -92,6 +110,7 @@ fi
     --object-id      "$OMEGA_OBJECT_ID" \
     --start-timeout-secs "$OMEGA_START_TIMEOUT" \
     --store-timeout-ms   "$OMEGA_STORE_TIMEOUT_MS" \
+    "${BRIDGE_ARG[@]}" \
     --output         "$WRAPPER_PATH"
 
 success "Wrapper écrit dans ${WRAPPER_PATH}"
@@ -116,6 +135,7 @@ HOOKSCRIPT_DEST="${SNIPPETS_DIR}/${HOOKSCRIPT_NAME}"
 sed \
     -e "s|/usr/local/bin/omega-qemu-launcher|${INSTALL_DIR}/omega-qemu-launcher|g" \
     -e "s|/var/lib/omega-qemu|${OMEGA_RUN_DIR}|g" \
+    -e "s|127.0.0.1:9100,127.0.0.1:9101|${OMEGA_STORES}|g" \
     "${SCRIPT_DIR}/proxmox_hook.pl" > "$HOOKSCRIPT_DEST"
 chmod +x "$HOOKSCRIPT_DEST"
 

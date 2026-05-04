@@ -132,6 +132,27 @@ Un seul binaire, un daemon par nœud.
 | `tls.rs` | Certificat auto-signé, vérification par empreinte TOFU |
 | `balloon.rs` | Lecture des stats mémoire internes des VMs via QMP |
 
+### node-a-agent + node-bc-store (déploiement standalone)
+
+Alternative légère à `omega-daemon` pour des tests ou des setups simples sans controller.
+
+| Binaire | Rôle |
+|---------|------|
+| `node-a-agent` | Agent par VM — uffd, éviction CLOCK, réplication, vCPU élastique, GPU |
+| `node-bc-store` | Store distant — stocke les pages en RAM ou Ceph, nettoyage orphelins, TLS |
+
+> **Quand utiliser quoi ?**
+>
+> | Situation | Recommandation |
+> |-----------|---------------|
+> | Cluster Proxmox production (3+ nœuds) | **`omega-daemon`** — daemon unifié avec TLS, quota, API cluster, controller Python |
+> | Lab KVM / test / CI | **`node-a-agent` + `node-bc-store`** — pas de Proxmox requis, démarre en 1 commande |
+> | Nœud standalone (1 seul serveur) | **`node-a-agent` + `node-bc-store` local** — simple et sans overhead |
+>
+> Les deux modes partagent le même protocole TCP — compatible à 100 %.
+
+---
+
 ### omega-controller (Python)
 
 Un seul processus, tourne sur un nœud.

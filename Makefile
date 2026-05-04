@@ -1,7 +1,7 @@
 # Makefile — omega-remote-paging
 # Commandes principales pour compiler, tester et lancer les composants.
 
-.PHONY: all build build-debug test test-rust test-python test-integration \
+.PHONY: all build build-debug build-bridge test test-rust test-python test-integration \
         store-b store-c agent-demo controller-status controller-monitor \
         clean fmt clippy help
 
@@ -25,11 +25,17 @@ LOG_LEVEL    ?= info
 
 all: build
 
-## build : compile tous les binaires Rust en mode release
-build:
+## build : compile tous les binaires Rust et le bridge C en mode release
+build: build-bridge
 	@echo "==> Compilation release..."
 	$(CARGO) build --release --workspace
 	@echo "==> Binaires disponibles dans $(TARGET_DIR)/"
+
+## build-bridge : compile omega-uffd-bridge.so (LD_PRELOAD pour QEMU)
+build-bridge:
+	@echo "==> Compilation omega-uffd-bridge.so..."
+	$(MAKE) -C $(ROOT_DIR)/omega-uffd-bridge
+	@echo "==> $(ROOT_DIR)/omega-uffd-bridge/omega-uffd-bridge.so"
 
 ## build-debug : compile en mode debug (plus rapide, avec symboles)
 build-debug:

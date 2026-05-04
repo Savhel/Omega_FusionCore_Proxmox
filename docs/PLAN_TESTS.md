@@ -36,7 +36,7 @@ cd omega-remote-paging
 
 # Tous les tests unitaires et d'intégration
 cargo test --workspace
-# Attendu : 152 passed, 0 failed
+# Attendu : 244 passed, 0 failed
 
 # Tests d'un module spécifique
 cargo test --package omega-daemon --lib quota

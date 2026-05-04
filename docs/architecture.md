@@ -119,6 +119,30 @@ Lance `qm migrate {vmid} {target} [--online]` via `tokio::process::Command`. Cep
 ### GPU Multiplexer
 Partage d'un GPU physique entre plusieurs VMs. Budget VRAM configurable par VM via `/control/vm/{vmid}/gpu`, état exposé via `/control/gpu/status`, contraintes VRAM remontées au controller pour le placement et la migration.
 
+### GPU Placement Daemon (node-a-agent)
+Détecte les VMs nécessitant un GPU via `qm config <vmid>` et la classe PCI sysfs `0x03xx`. Si la VM courante n'est pas sur un nœud GPU, migre la VM offline (`qm migrate <vmid> <target>`) vers le premier nœud GPU disponible dans le cluster, puis configure `hostpci0` pour le passthrough.
+
+### GPU Scheduler (node-a-agent)
+Partage round-robin d'un GPU physique entre plusieurs VMs via QMP (`device_del` / `device_add`). Leader election par `flock` sur `/run/omega-gpu-scheduler-<pci>.lock` — un seul scheduler actif par GPU sur le nœud. Reset GPU implicite via l'ioctl VFIO `VFIO_DEVICE_RESET` (sans module externe).
+
+### Migration Agent (node-a-agent)
+Détecte la pression RAM et CPU du nœud local. Identifie un nœud cible via l'API status. Effectue un recall complet des pages distantes avant de déclencher `qm migrate <vmid> <target> --online`.
+
+### vCPU Scheduler (node-a-agent)
+Pool vCPU partagé persisté dans `/run/omega-vcpu-pool.json` avec accès coordonné par `flock`. Mesure la charge CPU via les compteurs cgroup v2 `usage_usec` avec fallback sur `/proc/<pid>/stat`. Hotplug via `qm set --vcpus N`. Overcommit 3× au maximum. Indicateur `cpu_pressure` (AtomicBool) exposé aux décideurs de migration.
+
+### Metrics Server (node-a-agent)
+Serveur HTTP exposant les métriques Prometheus de l'agent sur le port 9300.
+
+### Orphan Cleaner (node-bc-store)
+Toutes les 5 minutes, compare les vm_ids présents dans le store avec la liste des VMs actives obtenue via `pvesh get /cluster/resources --type vm`. Après un délai de grâce de 10 minutes, supprime toutes les pages des VMs absentes du cluster.
+
+### Status Server (node-bc-store)
+Serveur HTTP sur le port 9200 exposant : RAM disponible, pages stockées, `vcpu_total`, `vcpu_free`, `ceph_enabled`. Consulté par les agents et le controller pour le placement.
+
+### Ceph Store (node-bc-store)
+Backend de stockage Ceph RADOS utilisé à la place du store RAM quand librados est disponible à la compilation et que `/etc/ceph/ceph.conf` est présent. Format OID : `"{vm_id:08x}_{page_id:016x}"`. La réplication write-through inter-stores est automatiquement désactivée si tous les stores rapportent `ceph_enabled: true`.
+
 ## Composants du controller (Python)
 
 ### MigrationPolicy
@@ -146,5 +170,5 @@ Réplication factor configurable (défaut : 2 — chaque page sur 2 nœuds).
 | Port | Protocole | Usage |
 |------|-----------|-------|
 | 9100 | TCP + TLS | Store de pages (inter-nœuds) |
-| 9200 | HTTP | API cluster (état du nœud) |
-| 9300 | HTTP | API contrôle (local uniquement) |
+| 9200 | HTTP | API cluster / status store (état du nœud, vcpu, ceph_enabled) |
+| 9300 | HTTP | API contrôle daemon (local) + métriques Prometheus agent |

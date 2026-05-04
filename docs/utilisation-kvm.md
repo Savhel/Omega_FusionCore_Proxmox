@@ -483,3 +483,98 @@ systemctl stop omega-controller   # sur pve1 uniquement
 # Vider les pages stockées (optionnel — elles seront perdues au redémarrage sans persistance)
 curl -s -X DELETE http://10.10.0.11:9300/control/pages/101
 ```
+
+---
+
+## 10. Mode standalone — node-a-agent + node-bc-store
+
+Plutôt que d'utiliser `omega-daemon`, on peut déployer les composants individuellement. C'est le mode recommandé pour tester les nouvelles fonctionnalités (vCPU élastique, GPU, Ceph, orphan cleaner).
+
+### Stores (pve2 et pve3)
+
+```bash
+# Variables d'environnement complètes
+cat > /etc/omega/store.env << 'EOF'
+STORE_LISTEN=0.0.0.0:9100
+STORE_STATUS_LISTEN=0.0.0.0:9200        # HTTP status (RAM dispo, vcpu_total/free, ceph_enabled)
+STORE_NODE_ID=pve2
+STORE_DATA_PATH=/var/lib/omega-store
+STORE_MAX_PAGES=0                        # 0 = illimité
+STORE_ORPHAN_CHECK_INTERVAL_SECS=300     # nettoyage orphelins toutes les 5 min
+STORE_ORPHAN_GRACE_SECS=600              # 10 min de grâce avant suppression
+# Ceph — auto-détecté si /etc/ceph/ceph.conf présent (apt install librados-dev)
+STORE_CEPH_CONF=/etc/ceph/ceph.conf
+STORE_CEPH_POOL=omega-pages
+STORE_CEPH_USER=client.admin
+RUST_LOG=info
+EOF
+
+node-bc-store \
+  --listen 0.0.0.0:9100 \
+  --status-listen 0.0.0.0:9200 \
+  --node-id pve2 \
+  --store-data-path /var/lib/omega-store
+```
+
+### Agent (pve1, une instance par VM)
+
+```bash
+cat > /etc/omega/agent-9001.env << 'EOF'
+AGENT_STORES=10.10.0.12:9100,10.10.0.13:9100
+AGENT_STATUS_ADDRS=10.10.0.12:9200,10.10.0.13:9200
+AGENT_VM_ID=9001
+AGENT_VM_REQUESTED_MIB=2048
+AGENT_REGION_MIB=2048
+AGENT_CURRENT_NODE=pve1
+AGENT_MODE=daemon
+
+# vCPU élastique
+AGENT_VM_VCPUS=8                    # max vCPUs (valeur demandée à la création)
+AGENT_VM_INITIAL_VCPUS=1            # vCPUs au démarrage
+AGENT_VCPU_HIGH_THRESHOLD_PCT=75    # scale-up si util > 75%
+AGENT_VCPU_LOW_THRESHOLD_PCT=25     # scale-down si util < 25%
+AGENT_VCPU_SCALE_INTERVAL_SECS=30
+AGENT_VCPU_OVERCOMMIT_RATIO=3       # 1 cœur physique = 3 vCPUs max
+
+# GPU (auto-détecté via qm config)
+AGENT_GPU_REQUIRED=false
+AGENT_GPU_PLACEMENT_INTERVAL_SECS=60
+AGENT_GPU_QUANTUM_SECS=30
+
+# Réplication (auto-désactivée si tous les stores = Ceph)
+AGENT_REPLICATION_ENABLED=true
+AGENT_METRICS_LISTEN=0.0.0.0:9300
+RUST_LOG=info
+EOF
+
+node-a-agent \
+  --stores 10.10.0.12:9100,10.10.0.13:9100 \
+  --vm-id 9001 \
+  --vm-requested-mib 2048 \
+  --region-mib 2048 \
+  --mode daemon
+```
+
+### Hookscript Proxmox (démarrage/arrêt automatique)
+
+```bash
+# Copier le hook
+cp /opt/omega-remote-paging/scripts/omega-hook.pl /var/lib/vz/snippets/
+
+# Associer à la VM 9001
+qm set 9001 --hookscript local:snippets/omega-hook.pl
+```
+
+### Vérification
+
+```bash
+# Status store
+curl -s http://10.10.0.12:9200/status | python3 -m json.tool
+# → {"node_id":"pve2","available_mib":...,"vcpu_total":24,"vcpu_free":18,"ceph_enabled":false,...}
+
+# Métriques agent (Prometheus)
+curl http://10.10.0.11:9300/metrics
+
+# Pool vCPU partagé
+cat /run/omega-vcpu-pool.json
+```

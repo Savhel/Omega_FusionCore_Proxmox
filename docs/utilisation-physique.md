@@ -628,7 +628,61 @@ Le daemon est async (tokio) et scale bien. L'agent uffd utilise un thread par d�
 
 ---
 
-## 11. Dépannage spécifique au physique
+## 11. Mode standalone — node-a-agent + node-bc-store
+
+Sur cluster physique, le déploiement standalone permet d'activer toutes les fonctionnalités (vCPU élastique, GPU passthrough, Ceph store, orphan cleaner) sans passer par omega-daemon.
+
+### Stores sur pve2 et pve3
+
+```bash
+# Prérequis Ceph (si Ceph utilisé)
+apt install librados-dev    # fournit librados.so (symlink dev requis)
+
+# Démarrer le store (backend Ceph auto si /etc/ceph/ceph.conf présent)
+node-bc-store \
+  --listen 0.0.0.0:9100 \
+  --status-listen 0.0.0.0:9200 \
+  --node-id pve2 \
+  --store-data-path /var/lib/omega-store
+
+# Variables complètes
+STORE_ORPHAN_CHECK_INTERVAL_SECS=300  # nettoyage pages orphelines toutes les 5 min
+STORE_ORPHAN_GRACE_SECS=600           # délai de grâce avant suppression
+STORE_CEPH_CONF=/etc/ceph/ceph.conf   # auto-détection Ceph
+STORE_CEPH_POOL=omega-pages
+STORE_STATUS_LISTEN=0.0.0.0:9200      # expose vcpu_total/free, ceph_enabled
+```
+
+### Agent sur pve1 (par VM)
+
+```bash
+node-a-agent \
+  --stores 10.10.0.12:9100,10.10.0.13:9100 \
+  --status-addrs 10.10.0.12:9200,10.10.0.13:9200 \
+  --vm-id 9001 \
+  --vm-requested-mib 2048 \
+  --region-mib 2048 \
+  --current-node pve1 \
+  --mode daemon
+
+# Variables vCPU élastique
+AGENT_VM_VCPUS=8                  # max à la création
+AGENT_VM_INITIAL_VCPUS=1          # vCPUs au démarrage
+AGENT_VCPU_HIGH_THRESHOLD_PCT=75
+AGENT_VCPU_OVERCOMMIT_RATIO=3     # 1 pCPU = 3 vCPUs max, au-delà → migration
+
+# Variables GPU
+AGENT_GPU_REQUIRED=false          # auto-détection via qm config + sysfs PCI 0x03xx
+AGENT_GPU_QUANTUM_SECS=30         # rotation round-robin entre VMs GPU
+
+# Hookscript (démarrage/arrêt automatique avec la VM)
+cp scripts/omega-hook.pl /var/lib/vz/snippets/
+qm set 9001 --hookscript local:snippets/omega-hook.pl
+```
+
+---
+
+## 12. Dépannage spécifique au physique
 
 | Symptôme | Cause | Solution |
 |----------|-------|----------|

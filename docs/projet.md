@@ -201,6 +201,17 @@ Types : `GPU_CMD`, `GPU_RESULT`, `GPU_ALLOC`, `GPU_ALLOC_RESP`, `GPU_FREE`, `GPU
 | Migration live/cold executor | vm_migration.rs | Intégré (V4) |
 | Politique migration cluster | migration_policy.py | Intégré (V4) |
 | vCPU + CPU par VM dans /control/status | node_state.rs | Intégré (V4) |
+| État cluster cross-nœuds | cluster.rs | Intégré |
+| Compaction mémoire cross-nœuds | compaction.rs | Intégré |
+| GPU placement auto (PCI sysfs + migration) | gpu_placement.rs | Intégré |
+| GPU partage round-robin QMP + flock | gpu_scheduler.rs | Intégré |
+| Serveur métriques Prometheus | metrics_server.rs | Intégré |
+| Agent migration RAM/CPU | migration.rs | Intégré |
+| Pool vCPU flock + cgroup v2 + hotplug | vcpu_scheduler.rs (node-a-agent) | Intégré |
+| Backend Ceph RADOS | ceph_store.rs | Intégré |
+| Surveillance disque statvfs | hardware.rs | Intégré |
+| Nettoyage pages orphelines | orphan_cleaner.rs | Intégré |
+| Serveur HTTP status store | status_server.rs | Intégré |
 
 ---
 
@@ -217,14 +228,25 @@ omega-remote-paging/
 │       ├── memory.rs           Région mémoire + éviction/fetch
 │       ├── remote.rs           Client TCP pool vers les stores
 │       ├── clock_eviction.rs   Algorithme CLOCK
-│       └── prefetch.rs         Préfetch séquentiel
+│       ├── prefetch.rs         Préfetch séquentiel
+│       ├── cluster.rs          ClusterState, NodeStatus, local_available_mib()
+│       ├── compaction.rs       ClusterCompactor (compaction mémoire cross-nœuds)
+│       ├── gpu_placement.rs    GpuPlacementDaemon : détection GPU PCI + migration offline
+│       ├── gpu_scheduler.rs    GpuScheduler : partage QMP round-robin, leader flock
+│       ├── metrics_server.rs   Serveur HTTP métriques Prometheus (port 9300)
+│       ├── migration.rs        MigrationAgent : détection pression, recall, qm migrate
+│       └── vcpu_scheduler.rs   VCpuScheduler : pool flock, cgroup v2, hotplug, overcommit 3×
 │
 ├── node-bc-store/              Store TCP V1 (nœuds stockant les pages)
 │   └── src/
-│       ├── store.rs            Index DashMap (concurrent)
+│       ├── store.rs            Index DashMap + list_vm_ids(), delete_vm(), evict_lru()
 │       ├── protocol.rs         Protocole binaire TCP
-│       ├── server.rs           Serveur TCP async
-│       └── persistent_store.rs Journalisation sled (durabilité)
+│       ├── server.rs           Serveur TCP async — AnyStore (Ram | Ceph)
+│       ├── persistent_store.rs Journalisation sled (durabilité)
+│       ├── ceph_store.rs       CephStore : backend Ceph RADOS, OID "{vm_id:08x}_{page_id:016x}"
+│       ├── hardware.rs         Surveillance disque via statvfs, alerte < 5%
+│       ├── orphan_cleaner.rs   OrphanCleaner : cross-ref pvesh, grâce 10 min
+│       └── status_server.rs    Serveur HTTP status :9200 (RAM, pages, vcpu, ceph_enabled)
 │
 ├── omega-daemon/               Daemon unifié V4 (tous rôles)
 │   └── src/
@@ -259,7 +281,10 @@ omega-remote-paging/
 │       └── main.py             Point d'entrée CLI (daemon, migrate, monitor…)
 │
 ├── scripts/
-│   └── setup_qos.sh            Configuration QoS réseau (tc/HTB)
+│   ├── setup_qos.sh            Configuration QoS réseau (tc/HTB)
+│   ├── omega-hook.pl           Hookscript Proxmox pre/post-start/stop
+│   ├── cluster.conf            Configuration cluster exemple
+│   └── systemd/               Units systemd (omega-daemon, omega-controller, …)
 │
 └── docs/                       Documentation technique
 ```

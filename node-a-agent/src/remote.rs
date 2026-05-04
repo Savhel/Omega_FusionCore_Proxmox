@@ -1,61 +1,130 @@
 //! Client TCP vers les stores distants (nœuds B et C).
 //!
+//! # TLS optionnel
+//!
+//! Si `tls_fingerprints` est non vide à la construction, chaque connexion TCP
+//! est enveloppée dans un `TlsStream` avec vérification par empreinte (TOFU).
+//! Compatible avec le `TlsAcceptor` de `node-bc-store`.
+//!
 //! # Stratégie de routage
 //!
 //! La sélection du store cible est déterministe : `store_index = page_id % num_stores`.
-//! Cela garantit qu'une page est toujours sur le même store, sans état supplémentaire.
 //!
 //! # Pool de connexions
 //!
-//! Chaque store dispose de `CONN_POOL_SIZE` connexions TCP persistantes.
-//! Les requêtes sont distribuées en round-robin atomique sur ces connexions,
-//! ce qui permet aux N workers uffd de faire des GET_PAGE **en parallèle**
-//! sans se sérialiser sur un seul Mutex.
-//!
-//! Avant : 1 Mutex<StoreConn> par store  → N workers bloqués en série
-//! Après : CONN_POOL_SIZE Mutex<StoreConn> par store → N workers s'étalent sur K connexions
+//! Chaque store dispose de `CONN_POOL_SIZE` connexions persistantes.
+//! Les requêtes sont distribuées en round-robin atomique pour permettre
+//! aux workers uffd de faire des GET_PAGE en parallèle.
 
+use std::io;
+use std::net::IpAddr;
+use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use tokio::io::BufStream;
+use anyhow::{bail, Context as _, Result};
+use tokio::io::{AsyncRead, AsyncWrite, BufStream, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
 
 use node_bc_store::protocol::{BatchPutRequest, BatchPutResponse, Message, Opcode, PAGE_SIZE};
 
 /// Nombre de connexions TCP maintenues par store.
-/// 4 connexions parallèles couvrent largement un pool de workers uffd typique.
 const CONN_POOL_SIZE: usize = 4;
+
+// ─── Stream abstrait TCP/TLS ──────────────────────────────────────────────────
+
+/// Enveloppe le stream de transport : TCP clair ou TCP+TLS.
+/// Les deux variants sont `Unpin` donc on peut utiliser `Pin::new()` directement.
+enum AnyBufStream {
+    Plain(BufStream<TcpStream>),
+    Tls(BufStream<TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for AnyBufStream {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s)   => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for AnyBufStream {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s)   => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            Self::Tls(s)   => Pin::new(s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s)   => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 // ─── Connexion individuelle ───────────────────────────────────────────────────
 
 struct StoreConn {
-    addr:    String,
-    stream:  Option<BufStream<TcpStream>>,
-    timeout: Duration,
+    addr:       String,
+    stream:     Option<AnyBufStream>,
+    timeout:    Duration,
+    connector:  Option<Arc<TlsConnector>>,
+    server_name: Option<ServerName<'static>>,
 }
 
 impl StoreConn {
-    fn new(addr: String, timeout: Duration) -> Self {
-        Self { addr, stream: None, timeout }
+    fn new(
+        addr:       String,
+        timeout:    Duration,
+        connector:  Option<Arc<TlsConnector>>,
+        server_name: Option<ServerName<'static>>,
+    ) -> Self {
+        Self { addr, stream: None, timeout, connector, server_name }
     }
 
     async fn ensure_connected(&mut self) -> Result<()> {
-        if self.stream.is_some() {
-            return Ok(());
-        }
+        if self.stream.is_some() { return Ok(()); }
         debug!(addr = %self.addr, "connexion au store");
+
         let tcp = timeout(self.timeout, TcpStream::connect(&self.addr))
             .await
             .context("timeout connexion store")?
             .with_context(|| format!("connexion TCP vers {} échouée", self.addr))?;
         tcp.set_nodelay(true)?;
-        self.stream = Some(BufStream::new(tcp));
-        info!(addr = %self.addr, "connecté au store");
+
+        self.stream = Some(match &self.connector {
+            Some(connector) => {
+                let sn = self.server_name.clone()
+                    .context("TLS activé mais server_name absent")?;
+                let tls = timeout(self.timeout, connector.connect(sn, tcp))
+                    .await
+                    .context("timeout handshake TLS")?
+                    .context("handshake TLS échoué")?;
+                info!(addr = %self.addr, "connecté au store (TLS)");
+                AnyBufStream::Tls(BufStream::new(tls))
+            }
+            None => {
+                info!(addr = %self.addr, "connecté au store (TCP clair)");
+                AnyBufStream::Plain(BufStream::new(tcp))
+            }
+        });
         Ok(())
     }
 
@@ -86,27 +155,32 @@ impl StoreConn {
 
 // ─── Pool de connexions pour un store ────────────────────────────────────────
 
-/// Pool de K connexions vers un même store, distribuées en round-robin.
 struct ConnPool {
     conns: Vec<Mutex<StoreConn>>,
     next:  AtomicUsize,
 }
 
 impl ConnPool {
-    fn new(addr: String, timeout: Duration, size: usize) -> Self {
+    fn new(
+        addr:       String,
+        timeout:    Duration,
+        size:       usize,
+        connector:  Option<Arc<TlsConnector>>,
+        server_name: Option<ServerName<'static>>,
+    ) -> Self {
         let conns = (0..size)
-            .map(|_| Mutex::new(StoreConn::new(addr.clone(), timeout)))
+            .map(|_| Mutex::new(StoreConn::new(
+                addr.clone(), timeout, connector.clone(), server_name.clone(),
+            )))
             .collect();
         Self { conns, next: AtomicUsize::new(0) }
     }
 
-    /// Sélectionne une connexion par round-robin et envoie la requête.
     async fn send_recv(&self, req: Message) -> Result<Message> {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.conns.len();
         self.conns[idx].lock().await.send_recv(req).await
     }
 
-    /// Ping sur la première connexion du pool.
     async fn ping(&self) -> bool {
         self.conns[0]
             .lock()
@@ -123,18 +197,40 @@ impl ConnPool {
 /// Pool de connexions vers les N stores (B et C).
 ///
 /// Partagé via `Arc<RemoteStorePool>` entre les workers uffd et le thread principal.
-/// Chaque store dispose de `CONN_POOL_SIZE` connexions parallèles.
 pub struct RemoteStorePool {
     stores: Vec<ConnPool>,
 }
 
 impl RemoteStorePool {
-    pub fn new(addrs: Vec<String>, timeout_ms: u64) -> Self {
+    /// Construit le pool.
+    ///
+    /// `tls_fingerprints` : empreintes SHA-256 (hex) des stores de confiance.
+    /// Si vide, le canal est en TCP clair. Si non vide, TLS TOFU est activé.
+    pub fn new(addrs: Vec<String>, timeout_ms: u64, tls_fingerprints: Vec<String>) -> Self {
         let t = Duration::from_millis(timeout_ms);
+
+        let connector: Option<Arc<TlsConnector>> = if tls_fingerprints.is_empty() {
+            None
+        } else {
+            let client_cfg = node_bc_store::tls::TlsContext::client_config(tls_fingerprints)
+                .expect("construction TlsConnector échouée");
+            Some(Arc::new(TlsConnector::from(client_cfg)))
+        };
+
         let stores = addrs
             .into_iter()
-            .map(|addr| ConnPool::new(addr, t, CONN_POOL_SIZE))
+            .map(|addr| {
+                // Dériver le ServerName depuis l'adresse IP (ex: "10.10.0.12:9100")
+                let server_name = connector.as_ref().and_then(|_| {
+                    let host = addr.split(':').next().unwrap_or(&addr);
+                    IpAddr::from_str(host).ok().map(|ip| {
+                        ServerName::IpAddress(ip.into())
+                    })
+                });
+                ConnPool::new(addr, t, CONN_POOL_SIZE, connector.clone(), server_name)
+            })
             .collect();
+
         Self { stores }
     }
 
@@ -152,7 +248,6 @@ impl RemoteStorePool {
         }
         let idx  = self.store_index(page_id);
         let base = Message::put_page(vm_id, page_id, data);
-        // Compression LZ4 transparente : envoie la version compressée si elle est plus courte
         let req  = base.try_compress().unwrap_or(base);
         let resp = self.stores[idx]
             .send_recv(req)
@@ -205,17 +300,9 @@ impl RemoteStorePool {
     }
 
     /// Envoie N pages en une seule trame BATCH_PUT, groupées par store.
-    ///
-    /// Pour un lot de 16 pages evictées, remplace 16 RTT par 1 RTT par store.
-    /// Le payload batch est aussi compressé LZ4 si rentable.
-    pub async fn batch_put_pages(
-        &self,
-        vm_id:  u32,
-        pages:  Vec<(u64, Vec<u8>)>,
-    ) -> Result<u32> {
+    pub async fn batch_put_pages(&self, vm_id: u32, pages: Vec<(u64, Vec<u8>)>) -> Result<u32> {
         if pages.is_empty() { return Ok(0); }
 
-        // Grouper les pages par store cible
         let mut by_store: Vec<Vec<(u64, Vec<u8>)>> = vec![Vec::new(); self.stores.len()];
         for (pid, data) in pages {
             by_store[self.store_index(pid)].push((pid, data));
@@ -230,13 +317,11 @@ impl RemoteStorePool {
                 req.push(pid, data);
             }
 
-            // Utilise une connexion dédiée du pool pour le batch entier
-            let slot_idx = self.stores[idx].next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            let slot_idx = self.stores[idx].next.fetch_add(1, Ordering::Relaxed)
                 % self.stores[idx].conns.len();
             let mut conn = self.stores[idx].conns[slot_idx].lock().await;
             conn.ensure_connected().await?;
 
-            // Phase écriture — le borrow de `stream` se termine à la fin du bloc
             let write_result = {
                 let stream = conn.stream.as_mut().unwrap();
                 req.write_to(stream).await
@@ -246,7 +331,6 @@ impl RemoteStorePool {
                 return Err(e.into());
             }
 
-            // Phase lecture — nouveau borrow de `stream`
             let read_result = {
                 let stream = conn.stream.as_mut().unwrap();
                 BatchPutResponse::read_from(stream).await
@@ -263,9 +347,55 @@ impl RemoteStorePool {
         Ok(total_stored)
     }
 
+    /// Envoie une page vers un store spécifique (routage dynamique).
+    pub async fn put_page_to(&self, vm_id: u32, page_id: u64, data: Vec<u8>, store_idx: usize) -> Result<()> {
+        if data.len() != PAGE_SIZE {
+            bail!("put_page_to : taille incorrecte {}", data.len());
+        }
+        if store_idx >= self.stores.len() {
+            bail!("put_page_to : store_idx={store_idx} hors limites ({})", self.stores.len());
+        }
+        let base = Message::put_page(vm_id, page_id, data);
+        let req  = base.try_compress().unwrap_or(base);
+        let resp = self.stores[store_idx]
+            .send_recv(req)
+            .await
+            .with_context(|| format!("PUT_PAGE_TO vm={vm_id} page={page_id} store[{store_idx}]"))?;
+
+        match resp.opcode {
+            Opcode::Ok    => Ok(()),
+            Opcode::Error => { let m = String::from_utf8_lossy(&resp.payload); bail!("PUT_PAGE_TO refusé : {m}") }
+            op            => bail!("PUT_PAGE_TO réponse inattendue : {op:?}"),
+        }
+    }
+
+    /// Récupère une page depuis un store spécifique (routage dynamique).
+    pub async fn get_page_from(&self, vm_id: u32, page_id: u64, store_idx: usize) -> Result<Option<Vec<u8>>> {
+        if store_idx >= self.stores.len() {
+            bail!("get_page_from : store_idx={store_idx} hors limites");
+        }
+        let req  = Message::get_page(vm_id, page_id);
+        let resp = self.stores[store_idx]
+            .send_recv(req)
+            .await
+            .with_context(|| format!("GET_PAGE_FROM vm={vm_id} page={page_id} store[{store_idx}]"))?;
+
+        match resp.opcode {
+            Opcode::Ok => {
+                if resp.payload.len() != PAGE_SIZE {
+                    bail!("GET_PAGE_FROM taille incorrecte {}", resp.payload.len());
+                }
+                Ok(Some(resp.payload))
+            }
+            Opcode::NotFound => Ok(None),
+            Opcode::Error    => { let m = String::from_utf8_lossy(&resp.payload); bail!("GET_PAGE_FROM erreur : {m}") }
+            op               => bail!("GET_PAGE_FROM réponse inattendue : {op:?}"),
+        }
+    }
+
     pub async fn put_page_replica(&self, vm_id: u32, page_id: u64, data: Vec<u8>) -> Result<()> {
         let idx  = self.replica_index(page_id);
-        let base = Message::put_page(vm_id, page_id, data.clone());
+        let base = Message::put_page(vm_id, page_id, data);
         let req  = base.try_compress().unwrap_or(base);
         let resp = self.stores[idx]
             .send_recv(req)
@@ -276,6 +406,25 @@ impl RemoteStorePool {
             Opcode::Ok    => Ok(()),
             Opcode::Error => { let m = String::from_utf8_lossy(&resp.payload); bail!("PUT réplica refusé : {m}") }
             op            => bail!("PUT réplica réponse inattendue : {op:?}"),
+        }
+    }
+
+    /// Supprime une page d'un store spécifique (routage dynamique).
+    pub async fn delete_page_from(&self, vm_id: u32, page_id: u64, store_idx: usize) -> Result<bool> {
+        if store_idx >= self.stores.len() {
+            bail!("delete_page_from : store_idx={store_idx} hors limites");
+        }
+        let req  = Message::delete_page(vm_id, page_id);
+        let resp = self.stores[store_idx]
+            .send_recv(req)
+            .await
+            .with_context(|| format!("DELETE_PAGE_FROM vm={vm_id} page={page_id} store[{store_idx}]"))?;
+
+        match resp.opcode {
+            Opcode::Ok       => Ok(true),
+            Opcode::NotFound => Ok(false),
+            Opcode::Error    => { let m = String::from_utf8_lossy(&resp.payload); bail!("DELETE_PAGE_FROM erreur : {m}") }
+            op               => bail!("DELETE_PAGE_FROM réponse inattendue : {op:?}"),
         }
     }
 
