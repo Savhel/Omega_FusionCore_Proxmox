@@ -68,6 +68,16 @@ _load_config() {
     DEPLOY_USER="${DEPLOY_USER:-root}"
     STORE_PORT="${STORE_PORT:-9100}"
     STATUS_PORT="${STATUS_PORT:-9200}"
+    SSH_KEY="${SSH_KEY:-${HOME}/.ssh/omega_ed25519}"
+
+    # Options SSH/rsync communes (clé dédiée si elle existe)
+    if [[ -f "$SSH_KEY" ]]; then
+        SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new)
+        RSYNC_OPTS=(-aq -e "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=accept-new")
+    else
+        SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+        RSYNC_OPTS=(-aq)
+    fi
 
     if [[ -n "$OMEGA_NODES" ]]; then
         IFS=',' read -ra NODES_ARR <<< "$OMEGA_NODES"
@@ -115,11 +125,11 @@ _need_config() {
 _sync() {
     _need_config || return
     _info "Sync scripts + binaires → ${CONTROLLER_NODE}..."
-    rsync -aq --delete "${TESTS_DIR}/" "root@${CONTROLLER_NODE}:/tmp/omega-tests/"
-    ssh -o ConnectTimeout=5 "root@${CONTROLLER_NODE}" "mkdir -p /tmp/omega-tests-bins" 2>/dev/null || true
+    rsync "${RSYNC_OPTS[@]}" --delete "${TESTS_DIR}/" "${DEPLOY_USER}@${CONTROLLER_NODE}:/tmp/omega-tests/"
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" "mkdir -p /tmp/omega-tests-bins" 2>/dev/null || true
     for bin in node-a-agent node-bc-store omega-daemon omega-qemu-launcher; do
         local b="${ROOT_DIR}/target/release/${bin}"
-        [[ -x "$b" ]] && rsync -aq "$b" "root@${CONTROLLER_NODE}:/tmp/omega-tests-bins/${bin}" || true
+        [[ -x "$b" ]] && rsync "${RSYNC_OPTS[@]}" "$b" "${DEPLOY_USER}@${CONTROLLER_NODE}:/tmp/omega-tests-bins/${bin}" || true
     done
     _ok "Sync OK"
 }
@@ -136,11 +146,11 @@ _run_isolated() {
     _hdr "  Test ${num} — ${name}  [isolé]"
     _sep
     local t0=$SECONDS rc=0
-    ssh -o ConnectTimeout=5 "root@${CONTROLLER_NODE}" \
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "systemctl stop omega-daemon 2>/dev/null || true" || true
-    ssh -o ConnectTimeout=10 -o BatchMode=yes "root@${CONTROLLER_NODE}" \
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "$(_remote_env) bash '/tmp/omega-tests/$(basename "$script")' $*" || rc=$?
-    ssh -o ConnectTimeout=5 "root@${CONTROLLER_NODE}" \
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "systemctl start omega-daemon 2>/dev/null || true; sleep 2" || true
     _record "$num" "$name" "$rc" "$(( SECONDS - t0 ))"
 }
@@ -162,7 +172,7 @@ _run_cluster() {
     _hdr "  Test ${num} — ${name}  [cluster]"
     _sep
     local t0=$SECONDS rc=0
-    ssh -o ConnectTimeout=10 -o BatchMode=yes "root@${CONTROLLER_NODE}" \
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "$(_remote_env) bash '/tmp/omega-tests/$(basename "$script")' $*" || rc=$?
     _record "$num" "$name" "$rc" "$(( SECONDS - t0 ))"
 }
@@ -285,19 +295,71 @@ EOF
     echo -e "  ${GREEN}✓${RESET} User SSH   : ${CYAN}${DEPLOY_USER}${RESET}"
     echo ""
 
-    # Test de connectivité SSH sur chaque nœud
-    _info "Test de connectivité SSH..."
+    # ── Génération et déploiement de la clé SSH ───────────────────────────────
+    local SSH_KEY="${HOME}/.ssh/omega_ed25519"
+    if [[ ! -f "$SSH_KEY" ]]; then
+        _info "Génération d'une clé SSH dédiée omega : ${SSH_KEY}"
+        ssh-keygen -t ed25519 -C "omega-lab" -N "" -f "$SSH_KEY" -q
+        _ok "Clé générée : ${SSH_KEY}.pub"
+    else
+        _info "Clé SSH existante : ${SSH_KEY}"
+    fi
+
+    # S'assurer que la clé est chargée dans ssh-agent si disponible
+    if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+        ssh-add "$SSH_KEY" &>/dev/null || true
+    fi
+
+    # Déployer la clé sur chaque nœud (demande le mot de passe si nécessaire)
+    _info "Déploiement de la clé SSH sur les nœuds (le mot de passe peut être demandé)..."
+    echo ""
+    local ssh_ok=true
+    for n in "${NODES_ARR[@]}"; do
+        # Tester d'abord si la clé est déjà en place (connexion sans mot de passe)
+        if ssh -o ConnectTimeout=5 -o BatchMode=yes \
+               -i "$SSH_KEY" "${input_user}@${n}" "hostname" &>/dev/null; then
+            _ok "  ${input_user}@${n} — clé déjà installée"
+        else
+            echo -e "  ${YELLOW}→${RESET}  Copie de la clé vers ${input_user}@${n} (entrez le mot de passe) :"
+            if ssh-copy-id -i "${SSH_KEY}.pub" \
+                           -o ConnectTimeout=10 \
+                           "${input_user}@${n}"; then
+                _ok "  ${input_user}@${n} — clé installée"
+            else
+                _warn "  ${input_user}@${n} — échec (vérifier IP, user et que sshd est démarré)"
+                ssh_ok=false
+            fi
+        fi
+    done
+    echo ""
+
+    # Écrire l'identité SSH dans cluster.conf pour que deploy.sh et les tests l'utilisent
+    if ! grep -q "SSH_KEY=" "$CONF_FILE" 2>/dev/null; then
+        echo "" >> "$CONF_FILE"
+        echo "# Clé SSH dédiée omega (générée par omega-lab.sh)" >> "$CONF_FILE"
+        echo "SSH_KEY=\"${SSH_KEY}\"" >> "$CONF_FILE"
+    else
+        sed -i "s|^SSH_KEY=.*|SSH_KEY=\"${SSH_KEY}\"|" "$CONF_FILE"
+    fi
+
+    # ── Test de connectivité finale ───────────────────────────────────────────
+    _info "Test de connectivité SSH finale..."
     local ok=true
     for n in "${NODES_ARR[@]}"; do
-        if ssh -o ConnectTimeout=5 -o BatchMode=yes "root@${n}" "hostname" &>/dev/null; then
-            _ok "  SSH root@${n} — OK"
+        if ssh -o ConnectTimeout=5 -o BatchMode=yes \
+               -i "$SSH_KEY" "${input_user}@${n}" "hostname" &>/dev/null; then
+            _ok "  ${input_user}@${n} — OK"
         else
-            _warn "  SSH root@${n} — ÉCHEC (vérifier clé SSH et connectivité)"
+            _warn "  ${input_user}@${n} — ÉCHEC"
             ok=false
         fi
     done
-    $ok && _ok "Tous les nœuds sont joignables" || \
+    echo ""
+    $ok && _ok "Tous les nœuds sont joignables sans mot de passe" || \
           _warn "Certains nœuds sont injoignables — l'installation peut échouer"
+
+    # Recharger pour que SSH_OPTS soit à jour pour le reste de la session
+    _load_config
 }
 
 # ── Opérations d'installation ─────────────────────────────────────────────────
