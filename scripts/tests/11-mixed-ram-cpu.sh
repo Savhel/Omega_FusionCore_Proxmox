@@ -15,6 +15,10 @@ step "Prérequis"
 require_cluster
 require_vm_running "$VMID"
 
+step "Remise à 1 vCPU (état de référence avant le test)"
+qm set "$VMID" --vcpus 1 &>/dev/null || true
+sleep 2
+
 step "État initial"
 vcpus_init=$(qm config "$VMID" | grep "^vcpus:" | awk '{print $2}' || echo "1")
 node_init=$(vm_node "$VMID")
@@ -47,8 +51,10 @@ wait_http "http://${COMPUTE_NODE}:${METRICS_PORT}/metrics" 20
 
 step "Charge simultanée RAM + CPU dans la VM (90s)"
 info "stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s"
-qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null &
-_PIDS+=($!)
+if ! qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null 2>&1; then
+    warn "qemu-guest-agent absent — injection CPU via cgroup uniquement (RAM stress ignorée)"
+    vm_cpu_stress "$VMID" 90
+fi
 
 step "Surveillance simultanée évictions + vCPUs pendant 100s"
 t0=$SECONDS
@@ -56,7 +62,7 @@ vcpus_max=1; evicted_max=0
 
 while [[ $(elapsed $t0) -lt 100 ]]; do
     evicted=$(curl -sf "http://${COMPUTE_NODE}:${METRICS_PORT}/metrics" | \
-        grep "^pages_evicted " | awk '{print $2}' | head -1 || echo 0)
+        python3 -c "import sys,json; print(json.load(sys.stdin).get('pages_evicted',0))" 2>/dev/null || echo 0)
     vcpus_now=$(qm config "$VMID" | grep "^vcpus:" | awk '{print $2}' || echo "?")
     pages_stores=0
     for n in "${STORE_NODES_ARR[@]}"; do
@@ -87,7 +93,7 @@ FAILS=0
     { warn "aucune page évincée vers les stores"; ((FAILS++)) || true; }
 
 step "Logs agent (extraits)"
-grep -i "vcpu\|scale\|évict\|evict\|ajust" "$LOG" | head -20
+grep -i "vcpu\|scale\|évict\|evict\|ajust" "$LOG" | head -20 || true
 
 [[ $FAILS -eq 0 ]] && \
     pass "M1 OK — scale-up vCPU ($vcpus_init→$vcpus_max) + éviction RAM ($evicted_max pages) simultanés" || \

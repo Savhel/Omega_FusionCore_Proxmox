@@ -211,6 +211,34 @@ pub struct Config {
     #[arg(long, default_value = "", env = "AGENT_TLS_FINGERPRINTS")]
     pub tls_fingerprints: String,
 
+    // ─── Balloon thin-provisioning ───────────────────────────────────────────
+
+    /// Activer le balloon QEMU pour le thin-provisioning mémoire guest.
+    /// La VM démarre avec balloon_initial_mib visible, grandit jusqu'à region_mib.
+    #[arg(long, default_value_t = false, env = "AGENT_BALLOON_ENABLED")]
+    pub balloon_enabled: bool,
+
+    /// RAM initiale visible par le guest au démarrage, en Mio.
+    /// Doit être ≤ region_mib. Défaut : 512 Mio.
+    #[arg(long, default_value_t = 512, env = "AGENT_BALLOON_INITIAL_MIB")]
+    pub balloon_initial_mib: u64,
+
+    /// Incrément de croissance/shrink du balloon par step, en Mio.
+    #[arg(long, default_value_t = 256, env = "AGENT_BALLOON_STEP_MIB")]
+    pub balloon_step_mib: u64,
+
+    /// Intervalle en secondes entre deux ajustements du balloon.
+    #[arg(long, default_value_t = 10, env = "AGENT_BALLOON_INTERVAL_SECS")]
+    pub balloon_interval_secs: u64,
+
+    /// Taux de page-faults/s au-dessus duquel le balloon se dégonfle (plus de RAM au guest).
+    #[arg(long, default_value_t = 10, env = "AGENT_BALLOON_GROW_FAULTS_PER_SEC")]
+    pub balloon_grow_faults_per_sec: u64,
+
+    /// Taux de page-faults/s en-dessous duquel le balloon se regonfle (moins de RAM au guest).
+    #[arg(long, default_value_t = 1, env = "AGENT_BALLOON_SHRINK_FAULTS_PER_SEC")]
+    pub balloon_shrink_faults_per_sec: u64,
+
     // ─── Métriques ────────────────────────────────────────────────────────────
 
     /// Adresse d'écoute du serveur HTTP de métriques.

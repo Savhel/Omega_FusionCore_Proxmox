@@ -15,6 +15,7 @@ use node_bc_store::config::Config;
 use node_bc_store::metrics::StoreMetrics;
 use node_bc_store::orphan_cleaner::OrphanCleaner;
 use node_bc_store::server;
+use node_bc_store::status_server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,21 +28,24 @@ async fn main() -> Result<()> {
         _      => fmt().with_env_filter(filter).with_target(false).init(),
     }
 
+    // Métriques partagées entre le serveur TCP et le serveur HTTP status.
+    let metrics = Arc::new(StoreMetrics::default());
+
     // Auto-connexion Ceph : active si librados détecté au build ET ceph.conf présent.
     let ceph_store: Option<Arc<CephStore>> = {
-        let m = Arc::new(StoreMetrics::default());
-        CephStore::try_auto_connect(&cfg.ceph_conf, &cfg.ceph_pool, &cfg.ceph_user, m)
+        CephStore::try_auto_connect(&cfg.ceph_conf, &cfg.ceph_pool, &cfg.ceph_user, metrics.clone())
             .map(Arc::new)
     };
 
     // Serveur HTTP status cluster (non-bloquant)
-    let status_addr = cfg.status_listen.clone();
-    let node_id     = cfg.node_id.clone();
-    let data_path   = cfg.store_data_path.clone();
-    let ceph_status = ceph_store.clone();
+    let status_addr    = cfg.status_listen.clone();
+    let node_id        = cfg.node_id.clone();
+    let data_path      = cfg.store_data_path.clone();
+    let ceph_status    = ceph_store.clone();
+    let status_metrics = metrics.clone();
     tokio::spawn(async move {
-        if let Err(e) = node_bc_store::status_server::run(
-            status_addr, node_id, data_path, ceph_status,
+        if let Err(e) = status_server::run(
+            status_addr, node_id, data_path, ceph_status, status_metrics,
         ).await {
             tracing::error!(error = %e, "serveur status HTTP terminé avec erreur");
         }
@@ -76,5 +80,5 @@ async fn main() -> Result<()> {
         );
     }
 
-    server::run(cfg, ceph_store).await
+    server::run(cfg, ceph_store, metrics).await
 }

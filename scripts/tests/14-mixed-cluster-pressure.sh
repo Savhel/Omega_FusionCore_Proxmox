@@ -98,7 +98,7 @@ done
 step "Vérification stabilité"
 errors_total=0
 for log in "${LOGS[@]}"; do
-    panics=$(grep -c "panic\|FATAL\|thread.*main.*panicked" "$log" 2>/dev/null || echo 0)
+    panics=$(grep -c "panic\|FATAL\|thread.*main.*panicked" "$log" 2>/dev/null) || panics=0
     [[ "$panics" -gt 0 ]] && { warn "panic dans $log"; ((errors_total++)) || true; }
 done
 

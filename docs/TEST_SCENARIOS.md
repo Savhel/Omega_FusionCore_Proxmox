@@ -160,7 +160,7 @@ stress-ng --cpu 0 --timeout 60s  # dans la VM
 
 ```bash
 AGENT_VM_ID=9001 \
-AGENT_CURRENT_NODE=pve1 \
+AGENT_CURRENT_NODE=$(hostname) \
 AGENT_GPU_REQUIRED=true \
 AGENT_GPU_PLACEMENT_INTERVAL_SECS=30 \
 node-a-agent --mode daemon
@@ -205,7 +205,7 @@ ls -la /run/omega-gpu-scheduler-*.lock
 
 ## 8. Test migration RAM
 
-**Prérequis :** Cluster 3 nœuds, VM 9001 sur pve1, pve2/pve3 comme stores.
+**Prérequis :** Cluster 3 nœuds identiques (OMEGA_NODES), VM 9001 active.
 
 ```bash
 # Configurer l'agent avec migration activée
@@ -215,7 +215,7 @@ AGENT_EVICTION_THRESHOLD_MIB=512 \
 AGENT_VM_MIN_RAM_MIB=1024 \
 node-a-agent --mode daemon
 
-# Simuler pression mémoire sur pve1 :
+# Simuler pression mémoire sur le nœud courant :
 # Lancer d'autres process qui consomment de la RAM
 stress-ng --vm 1 --vm-bytes 80% --timeout 120s
 
@@ -297,14 +297,13 @@ wait
 # 1. userfaultfd autorisé
 sysctl vm.unprivileged_userfaultfd    # → 1
 
-# 2. Stores accessibles depuis pve1
-nc -zv 10.10.0.12 9100 && echo "store OK"
-nc -zv 10.10.0.13 9100 && echo "store OK"
+# 2. Stores accessibles depuis chaque nœud (port 9100)
+for node in $OMEGA_NODES; do nc -zv $node 9100 && echo "store $node OK"; done
 
-# 3. pvesh disponible sur les nœuds stores (pour orphan cleaner)
+# 3. pvesh disponible (pour orphan cleaner)
 pvesh get /cluster/resources --type vm --output-format json | head -5
 
-# 4. qm accessible sur pve1 (pour vCPU hotplug + GPU + migration)
+# 4. qm accessible (pour vCPU hotplug + GPU + migration)
 qm list
 
 # 5. Ceph (si utilisé)

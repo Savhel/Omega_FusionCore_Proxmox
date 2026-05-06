@@ -192,9 +192,11 @@ impl MemoryRegion {
         // 2. PUT vers le store cible
         let vm_id = self.vm_id;
         let store = self.store.clone();
-        self.tokio_handle
-            .block_on(store.put_page_to(vm_id, page_id, data.to_vec(), store_idx))
-            .with_context(|| format!("evict_page_to : PUT page={page_id} store[{store_idx}]"))?;
+        tokio::task::block_in_place(|| {
+            self.tokio_handle
+                .block_on(store.put_page_to(vm_id, page_id, data.to_vec(), store_idx))
+        })
+        .with_context(|| format!("evict_page_to : PUT page={page_id} store[{store_idx}]"))?;
 
         // Mise à jour immédiate de la capacité estimée (item 3)
         self.cluster.track_eviction(store_idx);
@@ -203,9 +205,10 @@ impl MemoryRegion {
         if self.replication_enabled.load(Ordering::Relaxed) && self.store.num_stores() > 1 {
             let replica_idx = (store_idx + 1) % self.store.num_stores();
             let store2 = self.store.clone();
-            if let Err(e) = self.tokio_handle
-                .block_on(store2.put_page_to(vm_id, page_id, data.to_vec(), replica_idx))
-            {
+            if let Err(e) = tokio::task::block_in_place(|| {
+                self.tokio_handle
+                    .block_on(store2.put_page_to(vm_id, page_id, data.to_vec(), replica_idx))
+            }) {
                 warn!(page_id, replica_idx, error = %e, "réplication échouée — données sur primaire uniquement");
             }
         }
@@ -348,9 +351,11 @@ impl MemoryRegion {
             let vm_id = self.vm_id;
             let store = self.store.clone();
 
-            let data = match self.tokio_handle
-                .block_on(store.get_page_from(vm_id, page_id, store_idx))
-                .with_context(|| format!("recall : GET page={page_id} store[{store_idx}]"))?
+            let data = match tokio::task::block_in_place(|| {
+                self.tokio_handle
+                    .block_on(store.get_page_from(vm_id, page_id, store_idx))
+            })
+            .with_context(|| format!("recall : GET page={page_id} store[{store_idx}]"))?
             {
                 Some(bytes) => bytes,
                 None => {
@@ -358,10 +363,12 @@ impl MemoryRegion {
                     if self.replication_enabled.load(Ordering::Relaxed) && self.store.num_stores() > 1 {
                         let replica_idx = (store_idx + 1) % self.store.num_stores();
                         let store2 = self.store.clone();
-                        match self.tokio_handle
-                            .block_on(store2.get_page_from(vm_id, page_id, replica_idx))
-                            .ok()
-                            .flatten()
+                        match tokio::task::block_in_place(|| {
+                            self.tokio_handle
+                                .block_on(store2.get_page_from(vm_id, page_id, replica_idx))
+                        })
+                        .ok()
+                        .flatten()
                         {
                             Some(bytes) => {
                                 warn!(page_id, store_idx, replica_idx, "recall : fallback replica (primaire absent)");
@@ -390,15 +397,19 @@ impl MemoryRegion {
             unsafe { crate::uffd::recall_inject(uffd_fd, page_addr, &arr)?; }
 
             // Suppression du store primaire pour libérer sa RAM
-            let _ = self.tokio_handle
-                .block_on(store.delete_page_from(vm_id, page_id, store_idx));
+            let _ = tokio::task::block_in_place(|| {
+                self.tokio_handle
+                    .block_on(store.delete_page_from(vm_id, page_id, store_idx))
+            });
 
             // Suppression du replica si réplication activée
             if self.replication_enabled.load(Ordering::Relaxed) && self.store.num_stores() > 1 {
                 let replica_idx = (store_idx + 1) % self.store.num_stores();
                 let store2 = self.store.clone();
-                let _ = self.tokio_handle
-                    .block_on(store2.delete_page_from(vm_id, page_id, replica_idx));
+                let _ = tokio::task::block_in_place(|| {
+                    self.tokio_handle
+                        .block_on(store2.delete_page_from(vm_id, page_id, replica_idx))
+                });
             }
 
             // Démarquage + mise à jour capacité (item 3)

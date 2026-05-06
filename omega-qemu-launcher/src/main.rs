@@ -314,6 +314,13 @@ fn prepare(args: PrepareArgs) -> Result<QemuLaunchState> {
         }
     }
 
+    // Supprimer les métadonnées d'un run précédent : wait_for_metadata retourne
+    // dès que le fichier existe, sans vérifier que le PID qu'il contient est vivant.
+    // Si on ne supprime pas, QEMU reçoit /proc/<ancien_pid>/fd/<fd> qui n'existe plus.
+    if metadata_path.exists() {
+        fs::remove_file(&metadata_path).ok();
+    }
+
     let stdout = open_log_file(&log_path)?;
     let stderr = open_log_file(&log_path)?;
 
@@ -337,8 +344,6 @@ fn prepare(args: PrepareArgs) -> Result<QemuLaunchState> {
         .arg(&args.log_format)
         .arg("--store-timeout-ms")
         .arg(args.store_timeout_ms.to_string())
-        .arg("--run-dir")
-        .arg(&args.run_dir)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .stdin(Stdio::null())
@@ -424,17 +429,194 @@ fn exec_qemu(args: ExecQemuArgs) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// Migration entrante : démarre l'agent omega local, injecte (ou patche) le backend
+/// mémoire omega, puis exec() QEMU avec argv[0]="/usr/bin/kvm" pour que
+/// parse_cmdline de Proxmox reconnaisse le processus.
+fn exec_proxmox_incoming(args: ExecProxmoxArgs, vm_id: u32, size_mib: usize) -> Result<i32> {
+    // Les args venant de Proxmox pour le nœud cible ne contiennent jamais l'objet
+    // omega (il est injecté à l'exécution, pas dans la config). On distingue tout
+    // de même les deux cas pour le patching de mem-path.
+    let has_omega_object = args.qemu_args.windows(2).any(|w| {
+        w[0] == "-object"
+            && w[1].contains("memory-backend-file")
+            && w[1].contains("mem-path=")
+    });
+
+    let prepare_args = PrepareArgs {
+        vm_id,
+        size_mib,
+        region_mib: Some(size_mib),
+        stores: args.stores,
+        agent_bin: args.agent_bin,
+        run_dir: args.run_dir,
+        metadata_path: None,
+        state_path: None,
+        log_path: None,
+        object_id: args.object_id.clone(),
+        start_timeout_secs: args.start_timeout_secs,
+        log_format: args.log_format,
+        log_level: args.log_level,
+        store_timeout_ms: args.store_timeout_ms,
+        memfd_name: args.memfd_name,
+    };
+    let state = prepare(prepare_args)?;
+
+    // Construire les args QEMU finaux avec le backend omega local.
+    let final_args = if has_omega_object {
+        // L'arg -object est déjà là (cas théorique) : patcher mem-path seulement.
+        patch_migration_mem_path(&args.qemu_args, &state.object_id, &state.metadata)?
+    } else {
+        // Cas normal de migration Proxmox : injecter l'objet omega + patcher -machine.
+        inject_omega_qemu_args(&args.qemu_args, &state.object_id, state.size_mib, &state.metadata)?
+    };
+
+    // exec() : QEMU remplace ce processus → sd_notify depuis le bon PID.
+    // argv[0] = "/usr/bin/kvm" pour que parse_cmdline de Proxmox reconnaisse le process.
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(&args.qemu_bin);
+    cmd.arg0("/usr/bin/kvm")
+        .args(&final_args)
+        .env("OMEGA_QEMU_STATE_PATH", &state.state_path)
+        .env("OMEGA_QEMU_METADATA_PATH", &state.metadata_path)
+        .env("OMEGA_QEMU_AGENT_PID", state.agent_pid.to_string())
+        .env("OMEGA_QEMU_VM_ID", state.vm_id.to_string())
+        .env("OMEGA_QEMU_SIZE_MIB", state.size_mib.to_string());
+    let err = cmd.exec();
+    Err(anyhow::anyhow!(
+        "exec QEMU migration ({}): {}",
+        args.qemu_bin.display(),
+        err
+    ))
+}
+
+/// Remplace mem-path= dans l'arg -object memory-backend-file avec le chemin local.
+fn patch_migration_mem_path(
+    qemu_args: &[String],
+    object_id: &str,
+    metadata: &MemoryBackendMetadata,
+) -> Result<Vec<String>> {
+    let new_path = metadata
+        .proc_fd_path
+        .as_deref()
+        .context("proc_fd_path absent des métadonnées")?;
+
+    let mut out = Vec::with_capacity(qemu_args.len());
+    let mut idx = 0;
+    while idx < qemu_args.len() {
+        if qemu_args[idx] == "-object" {
+            if let Some(next) = qemu_args.get(idx + 1) {
+                if next.contains("memory-backend-file")
+                    && next.contains(&format!("id={object_id}"))
+                    && next.contains("mem-path=")
+                {
+                    let patched = replace_mem_path_in_object_arg(next, new_path);
+                    out.push(qemu_args[idx].clone());
+                    out.push(patched);
+                    idx += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(qemu_args[idx].clone());
+        idx += 1;
+    }
+    Ok(out)
+}
+
+fn replace_mem_path_in_object_arg(arg: &str, new_path: &str) -> String {
+    arg.split(',')
+        .map(|part| {
+            if part.starts_with("mem-path=") {
+                format!("mem-path={new_path}")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Déduit la RAM depuis un arg -object memory-backend-file,size=NM,...
+fn infer_size_mib_from_object_args(args: &[String]) -> Option<usize> {
+    let mut idx = 0;
+    while idx < args.len() {
+        if args[idx] == "-object" {
+            if let Some(next) = args.get(idx + 1) {
+                if next.contains("memory-backend-file") {
+                    for part in next.split(',') {
+                        if let Some(val) = part.strip_prefix("size=") {
+                            return parse_qemu_memory_mib(val);
+                        }
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// Remplace le processus courant par QEMU (exec syscall).
+/// Proxmox crée un scope systemd pour le binaire qu'il lance (/usr/bin/kvm).
+/// En utilisant exec(), QEMU devient le processus principal du scope et peut
+/// envoyer sd_notify directement — sans quoi Proxmox timedout.
+fn exec_bypass(qemu_bin: &Path, qemu_args: &[String]) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(qemu_bin);
+    // Proxmox's parse_cmdline rejects argv[0] not ending in "kvm" or "qemu-*".
+    // kvm.real → /usr/bin/kvm.real → fails the filter → vm_running_locally returns undef.
+    // Use argv[0] = "/usr/bin/kvm" so Proxmox recognises the process.
+    cmd.arg0("/usr/bin/kvm").args(qemu_args);
+    let err = cmd.exec();
+    Err(anyhow::anyhow!(
+        "exec QEMU bypass échoué ({}): {}",
+        qemu_bin.display(),
+        err
+    ))
+}
+
+fn exec_bypass_logged(qemu_bin: &Path, qemu_args: &[String], vm_id: u32) -> Result<i32> {
+    let _ = std::fs::write(
+        format!("/tmp/omega-qemu-{vm_id}-bypass.log"),
+        format!("exec_bypass_logged: {}\n", qemu_args.join(" ")),
+    );
+    exec_bypass(qemu_bin, qemu_args)
+}
+
 fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
+    let is_incoming = args.qemu_args.iter().any(|a| a == "-incoming");
+
     let vm_id = match args.vm_id {
         Some(id) => id,
-        None => infer_vmid_from_qemu_args(&args.qemu_args)
-            .context("impossible de déduire le vm_id depuis les arguments QEMU/Proxmox")?,
+        None => match infer_vmid_from_qemu_args(&args.qemu_args) {
+            Some(id) => id,
+            None => {
+                // Invocation utilitaire (détection flags CPU, etc.) — pas un vrai démarrage VM.
+                return exec_bypass(&args.qemu_bin, &args.qemu_args);
+            }
+        },
     };
     let size_mib = match args.size_mib {
         Some(size) => size,
-        None => infer_size_mib_from_qemu_args(&args.qemu_args)
-            .context("impossible de déduire la RAM guest depuis les arguments QEMU/Proxmox")?,
+        None => match infer_size_mib_from_qemu_args(&args.qemu_args)
+            .or_else(|| infer_size_mib_from_object_args(&args.qemu_args))
+        {
+            Some(size) => size,
+            None if is_incoming => {
+                // Migration sans RAM déductible : bypass sans omega.
+                return exec_bypass(&args.qemu_bin, &args.qemu_args);
+            }
+            None => {
+                bail!("impossible de déduire la RAM guest depuis les arguments QEMU/Proxmox");
+            }
+        },
     };
+
+    if is_incoming {
+        // Migration entrante : démarrer un agent local, patcher mem-path, puis exec().
+        // Le nœud source envoie ses propres chemins /proc/PID/fd/FD qui n'existent pas ici.
+        return exec_proxmox_incoming(args, vm_id, size_mib);
+    }
 
     let prepare_args = PrepareArgs {
         vm_id,
@@ -458,32 +640,27 @@ fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
     let final_qemu_args =
         inject_omega_qemu_args(&args.qemu_args, &state.object_id, state.size_mib, &state.metadata)?;
 
-    // On garde -daemonize (passé par Proxmox).
-    // Séquence QEMU avec -daemonize :
-    //   1. QEMU fork → parent + daemon
-    //   2. daemon : init tous les devices, crée QMP socket + pidfile, signale parent
-    //   3. parent : reçoit le signal, sort 0
-    //   4. cmd.status() ici retourne (rapidement, <3s)
-    // → Proxmox voit exit 0 avant son timeout → plus de "got timeout"
-    // → QEMU daemon reste dans le scope cgroup → scope actif jusqu'à qm stop
-    // → Nettoyage agent : hookscript post-stop appelle omega-qemu-launcher stop
-
+    // exec() remplace ce processus par QEMU.
+    // argv[0] = "/usr/bin/kvm" : convention QEMU "appelé sous le nom kvm → activer KVM",
+    // et parse_cmdline de Proxmox accepte les processus dont argv[0] termine par "kvm".
+    // Sans cela, vm_running_locally() retourne undef et `qm migrate --online` bascule
+    // en migration offline (ou échoue).
+    // Nettoyage agent : hookscript post-stop appelle omega-qemu-launcher stop.
+    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(&args.qemu_bin);
-    cmd.args(&final_qemu_args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+    cmd.arg0("/usr/bin/kvm")
+        .args(&final_qemu_args)
         .env("OMEGA_QEMU_STATE_PATH", &state.state_path)
         .env("OMEGA_QEMU_METADATA_PATH", &state.metadata_path)
         .env("OMEGA_QEMU_AGENT_PID", state.agent_pid.to_string())
         .env("OMEGA_QEMU_VM_ID", state.vm_id.to_string())
         .env("OMEGA_QEMU_SIZE_MIB", state.size_mib.to_string());
-
-    let status = cmd
-        .status()
-        .with_context(|| format!("exécution de {}", args.qemu_bin.display()))?;
-
-    Ok(status.code().unwrap_or(1))
+    let err = cmd.exec();
+    Err(anyhow::anyhow!(
+        "exec QEMU ({}): {}",
+        args.qemu_bin.display(),
+        err
+    ))
 }
 
 fn write_wrapper(args: WriteWrapperArgs) -> Result<PathBuf> {
@@ -668,9 +845,10 @@ fn inject_omega_qemu_args(
     metadata: &MemoryBackendMetadata,
 ) -> Result<Vec<String>> {
     let object_arg = build_omega_object_arg(object_id, size_mib, metadata)?;
-    let mut out = Vec::with_capacity(qemu_args.len() + 4);
+    let mut out = Vec::with_capacity(qemu_args.len() + 6);
     let mut saw_machine = false;
     let mut saw_object = false;
+    let mut saw_accel = false;
     let mut idx = 0;
     while idx < qemu_args.len() {
         let current = &qemu_args[idx];
@@ -695,6 +873,9 @@ fn inject_omega_qemu_args(
                 continue;
             }
         }
+        if current == "-accel" || current == "-enable-kvm" {
+            saw_accel = true;
+        }
         out.push(current.clone());
         idx += 1;
     }
@@ -706,6 +887,14 @@ fn inject_omega_qemu_args(
     if !saw_machine {
         out.push("-machine".into());
         out.push(format!("memory-backend={object_id}"));
+    }
+    // Ensure KVM is explicitly enabled. QEMU auto-enables KVM only when argv[0]
+    // ends in "kvm" — but wrapper scripts can overwrite argv[0], breaking this
+    // convention. Explicit -accel kvm is more robust and ensures consistent
+    // behaviour across all nodes regardless of binary naming.
+    if !saw_accel {
+        out.push("-accel".into());
+        out.push("kvm".into());
     }
 
     Ok(out)

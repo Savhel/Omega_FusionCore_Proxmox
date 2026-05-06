@@ -52,21 +52,31 @@ step()    { echo; echo -e "\033[34m──── $* ────\033[0m"; }
 
 [[ "$(id -u)" == "0" ]] || fail "Ce script doit être exécuté en root"
 
-LAUNCHER_SRC="${ROOT_DIR}/target/release/omega-qemu-launcher"
-AGENT_SRC="${ROOT_DIR}/target/release/node-a-agent"
-DAEMON_SRC="${ROOT_DIR}/target/release/omega-daemon"
-BRIDGE_SRC="${ROOT_DIR}/omega-uffd-bridge/omega-uffd-bridge.so"
+# Les chemins sources peuvent être surchargés via env vars (utile quand les
+# binaires sont déjà copiés sur le nœud par deploy.sh)
+LAUNCHER_SRC="${LAUNCHER_SRC:-${ROOT_DIR}/target/release/omega-qemu-launcher}"
+AGENT_SRC="${AGENT_SRC:-${ROOT_DIR}/target/release/node-a-agent}"
+DAEMON_SRC="${DAEMON_SRC:-${ROOT_DIR}/target/release/omega-daemon}"
+BRIDGE_SRC="${BRIDGE_SRC:-${ROOT_DIR}/omega-uffd-bridge/omega-uffd-bridge.so}"
 
-[[ -x "$LAUNCHER_SRC" ]] || fail "omega-qemu-launcher non compilé — lancez 'make build' d'abord"
-[[ -x "$AGENT_SRC"    ]] || fail "node-a-agent non compilé — lancez 'make build' d'abord"
+[[ -x "$LAUNCHER_SRC" ]] || fail "omega-qemu-launcher introuvable : ${LAUNCHER_SRC}"
+[[ -x "$AGENT_SRC"    ]] || fail "node-a-agent introuvable : ${AGENT_SRC}"
 
 # ─── 1. Installer les binaires ────────────────────────────────────────────────
 
 step "Installation des binaires dans ${INSTALL_DIR}"
 
-install -m 755 "$LAUNCHER_SRC" "${INSTALL_DIR}/omega-qemu-launcher"
-install -m 755 "$AGENT_SRC"    "${INSTALL_DIR}/node-a-agent"
-[[ -x "$DAEMON_SRC" ]] && install -m 755 "$DAEMON_SRC" "${INSTALL_DIR}/omega-daemon" || true
+# Copier uniquement si la source diffère de la destination
+_install_bin() {
+    local src="$1" dst="$2"
+    [[ "$(realpath "$src" 2>/dev/null)" == "$(realpath "$dst" 2>/dev/null)" ]] \
+        && { success "$(basename "$dst") déjà en place"; return; }
+    install -m 755 "$src" "$dst"
+}
+
+_install_bin "$LAUNCHER_SRC" "${INSTALL_DIR}/omega-qemu-launcher"
+_install_bin "$AGENT_SRC"    "${INSTALL_DIR}/node-a-agent"
+[[ -x "$DAEMON_SRC" ]] && _install_bin "$DAEMON_SRC" "${INSTALL_DIR}/omega-daemon" || true
 
 # Bridge LD_PRELOAD (optionnel — absence = pas d'interception uffd QEMU)
 if [[ -f "$BRIDGE_SRC" ]]; then
@@ -170,22 +180,47 @@ systemctl daemon-reload
 systemctl enable omega-daemon.service
 success "Service omega-daemon installé (démarrage manuel : systemctl start omega-daemon)"
 
-# ─── 5. Enregistrement hookscript sur les VMs ─────────────────────────────────
+# ─── 5. Enregistrement hookscript sur toutes les VMs locales ──────────────────
 
-if [[ -n "$OMEGA_VMIDS" ]]; then
-    step "Enregistrement du hookscript sur les VMs : ${OMEGA_VMIDS}"
+step "Enregistrement automatique du hookscript sur toutes les VMs"
 
-    IFS=',' read -ra VMID_LIST <<< "$OMEGA_VMIDS"
-    for vmid in "${VMID_LIST[@]}"; do
-        vmid="${vmid// /}"
-        if qm config "$vmid" &>/dev/null; then
-            qm set "$vmid" --hookscript "local:snippets/${HOOKSCRIPT_NAME}"
-            success "hookscript enregistré sur VM ${vmid}"
-        else
-            warn "VM ${vmid} introuvable sur ce nœud — hookscript non enregistré"
-        fi
-    done
-fi
+registered=0; skipped=0
+while IFS= read -r vmid; do
+    [[ "$vmid" =~ ^[0-9]+$ ]] || continue
+    if qm config "$vmid" 2>/dev/null | grep -q "omega-hook"; then
+        skipped=$((skipped + 1))
+    else
+        qm set "$vmid" --hookscript "local:snippets/${HOOKSCRIPT_NAME}" 2>/dev/null \
+            && { success "hookscript enregistré sur VM ${vmid}"; registered=$((registered + 1)); } \
+            || warn "VM ${vmid} : qm set échoué"
+    fi
+done < <(qm list 2>/dev/null | awk 'NR>1 {print $1}')
+
+info "VMs enregistrées : ${registered}  déjà configurées : ${skipped}"
+
+# ─── 6. Service systemd — auto-enregistrement hookscript toutes les 10s ───────
+
+step "Installation service auto-enregistrement hookscript"
+
+cat > /etc/systemd/system/omega-hookscript-watcher.service <<EOF
+[Unit]
+Description=Omega — auto-enregistrement hookscript sur les nouvelles VMs
+After=pve-cluster.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'while true; do for v in \$(qm list 2>/dev/null | awk "NR>1 {print \$1}"); do qm config \$v 2>/dev/null | grep -q omega-hook || qm set \$v --hookscript local:snippets/${HOOKSCRIPT_NAME} 2>/dev/null; done; sleep 10; done'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable omega-hookscript-watcher.service
+systemctl restart omega-hookscript-watcher.service
+success "service omega-hookscript-watcher actif (toutes les 10s)"
 
 # ─── Résumé ───────────────────────────────────────────────────────────────────
 
@@ -203,8 +238,7 @@ echo "  Service           : systemctl start omega-daemon"
 echo "  Stores B/C        : ${OMEGA_STORES}"
 echo "  Répertoire état   : ${OMEGA_RUN_DIR}"
 echo
-echo "  Pour enregistrer le hookscript sur une VM :"
-echo "    qm set <vmid> --hookscript local:snippets/${HOOKSCRIPT_NAME}"
+echo "  Hookscript auto    : systemctl status omega-hookscript-watcher (toutes les 10s)"
 echo
 echo "  Pour vérifier le wrapper :"
 echo "    ls -la /usr/bin/kvm"

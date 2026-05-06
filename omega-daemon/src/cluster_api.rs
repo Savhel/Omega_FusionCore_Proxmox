@@ -34,6 +34,8 @@ pub fn build_router(state: Arc<NodeState>) -> Router {
         .route("/api/status", get(node_status))
         .route("/api/pages", get(pages_list))
         .route("/api/pages/:vmid", delete(delete_vm_pages))
+        // Compat avec node-bc-store : mêmes noms de champs que son /status
+        .route("/status", get(node_status_compat))
         .with_state(state)
 }
 
@@ -57,6 +59,30 @@ async fn health() -> Json<Value> {
 async fn node_status(State(state): State<Arc<NodeState>>) -> Json<Value> {
     let snap = state.snapshot();
     Json(serde_json::to_value(snap).unwrap_or_else(|_| json!({"error": "serialization"})))
+}
+
+/// GET /status — compat node-bc-store : mêmes champs que status_server.rs
+async fn node_status_compat(State(state): State<Arc<NodeState>>) -> Json<Value> {
+    let snap = state.snapshot();
+    let available_mib = snap.mem_available_kb / 1024;
+    let total_mib     = snap.mem_total_kb / 1024;
+    let (has_gpu, gpu_count) = snap.gpu.as_ref()
+        .map(|g| (g.enabled, if g.enabled { 1u32 } else { 0u32 }))
+        .unwrap_or((false, 0));
+    Json(json!({
+        "node_id":           snap.node_id,
+        "available_mib":     available_mib,
+        "total_mib":         total_mib,
+        "cpu_count":         snap.vcpu_total,
+        "has_gpu":           has_gpu,
+        "gpu_count":         gpu_count,
+        "disk_available_mib": 0u64,
+        "disk_total_mib":    0u64,
+        "ceph_enabled":      false,
+        "vcpu_total":        snap.vcpu_total,
+        "vcpu_free":         snap.vcpu_free,
+        "page_count":        snap.pages_stored,
+    }))
 }
 
 /// GET /api/pages — pages stockées sur ce nœud, par vm_id

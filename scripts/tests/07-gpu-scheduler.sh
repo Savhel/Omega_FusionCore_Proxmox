@@ -50,8 +50,8 @@ t0=$SECONDS
 rotations=0
 last_owner=""
 while [[ $(elapsed $t0) -lt 90 ]]; do
-    owner1=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG1" 2>/dev/null || echo 0)
-    owner2=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG2" 2>/dev/null || echo 0)
+    owner1=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG1" 2>/dev/null) || owner1=0
+    owner2=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG2" 2>/dev/null) || owner2=0
     lock=$(ls /run/omega-gpu-scheduler-*.lock 2>/dev/null | head -1 || echo "aucun")
     printf "\r  [%3ds] VM1 assigns=%-3s  VM2 assigns=%-3s  lock=%s" \
         "$(elapsed $t0)" "$owner1" "$owner2" "$(basename "$lock" 2>/dev/null || echo aucun)"
@@ -60,8 +60,8 @@ done
 echo ""
 
 step "Résultats"
-assigns1=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG1" 2>/dev/null || echo 0)
-assigns2=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG2" 2>/dev/null || echo 0)
+assigns1=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG1" 2>/dev/null) || assigns1=0
+assigns2=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG2" 2>/dev/null) || assigns2=0
 info "VM $VMID1 : $assigns1 assignations GPU"
 info "VM $VMID2 : $assigns2 assignations GPU"
 

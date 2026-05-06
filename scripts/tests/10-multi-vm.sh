@@ -59,7 +59,7 @@ info "total pages dans les stores : $pages_total"
 
 step "Vérification logs : aucune collision de vm_id"
 for log in "${LOGS[@]}"; do
-    errors=$(grep -c "collision\|wrong vm\|vm_id mismatch" "$log" 2>/dev/null || echo 0)
+    errors=$(grep -c "collision\|wrong vm\|vm_id mismatch" "$log" 2>/dev/null) || true
     [[ "$errors" -eq 0 ]] || fail "collision de pages détectée dans $log"
 done
 

@@ -12,6 +12,7 @@
 //! Quand Ceph est activé, disk_available_mib/disk_total_mib reflètent la
 //! capacité **du pool Ceph** (ressource partagée cluster), pas le disque local.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,12 +22,14 @@ use tracing::{debug, info, warn};
 
 use crate::ceph_store::CephStore;
 use crate::hardware;
+use crate::metrics::StoreMetrics;
 
 pub async fn run(
     bind_addr:  String,
     node_id:    String,
     data_path:  String,
     ceph_store: Option<Arc<CephStore>>,
+    metrics:    Arc<StoreMetrics>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(addr = %bind_addr, node = %node_id, "serveur HTTP status démarré");
@@ -46,6 +49,7 @@ pub async fn run(
                 let node_id    = node_id.clone();
                 let data_path  = data_path.clone();
                 let ceph       = ceph_store.clone();
+                let m          = metrics.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 512];
                     let n = match stream.read(&mut buf).await {
@@ -61,8 +65,10 @@ pub async fn run(
                         return;
                     }
 
+                    let page_count = m.pages_stored.load(Ordering::Relaxed);
                     let body = build_status_json(
                         &node_id, has_gpu, gpu_count, &data_path, ceph.as_deref(), ceph_enabled,
+                        page_count,
                     );
                     let resp = format!(
                         "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -84,6 +90,7 @@ fn build_status_json(
     data_path:    &str,
     ceph:         Option<&CephStore>,
     ceph_enabled: bool,
+    page_count:   u64,
 ) -> String {
     let (avail_mib, total_mib) = read_mem_info_mib().unwrap_or((0, 0));
     let cpu_count               = read_cpu_count();
@@ -100,7 +107,7 @@ fn build_status_json(
     let (vcpu_total, vcpu_free) = read_vcpu_pool_info(cpu_count);
 
     format!(
-        r#"{{"node_id":"{node_id}","available_mib":{avail_mib},"total_mib":{total_mib},"cpu_count":{cpu_count},"has_gpu":{has_gpu},"gpu_count":{gpu_count},"disk_available_mib":{disk_avail_mib},"disk_total_mib":{disk_tot_mib},"ceph_enabled":{ceph_enabled},"vcpu_total":{vcpu_total},"vcpu_free":{vcpu_free}}}"#
+        r#"{{"node_id":"{node_id}","available_mib":{avail_mib},"total_mib":{total_mib},"cpu_count":{cpu_count},"has_gpu":{has_gpu},"gpu_count":{gpu_count},"disk_available_mib":{disk_avail_mib},"disk_total_mib":{disk_tot_mib},"ceph_enabled":{ceph_enabled},"vcpu_total":{vcpu_total},"vcpu_free":{vcpu_free},"page_count":{page_count}}}"#
     )
 }
 

@@ -1,23 +1,18 @@
 //! Démon de recherche de migration et compaction du cluster.
 //!
-//! # Trigger exact (point 2)
+//! # Critère de migration (comparaison relative)
 //!
-//! Un nœud candidat est retenu quand :
-//!   `node.available_mib  >  remote_footprint_mib`
-//! où `remote_footprint_mib = region.remote_count() * 4 / 1024` (pages distantes de cette VM).
+//! Un nœud candidat est retenu quand il est **meilleur que le nœud courant** :
+//!   - RAM   : `target.available_mib > local_available_mib()`
+//!   - vCPU  : `target.vcpu_free > local_vcpu_free` (lu depuis omega-vcpu-pool.json)
+//!   - GPU   : veto absolu — si la VM requiert un GPU et que le nœud cible n'en a pas,
+//!             il est rejeté quelle que soit sa RAM ou ses vCPUs.
 //!
-//! Cela signifie que le nœud pourrait localement héberger toutes les pages
-//! que la VM a dû externaliser — la migration l'y remettrait en conditions idéales.
+//! Il suffit qu'**un seul** critère soit meilleur (RAM OU vCPU) pour retenir le candidat
+//! (sous réserve que le veto GPU ne s'applique pas).
+//! On préfère ensuite le nœud qui a le plus de RAM parmi les candidats retenus.
 //!
-//! En fallback : un nœud avec simplement plus de RAM libre que le nœud courant
-//! est aussi acceptable (la VM souffrira peut-être là-bas, mais moins).
-//!
-//! # Vérification des ressources (point 3)
-//!
-//! Avant de déclencher `qm migrate`, le nœud cible doit satisfaire :
-//!   - RAM libre   ≥ vm_min_ram_mib
-//!   - CPU total   ≥ vm_vcpus
-//!   - (disque : délégué à `qm migrate` qui échoue proprement si insuffisant)
+//! Si aucun nœud n'est meilleur sur aucune dimension → pas de migration.
 //!
 //! # Compaction deux VMs (point 5)
 //!
@@ -50,8 +45,8 @@ pub struct MigrationAgent {
     check_interval:     Duration,
     compaction_enabled: bool,
     vm_vcpus:           u32,
-    vm_min_ram_mib:     u64,
     vm_requested_mib:   u64,
+    vm_needs_gpu:       bool,
     uffd_fd:            RawFd,
     /// Levé par le scheduler vCPU quand le pool est saturé.
     /// Influence le niveau d'urgence de la recherche (interval réduit).
@@ -68,8 +63,8 @@ impl MigrationAgent {
         check_interval_secs: u64,
         compaction_enabled:  bool,
         vm_vcpus:            u32,
-        vm_min_ram_mib:      u64,
         vm_requested_mib:    u64,
+        vm_needs_gpu:        bool,
         uffd_fd:             RawFd,
         cpu_pressure:        Arc<AtomicBool>,
     ) -> Self {
@@ -81,8 +76,8 @@ impl MigrationAgent {
             check_interval: Duration::from_secs(check_interval_secs.max(10)),
             compaction_enabled,
             vm_vcpus,
-            vm_min_ram_mib,
             vm_requested_mib,
+            vm_needs_gpu,
             uffd_fd,
             cpu_pressure,
         }
@@ -114,55 +109,44 @@ impl MigrationAgent {
     }
 
     async fn search_and_migrate(&self) -> Result<bool> {
-        let local_avail    = local_available_mib();
-        let remote_count   = self.region.remote_count();
-        let remote_mib     = (remote_count * PAGE_SIZE / 1024 / 1024) as u64;
-        let nodes          = self.cluster.snapshot().await;
+        let local_avail     = local_available_mib();
+        let local_vcpu_free = read_local_vcpu_free();
+        let remote_count    = self.region.remote_count();
+        let remote_mib      = (remote_count * PAGE_SIZE / 1024 / 1024) as u64;
+        let nodes           = self.cluster.snapshot().await;
 
         info!(
-            vm_id         = self.vm_id,
-            remote_pages  = remote_count,
+            vm_id           = self.vm_id,
+            remote_pages    = remote_count,
             remote_mib,
             local_avail_mib = local_avail,
+            local_vcpu_free,
+            vm_needs_gpu    = self.vm_needs_gpu,
             "recherche migration"
         );
 
-        // ── Trigger exact (point 2) ───────────────────────────────────────────
-        // Nœud qui pourrait absorber tout le footprint distant de la VM
-        let ideal = nodes.iter()
+        // Candidats : différents du nœud courant ET meilleurs sur au moins une dimension
+        let best = nodes.iter()
             .filter_map(|n| n.last_status.as_ref().map(|s| (n, s)))
-            .filter(|(_, s)| s.available_mib > remote_mib && self.passes_resource_check(s))
+            .filter(|(_, s)| s.node_id != self.current_node)
+            .filter(|(_, s)| self.is_better_candidate(s, local_avail, local_vcpu_free))
             .max_by_key(|(_, s)| s.available_mib);
 
-        if let Some((node, status)) = ideal {
+        if let Some((_, status)) = best {
             info!(
-                vm_id        = self.vm_id,
-                target       = %status.node_id,
-                avail        = status.available_mib,
-                remote_mib,
-                "trigger exact : nœud peut absorber toutes les pages distantes"
-            );
-            return self.trigger_migration(&status.node_id).await.map(|_| true);
-        }
-
-        // ── Fallback : nœud avec plus de RAM libre que le nœud courant ────────
-        let fallback = nodes.iter()
-            .filter_map(|n| n.last_status.as_ref().map(|s| (n, s)))
-            .filter(|(_, s)| s.available_mib > local_avail && self.passes_resource_check(s))
-            .max_by_key(|(_, s)| s.available_mib);
-
-        if let Some((node, status)) = fallback {
-            info!(
-                vm_id        = self.vm_id,
-                target       = %status.node_id,
-                avail        = status.available_mib,
+                vm_id           = self.vm_id,
+                target          = %status.node_id,
+                target_ram      = status.available_mib,
+                target_vcpu_free = status.vcpu_free,
                 local_avail,
-                "fallback : nœud meilleur que nœud courant"
+                local_vcpu_free,
+                remote_mib,
+                "nœud candidat retenu — déclenchement migration"
             );
             return self.trigger_migration(&status.node_id).await.map(|_| true);
         }
 
-        // ── Compaction si activée ─────────────────────────────────────────────
+        // Compaction si activée et aucun nœud directement meilleur
         if self.compaction_enabled {
             return self.try_compaction(&nodes).await;
         }
@@ -170,40 +154,37 @@ impl MigrationAgent {
         Ok(false)
     }
 
-    /// Vérifie que le nœud cible a les ressources minimales pour héberger la VM.
+    /// Retourne `true` si le nœud cible est meilleur que le nœud courant.
     ///
-    /// - RAM : available_mib ≥ vm_min_ram_mib
-    /// - CPU : vcpu_free ≥ 1 si reporté, sinon cpu_count ≥ vm_vcpus (compat.)
-    fn passes_resource_check(&self, status: &NodeStatus) -> bool {
-        if status.available_mib < self.vm_min_ram_mib {
+    /// - Veto absolu : GPU requis ET absent sur le cible → rejeté.
+    /// - Sinon : meilleur sur RAM OU meilleur sur vCPU libres.
+    fn is_better_candidate(&self, target: &NodeStatus, local_avail: u64, local_vcpu_free: u32) -> bool {
+        // Veto GPU
+        if self.vm_needs_gpu && !target.has_gpu {
+            debug!(node = %target.node_id, "rejeté : GPU requis mais absent");
+            return false;
+        }
+
+        let better_ram  = target.available_mib > local_avail;
+        let better_vcpu = if target.vcpu_total > 0 {
+            target.vcpu_free > local_vcpu_free
+        } else {
+            // Nœud sans tracking omega-vcpu — fallback statique
+            target.cpu_count >= self.vm_vcpus
+        };
+
+        if !better_ram && !better_vcpu {
             debug!(
-                node    = %status.node_id,
-                avail   = status.available_mib,
-                needed  = self.vm_min_ram_mib,
-                "ressource check : RAM insuffisante"
+                node         = %target.node_id,
+                target_ram   = target.available_mib,
+                local_ram    = local_avail,
+                target_vcpu  = target.vcpu_free,
+                local_vcpu   = local_vcpu_free,
+                "rejeté : pas meilleur que le nœud courant"
             );
             return false;
         }
-        // Si le nœud expose vcpu_total, on vérifie les slots libres.
-        // Sinon, on revient au check statique cpu_count ≥ vm_vcpus.
-        if status.vcpu_total > 0 {
-            if status.vcpu_free == 0 {
-                debug!(
-                    node       = %status.node_id,
-                    vcpu_total = status.vcpu_total,
-                    "ressource check : aucun vCPU libre sur ce nœud"
-                );
-                return false;
-            }
-        } else if status.cpu_count < self.vm_vcpus {
-            debug!(
-                node    = %status.node_id,
-                cpus    = status.cpu_count,
-                needed  = self.vm_vcpus,
-                "ressource check : CPU insuffisant"
-            );
-            return false;
-        }
+
         true
     }
 
@@ -246,6 +227,9 @@ impl MigrationAgent {
 
         if out.status.success() {
             info!(vm_id = self.vm_id, target = target_node, "migration réussie");
+            // Remettre cpu.weight au défaut : la VM redémarre sur le nœud cible
+            // avec un scheduler propre, le boost n'a plus de raison d'être ici.
+            crate::vcpu_scheduler::reset_cpu_weight(self.vm_id);
             Ok(())
         } else {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -404,6 +388,19 @@ fn find_migration_combo<'a>(
     }
 
     None
+}
+
+// ─── Helpers locaux ───────────────────────────────────────────────────────────
+
+/// Lit le pool vCPU partagé et retourne le nombre de vCPUs libres sur ce nœud.
+/// Retourne 0 si le fichier n'existe pas encore (pool non initialisé).
+fn read_local_vcpu_free() -> u32 {
+    use crate::vcpu_scheduler::NodeVCpuPool;
+    std::fs::read_to_string(crate::vcpu_scheduler::POOL_PATH)
+        .ok()
+        .and_then(|s| serde_json::from_str::<NodeVCpuPool>(&s).ok())
+        .map(|p| p.free_vcpus())
+        .unwrap_or(0)
 }
 
 // ─── Inventaire cluster ───────────────────────────────────────────────────────

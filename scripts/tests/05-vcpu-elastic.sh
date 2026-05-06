@@ -14,6 +14,10 @@ require_bin qm
 qm status "$VMID" | grep -q "running" || fail "VM $VMID n'est pas démarrée (qm start $VMID)"
 pass "VM $VMID en cours d'exécution"
 
+step "Remise à 1 vCPU (état de référence)"
+qm set "$VMID" --vcpus 1 &>/dev/null || true
+sleep 1
+
 step "État initial vCPU"
 vcpus_init=$(qm config "$VMID" | grep "^vcpus:" | awk '{print $2}' || echo "1")
 info "vCPUs actuels : $vcpus_init"
@@ -52,10 +56,8 @@ else
 fi
 
 step "Simulation charge CPU (stress-ng dans la VM — 60s)"
-info "Lance stress-ng dans la VM : qm guest exec $VMID -- stress-ng --cpu 0 --timeout 60s"
-info "(ou depuis l'intérieur de la VM)"
-qm guest exec "$VMID" -- stress-ng --cpu 0 --timeout 60s &>/dev/null &
-STRESS_PID=$!
+vm_cpu_stress "$VMID" 60
+STRESS_PID=${_PIDS[-1]:-0}
 
 step "Surveillance scale-up pendant 70s"
 t0=$SECONDS

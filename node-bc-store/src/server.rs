@@ -102,7 +102,7 @@ impl AnyStore {
 ///
 /// `prebuilt_ceph` : CephStore déjà construit par main (partagé avec le status server).
 /// Si `None` et que `cfg.ceph_enabled`, on le reconstruit ici (usage legacy).
-pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>) -> Result<()> {
+pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Arc<StoreMetrics>) -> Result<()> {
     let listener = TcpListener::bind(&cfg.listen).await?;
 
     // ── TLS optionnel ─────────────────────────────────────────────────────────
@@ -121,8 +121,6 @@ pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>) -> Result<(
     };
 
     info!(node_id = %cfg.node_id, listen = %cfg.listen, tls = cfg.tls_enabled, "store démarré");
-
-    let metrics = Arc::new(StoreMetrics::default());
 
     // Construire le store selon la configuration
     let store: Arc<AnyStore> = if let Some(ceph) = prebuilt_ceph {

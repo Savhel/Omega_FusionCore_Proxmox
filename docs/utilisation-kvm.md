@@ -490,14 +490,16 @@ curl -s -X DELETE http://10.10.0.11:9300/control/pages/101
 
 Plutôt que d'utiliser `omega-daemon`, on peut déployer les composants individuellement. C'est le mode recommandé pour tester les nouvelles fonctionnalités (vCPU élastique, GPU, Ceph, orphan cleaner).
 
-### Stores (pve2 et pve3)
+Tous les nœuds font tourner un store. Chaque agent cible les stores des autres nœuds.
+
+### Stores (sur chaque nœud)
 
 ```bash
 # Variables d'environnement complètes
 cat > /etc/omega/store.env << 'EOF'
 STORE_LISTEN=0.0.0.0:9100
 STORE_STATUS_LISTEN=0.0.0.0:9200        # HTTP status (RAM dispo, vcpu_total/free, ceph_enabled)
-STORE_NODE_ID=pve2
+STORE_NODE_ID=$(hostname)
 STORE_DATA_PATH=/var/lib/omega-store
 STORE_MAX_PAGES=0                        # 0 = illimité
 STORE_ORPHAN_CHECK_INTERVAL_SECS=300     # nettoyage orphelins toutes les 5 min
@@ -512,13 +514,14 @@ EOF
 node-bc-store \
   --listen 0.0.0.0:9100 \
   --status-listen 0.0.0.0:9200 \
-  --node-id pve2 \
+  --node-id $(hostname) \
   --store-data-path /var/lib/omega-store
 ```
 
-### Agent (pve1, une instance par VM)
+### Agent (une instance par VM, sur le nœud qui l'héberge)
 
 ```bash
+# Adapter STORES = les autres nœuds (pas le nœud local)
 cat > /etc/omega/agent-9001.env << 'EOF'
 AGENT_STORES=10.10.0.12:9100,10.10.0.13:9100
 AGENT_STATUS_ADDRS=10.10.0.12:9200,10.10.0.13:9200

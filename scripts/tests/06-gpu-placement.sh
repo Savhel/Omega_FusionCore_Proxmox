@@ -16,7 +16,7 @@ qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée"
 
 step "Détection GPU sur les nœuds du cluster"
 gpu_found=false
-for node in pve1 pve2 pve3; do
+for node in "${OMEGA_NODES_ARR[@]}"; do
     if ssh -o ConnectTimeout=3 "root@${node}" \
         "ls /sys/bus/pci/devices/*/class 2>/dev/null | xargs grep -l '^0x03' 2>/dev/null | head -1" \
         2>/dev/null | grep -q .; then
@@ -39,8 +39,8 @@ step "Démarrage agent GPU placement"
 LOG_AGENT="/tmp/omega-agent-gpu.log"
 _TMPFILES+=("$LOG_AGENT")
 "$AGENT_BIN" \
-    --stores "${PVE2}:9100,${PVE3}:9100" \
-    --status-addrs "${PVE2}:9200,${PVE3}:9200" \
+    --stores "$STORES_CSV" \
+    --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
     --vm-requested-mib 2048 \
     --region-mib 2048 \

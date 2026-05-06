@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # Hookscript Proxmox VE pour l'agent omega-qemu-remote-memory.
 #
-# Installation (sur le nœud agent, ex: pve1) :
+# Installation (sur chaque nœud du cluster) :
 #   cp omega-hook.pl /var/lib/vz/snippets/
 #   chmod +x /var/lib/vz/snippets/omega-hook.pl
 #   qm set <vmid> --hookscript local:snippets/omega-hook.pl
@@ -14,21 +14,31 @@ use warnings;
 use POSIX qw(setsid);
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION DU CLUSTER — à adapter à votre infrastructure
+# CONFIGURATION DU CLUSTER
+# Définir OMEGA_NODES dans l'environnement (ou dans /etc/omega/cluster.env) :
+#   OMEGA_NODES=192.168.1.1,192.168.1.2,192.168.1.3
+# Le nœud courant (hostname -I) est automatiquement exclu de la liste des stores.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Nœuds stores (IP ou hostname résolvable depuis le nœud agent).
-# Ajouter autant de nœuds que nécessaire.
-my @STORE_NODES = (
-    '10.10.0.12',   # pve2
-    '10.10.0.13',   # pve3
-    # '10.10.0.14', # pve4
-    # '10.10.0.15', # pve5
-);
+my $STORE_PORT  = $ENV{OMEGA_STORE_PORT}  // 9100;
+my $STATUS_PORT = $ENV{OMEGA_STATUS_PORT} // 9200;
 
-# Ports (identiques sur tous les nœuds stores)
-my $STORE_PORT  = 9100;   # TCP — protocole pages
-my $STATUS_PORT = 9200;   # HTTP — GET /status
+# Charger /etc/omega/cluster.env si OMEGA_NODES n'est pas déjà dans l'env
+if (!$ENV{OMEGA_NODES} && -f '/etc/omega/cluster.env') {
+    open my $fh, '<', '/etc/omega/cluster.env' or die;
+    while (<$fh>) {
+        chomp; next if /^\s*#/ || !/=/;
+        my ($k, $v) = split /=/, $_, 2;
+        $ENV{$k} = $v unless exists $ENV{$k};
+    }
+}
+# Si OMEGA_NODES absent (ex: nœud cible pendant migration live), sortir proprement.
+# Le hookscript ne peut rien faire sans configuration — mais ne doit pas bloquer QEMU.
+exit 0 unless $ENV{OMEGA_NODES};
+
+# Exclure le nœud courant de la liste des stores
+my $self_ip = `hostname -I 2>/dev/null`; chomp $self_ip; $self_ip =~ s/\s.*//;
+my @STORE_NODES = grep { $_ ne $self_ip } split /,/, $ENV{OMEGA_NODES};
 
 # ── Chaînes générées automatiquement depuis @STORE_NODES ─────────────────────
 my $STORES       = join(',', map { "$_:$STORE_PORT"  } @STORE_NODES);

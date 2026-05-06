@@ -45,9 +45,12 @@ async fn start_store(port: u16) -> String {
         orphan_check_interval_secs:   0,
         orphan_grace_secs:            600,
         proxmox_api_url:              "".into(),
+        tls_enabled:                  false,
+        tls_dir:                      "/tmp/omega-test-tls".into(),
     };
     tokio::spawn(async move {
-        node_bc_store::server::run(cfg, None).await.unwrap();
+        let metrics = std::sync::Arc::new(node_bc_store::metrics::StoreMetrics::default());
+        node_bc_store::server::run(cfg, None, metrics).await.unwrap();
     });
 
     // Attendre que le store soit prêt (timeout 2 s).
@@ -75,7 +78,7 @@ fn make_region(
     vm_requested_mib: u64,
 ) -> Arc<MemoryRegion> {
     let handle  = tokio::runtime::Handle::current();
-    let store   = Arc::new(RemoteStorePool::new(vec![store_addr.clone()], 2000));
+    let store   = Arc::new(RemoteStorePool::new(vec![store_addr.clone()], 2000, vec![]));
     let metrics = Arc::new(AgentMetrics::default());
     let cluster = Arc::new(ClusterState::new(
         vec![store_addr],

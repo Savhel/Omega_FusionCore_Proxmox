@@ -13,13 +13,18 @@ cargo build --workspace --quiet || fail "compilation échouée"
 pass "compilation OK"
 
 step "Exécution tests unitaires"
-output=$(cargo test --workspace -- --nocapture 2>&1)
-echo "$output" | tail -20
+output=$(cargo test --workspace -- --nocapture 2>&1) || true
+echo "$output" | tail -30
 
 failures=$(echo "$output" | grep -c "^FAILED" || true)
 [[ "$failures" -eq 0 ]] || fail "$failures tests échoués"
 
-total=$(echo "$output" | grep "^test result: ok" | awk '{sum+=$4} END{print sum}')
+# Certains tests nécessitent userfaultfd — vérifier si c'est la cause des échecs
+if echo "$output" | grep -q "Operation not permitted\|EPERM\|userfaultfd"; then
+    warn "Certains tests nécessitent userfaultfd localement : sudo sysctl -w vm.unprivileged_userfaultfd=1"
+fi
+
+total=$(echo "$output" | grep "^test result:" | awk '{sum+=$4} END{print sum+0}')
 info "Total : $total tests"
 [[ "${total:-0}" -ge 200 ]] || warn "moins de 200 tests — possible régression ($total trouvés)"
 

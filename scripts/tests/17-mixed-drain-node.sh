@@ -9,17 +9,42 @@ source "$(dirname "$0")/lib.sh"
 DRAIN_NODE="${1:-$COMPUTE_NODE}"; shift || true
 VMS_TO_DRAIN=("${@}")
 
+# pvesh retourne le nom d'hôte Proxmox (ex: "pve"), pas l'IP.
+# On résout DRAIN_NODE (IP ou nom) en nom d'hôte Proxmox via ssh.
+DRAIN_NODE_PVE=$(ssh -o ConnectTimeout=3 "root@${DRAIN_NODE}" "hostname" 2>/dev/null || echo "$DRAIN_NODE")
+
 # Si pas de VMs passées en argument, détecter automatiquement les VMs du nœud
 if [[ ${#VMS_TO_DRAIN[@]} -eq 0 ]]; then
-    info "Détection automatique des VMs sur $DRAIN_NODE..."
+    info "Détection automatique des VMs sur $DRAIN_NODE (hostname pvesh: $DRAIN_NODE_PVE)..."
     mapfile -t VMS_TO_DRAIN < <(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | \
         python3 -c "
 import sys, json
 vms = json.load(sys.stdin)
+drain = '$DRAIN_NODE_PVE'
 for v in vms:
-    if v.get('node') == '$DRAIN_NODE' and v.get('status') == 'running':
+    if v.get('node') == drain and v.get('status') == 'running':
         print(v['vmid'])
 " 2>/dev/null || echo "")
+fi
+
+# Si toujours aucune VM (ex: déjà migrée par M5), trouver la VM sur n'importe quel nœud
+if [[ ${#VMS_TO_DRAIN[@]} -eq 0 ]]; then
+    info "$DRAIN_NODE vide — recherche de VMs running sur le cluster..."
+    result=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | \
+        python3 -c "
+import sys, json
+vms = [v for v in json.load(sys.stdin) if v.get('status') == 'running']
+if vms:
+    v = vms[0]
+    print(v.get('node',''), v['vmid'])
+" 2>/dev/null || echo "")
+    if [[ -n "$result" ]]; then
+        new_pve="${result%% *}"; new_vmid="${result##* }"
+        DRAIN_NODE=$(_pve_node_to_ip "$new_pve")
+        DRAIN_NODE_PVE="$new_pve"
+        VMS_TO_DRAIN=("$new_vmid")
+        info "VM $new_vmid trouvée sur $DRAIN_NODE_PVE — drain adapté"
+    fi
 fi
 
 header "Test M7 — Drain nœud $DRAIN_NODE (${#VMS_TO_DRAIN[@]} VMs)"
@@ -28,7 +53,7 @@ print_cluster_config
 step "Prérequis"
 require_cluster
 [[ $(node_count) -ge 2 ]] || fail "au moins 2 nœuds requis pour drainer"
-[[ ${#VMS_TO_DRAIN[@]} -ge 1 ]] || fail "aucune VM à drainer sur $DRAIN_NODE"
+[[ ${#VMS_TO_DRAIN[@]} -ge 1 ]] || fail "aucune VM à drainer sur le cluster"
 info "VMs à drainer : ${VMS_TO_DRAIN[*]}"
 
 step "État initial"
@@ -97,16 +122,24 @@ target_idx=0
 
 for vmid in "${VMS_TO_DRAIN[@]}"; do
     target="${TARGET_NODES[$((target_idx % ${#TARGET_NODES[@]}))]}"
+    target_pve=$(_ip_to_pve_node "$target")
     ((target_idx++)) || true
-    info "Migration VM $vmid → $target (live)..."
+    # Éjecter les CD-ROMs — qm commands must run on the source node (DRAIN_NODE)
+    ssh -o ConnectTimeout=5 "root@${DRAIN_NODE}" \
+        "qm config $vmid 2>/dev/null | grep 'media=cdrom' | cut -d: -f1 | while read drv; do
+             qm set $vmid \"--\${drv}\" none 2>/dev/null || true
+         done" 2>/dev/null || true
+    info "Migration VM $vmid → $target (pvesh: $target_pve, live)..."
     t_vm=$SECONDS
-    if qm migrate "$vmid" "$target" --online 2>&1 | tee "/tmp/omega-m7-migrate-${vmid}.log"; then
+    if ssh -o ConnectTimeout=5 "root@${DRAIN_NODE}" \
+        "qm migrate $vmid $target_pve --online" 2>&1 | tee "/tmp/omega-m7-migrate-${vmid}.log"; then
         migrated+=("$vmid")
         info "VM $vmid migrée vers $target en $(elapsed $t_vm)s"
     else
         failed_migration+=("$vmid")
         warn "Migration VM $vmid échouée — tentative offline..."
-        qm migrate "$vmid" "$target" 2>&1 || warn "Migration offline VM $vmid aussi échouée"
+        ssh -o ConnectTimeout=5 "root@${DRAIN_NODE}" \
+            "qm migrate $vmid $target_pve" 2>&1 || warn "Migration offline VM $vmid aussi échouée"
     fi
 done
 
@@ -117,14 +150,15 @@ echo ""
 all_ok=true
 for vmid in "${VMS_TO_DRAIN[@]}"; do
     node_final=$(vm_node "$vmid")
-    running=$(qm status "$vmid" 2>/dev/null | grep -c "running" || echo 0)
-    if [[ "$node_final" != "$DRAIN_NODE" ]] && [[ "$running" -gt 0 ]]; then
+    vm_status=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | \
+        python3 -c "import sys,json; vms=[v for v in json.load(sys.stdin) if v['vmid']==$vmid]; print(vms[0]['status'] if vms else 'unknown')" 2>/dev/null || echo "unknown")
+    if [[ "$node_final" != "$DRAIN_NODE" ]] && [[ "$vm_status" == "running" ]]; then
         echo -e "  ${GREEN}✓${RESET} VM $vmid : sur $node_final (running)"
     elif [[ "$node_final" == "$DRAIN_NODE" ]]; then
         echo -e "  ${RED}✗${RESET} VM $vmid : toujours sur $DRAIN_NODE"
         all_ok=false
     else
-        echo -e "  ${YELLOW}?${RESET} VM $vmid : nœud=$node_final status=?"
+        echo -e "  ${YELLOW}?${RESET} VM $vmid : nœud=$node_final status=$vm_status"
     fi
 done
 
@@ -136,7 +170,7 @@ vms_remaining=$(pvesh get /cluster/resources --type vm --output-format json 2>/d
     python3 -c "
 import sys,json
 vms = json.load(sys.stdin)
-count = sum(1 for v in vms if v.get('node')=='$DRAIN_NODE' and v.get('status')=='running')
+count = sum(1 for v in vms if v.get('node')=='$DRAIN_NODE_PVE' and v.get('status')=='running')
 print(count)
 " 2>/dev/null || echo "?")
 info "VMs encore sur $DRAIN_NODE : $vms_remaining"

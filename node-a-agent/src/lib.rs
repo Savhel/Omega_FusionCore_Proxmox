@@ -1,3 +1,4 @@
+pub mod balloon;
 pub mod clock_eviction;
 pub mod cluster;
 pub mod compaction;

@@ -8,9 +8,11 @@ Ce guide suppose que vous avez un cluster Proxmox VE de 3 machines physiques fon
 
 | Nœud | IP | Hostname | Rôle |
 |------|----|----------|------|
-| pve1 | 192.168.1.11 | pve1.monlab.local | Nœud principal |
-| pve2 | 192.168.1.12 | pve2.monlab.local | Nœud secondaire |
-| pve3 | 192.168.1.13 | pve3.monlab.local | Nœud secondaire |
+| pve1 | 192.168.1.11 | pve1.monlab.local | Nœud (héberge VMs + store) |
+| pve2 | 192.168.1.12 | pve2.monlab.local | Nœud (héberge VMs + store) |
+| pve3 | 192.168.1.13 | pve3.monlab.local | Nœud (héberge VMs + store) |
+
+Tous les nœuds sont identiques. pve1 héberge aussi le contrôleur (arbitraire — configurable via `OMEGA_CONTROLLER`).
 
 ---
 
@@ -88,21 +90,25 @@ sysctl -p
 
 ---
 
-## 2. Compiler et installer le daemon
+## 2. Compiler et déployer les binaires
+
+La compilation se fait sur la machine de dev, le déploiement via `deploy.sh` ou manuellement.
 
 ```bash
-# Sur chaque nœud physique
-cd /opt
-git clone https://github.com/votre-org/omega-remote-paging.git
-cd omega-remote-paging
-
-# Build optimisé pour la machine locale
+# Sur la machine de dev — compiler
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-# Installer
-install -m 755 target/release/omega-daemon   /usr/local/bin/
-install -m 755 target/release/node-bc-store  /usr/local/bin/
-install -m 755 target/release/node-a-agent   /usr/local/bin/
+# Déployer sur tous les nœuds en une commande (lit scripts/cluster.conf)
+OMEGA_NODES="pve1,pve2,pve3" OMEGA_CONTROLLER="pve1" bash scripts/deploy.sh
+```
+
+Ou manuellement sur chaque nœud (même procédure pour tous) :
+
+```bash
+# Sur chaque nœud physique — installer les binaires
+install -m 755 /tmp/omega-daemon         /usr/local/bin/
+install -m 755 /tmp/node-a-agent         /usr/local/bin/
+install -m 755 /tmp/omega-qemu-launcher  /usr/local/bin/
 
 # Répertoires
 mkdir -p /etc/omega /var/log/omega /var/lib/omega/store /run/omega
@@ -263,7 +269,7 @@ nano /opt/omega-remote-paging/scripts/setup_qos.sh
 
 ## 5. Configurer le contrôleur Python
 
-Le contrôleur tourne sur **pve1** et communique avec les 3 nœuds.
+Le contrôleur tourne sur **un seul nœud** (pve1 par défaut — arbitraire) et communique avec tous les nœuds.
 
 ### 5.1 Installer l'environnement
 
@@ -529,11 +535,11 @@ Importer le dashboard Grafana depuis `docs/grafana-dashboard.json` (si disponibl
 
 ```bash
 # 1. Drainer le nœud depuis le controller
-omega-controller drain-node \
-    --node-a http://192.168.1.11:9300 \
-    --node-b http://192.168.1.12:9300 \
-    --node-c http://192.168.1.13:9300 \
-    --source-node node-b
+python3 -m controller.main drain-node \
+    --node http://192.168.1.11:9300 \
+    --node http://192.168.1.12:9300 \
+    --node http://192.168.1.13:9300 \
+    --source-node pve2
 
 # 2. Vérifier que le nœud n'héberge plus de VM
 curl -s http://192.168.1.12:9200/api/status | python3 -m json.tool | grep -A5 local_vms
@@ -558,11 +564,11 @@ curl -s http://192.168.1.11:9200/health
 Si on veut seulement voir le plan sans déclencher les migrations :
 
 ```bash
-omega-controller drain-node \
-    --node-a http://192.168.1.11:9300 \
-    --node-b http://192.168.1.12:9300 \
-    --node-c http://192.168.1.13:9300 \
-    --source-node node-b \
+python3 -m controller.main drain-node \
+    --node http://192.168.1.11:9300 \
+    --node http://192.168.1.12:9300 \
+    --node http://192.168.1.13:9300 \
+    --source-node pve2 \
     --dry-run
 ```
 
@@ -632,7 +638,9 @@ Le daemon est async (tokio) et scale bien. L'agent uffd utilise un thread par d�
 
 Sur cluster physique, le déploiement standalone permet d'activer toutes les fonctionnalités (vCPU élastique, GPU passthrough, Ceph store, orphan cleaner) sans passer par omega-daemon.
 
-### Stores sur pve2 et pve3
+Tous les nœuds font tourner un store. Chaque agent cible les stores des autres nœuds.
+
+### Stores (sur chaque nœud)
 
 ```bash
 # Prérequis Ceph (si Ceph utilisé)
@@ -642,7 +650,7 @@ apt install librados-dev    # fournit librados.so (symlink dev requis)
 node-bc-store \
   --listen 0.0.0.0:9100 \
   --status-listen 0.0.0.0:9200 \
-  --node-id pve2 \
+  --node-id $(hostname) \
   --store-data-path /var/lib/omega-store
 
 # Variables complètes
@@ -653,12 +661,13 @@ STORE_CEPH_POOL=omega-pages
 STORE_STATUS_LISTEN=0.0.0.0:9200      # expose vcpu_total/free, ceph_enabled
 ```
 
-### Agent sur pve1 (par VM)
+### Agent (par VM, sur le nœud qui l'héberge)
 
 ```bash
+# Adapter STORES = les autres nœuds (pas le nœud local)
 node-a-agent \
-  --stores 10.10.0.12:9100,10.10.0.13:9100 \
-  --status-addrs 10.10.0.12:9200,10.10.0.13:9200 \
+  --stores 192.168.1.12:9100,192.168.1.13:9100 \
+  --status-addrs 192.168.1.12:9200,192.168.1.13:9200 \
   --vm-id 9001 \
   --vm-requested-mib 2048 \
   --region-mib 2048 \

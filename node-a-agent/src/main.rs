@@ -21,6 +21,7 @@ use node_a_agent::migration::MigrationAgent;
 use node_a_agent::remote::RemoteStorePool;
 use node_a_agent::shared_memory::{MemoryBackendKind, MemoryBackendOptions};
 use node_a_agent::uffd::{spawn_fault_handler_thread, UffdHandle};
+use node_a_agent::balloon::BalloonManager;
 use node_a_agent::vcpu_scheduler::VCpuScheduler;
 
 #[tokio::main]
@@ -214,10 +215,35 @@ async fn main() -> Result<()> {
         "scheduler vCPU élastique activé"
     );
 
+    // ── Balloon thin-provisioning ─────────────────────────────────────────────
+    if cfg.balloon_enabled {
+        let initial_mib = cfg.balloon_initial_mib.min(cfg.region_mib as u64);
+        let balloon_mgr = Arc::new(BalloonManager::new(
+            cfg.vm_id,
+            initial_mib,
+            cfg.region_mib as u64,
+            cfg.balloon_step_mib,
+            cfg.balloon_interval_secs,
+            cfg.balloon_grow_faults_per_sec,
+            cfg.balloon_shrink_faults_per_sec,
+            metrics.clone(),
+        ));
+        let sd = shutdown_flag.clone();
+        tokio::spawn(async move { balloon_mgr.run(sd).await });
+        info!(
+            vm_id       = cfg.vm_id,
+            initial_mib,
+            max_mib     = cfg.region_mib,
+            step_mib    = cfg.balloon_step_mib,
+            interval_s  = cfg.balloon_interval_secs,
+            "balloon thin-provisioning activé"
+        );
+    }
+
     // ── Exécution ─────────────────────────────────────────────────────────────
     match cfg.mode.as_str() {
         "demo"   => run_demo(&region, &cfg, &metrics, &store, uffd_fd).await?,
-        "daemon" => run_daemon(&shutdown_flag, &region, &cluster, &metrics, &cfg, uffd_fd, cpu_pressure).await,
+        "daemon" => run_daemon(&shutdown_flag, &region, &cluster, &metrics, &cfg, uffd_fd, cpu_pressure, needs_gpu).await,
         m        => bail!("mode inconnu : {m} (valides : demo, daemon)"),
     }
 
@@ -251,6 +277,7 @@ async fn run_daemon(
     cfg:           &Config,
     uffd_fd:       std::os::unix::io::RawFd,
     cpu_pressure:  Arc<AtomicBool>,
+    needs_gpu:     bool,
 ) {
     use tokio::signal::unix::{signal, SignalKind};
     use tokio::time::interval;
@@ -320,7 +347,7 @@ async fn run_daemon(
                     if is_suffering {
                         consecutive_alerts += 1;
                         if cfg.migration_enabled && !migration_spawned {
-                            spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone());
+                            spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone(), needs_gpu);
                             metrics.migration_searches.fetch_add(1, Ordering::Relaxed);
                             migration_spawned = true;
                         }
@@ -335,7 +362,7 @@ async fn run_daemon(
             _ = cpu_ticker.tick(), if cfg.migration_enabled && !migration_spawned => {
                 if cpu_pressure.load(Ordering::Relaxed) {
                     info!("pression vCPU détectée — déclenchement recherche migration");
-                    spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone());
+                    spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone(), needs_gpu);
                     metrics.migration_searches.fetch_add(1, Ordering::Relaxed);
                     migration_spawned = true;
                 }
@@ -375,7 +402,7 @@ async fn run_daemon(
                             consecutive_alerts = 0; // la situation s'est améliorée
                             // Relancer la recherche de migration maintenant que des nœuds sont libérés
                             if cfg.migration_enabled {
-                                spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone());
+                                spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone(), needs_gpu);
                             }
                         }
                     }
@@ -549,13 +576,8 @@ fn spawn_migration_daemon(
     shutdown_flag: &Arc<AtomicBool>,
     uffd_fd:       std::os::unix::io::RawFd,
     cpu_pressure:  Arc<AtomicBool>,
+    needs_gpu:     bool,
 ) {
-    let vm_min_ram = if cfg.vm_min_ram_mib == 0 {
-        cfg.eviction_threshold_mib
-    } else {
-        cfg.vm_min_ram_mib
-    };
-
     let agent = Arc::new(MigrationAgent::new(
         cfg.vm_id,
         cfg.current_node.clone(),
@@ -564,8 +586,8 @@ fn spawn_migration_daemon(
         cfg.migration_interval_secs,
         cfg.compaction_enabled,
         cfg.vm_vcpus,
-        vm_min_ram,
         cfg.vm_requested_mib as u64,
+        needs_gpu,
         uffd_fd,
         cpu_pressure,
     ));

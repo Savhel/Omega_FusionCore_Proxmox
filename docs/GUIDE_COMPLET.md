@@ -177,64 +177,64 @@ Il y a deux façons de l'exécuter.
 Tout se fait depuis ta machine de développement. Ne copie que les binaires nécessaires —
 **ne pas faire `rsync` du dossier `target/`** (plusieurs Go, remplit le disque du nœud).
 
-Le script d'install cherche les binaires dans `target/release/` relatif à son emplacement.
-Il faut donc les y déposer, puis laisser le script les installer dans `/usr/local/bin/`.
+Tous les nœuds reçoivent exactement les mêmes binaires. Chaque nœud est configuré avec
+`OMEGA_STORES` = les autres nœuds du cluster (les siens propres sont exclus).
 
-**Pour chaque nœud, 4 commandes dans l'ordre :**
+**Déploiement en une boucle (adapter les IPs) :**
 
 ```bash
-# ── pve1 (10.10.0.11) ──────────────────────────────────────────
-ssh root@10.10.0.11 "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
+NODES=(10.10.0.11 10.10.0.12 10.10.0.13)
+ALL_STORES=$(IFS=,; echo "${NODES[*]/%/:9100}")   # "10.10.0.11:9100,10.10.0.12:9100,10.10.0.13:9100"
 
-scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher root@10.10.0.11:/opt/omega-remote-paging/target/release/
+for node in "${NODES[@]}"; do
+    ssh root@${node} "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
 
-scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl root@10.10.0.11:/opt/omega-remote-paging/scripts/
+    scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher \
+        root@${node}:/opt/omega-remote-paging/target/release/
 
-ssh root@10.10.0.11 "cd /opt/omega-remote-paging && OMEGA_STORES='10.10.0.12:9100,10.10.0.13:9100' INSTALL_DIR='/usr/local/bin' OMEGA_RUN_DIR='/var/lib/omega-qemu' bash scripts/omega-proxmox-install.sh"
+    scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl \
+        root@${node}:/opt/omega-remote-paging/scripts/
+
+    # Stores distants = tous les autres nœuds
+    node_stores=$(printf '%s\n' "${NODES[@]}" | grep -v "^${node}$" | sed 's/$/:9100/' | paste -sd,)
+
+    ssh root@${node} "cd /opt/omega-remote-paging && \
+        OMEGA_STORES='${node_stores}' \
+        INSTALL_DIR='/usr/local/bin' \
+        OMEGA_RUN_DIR='/var/lib/omega-qemu' \
+        bash scripts/omega-proxmox-install.sh"
+done
 ```
 
-```bash
-# ── pve2 (10.10.0.12) ──────────────────────────────────────────
-ssh root@10.10.0.12 "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
-
-scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher root@10.10.0.12:/opt/omega-remote-paging/target/release/
-
-scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl root@10.10.0.12:/opt/omega-remote-paging/scripts/
-
-ssh root@10.10.0.12 "cd /opt/omega-remote-paging && OMEGA_STORES='10.10.0.11:9100,10.10.0.13:9100' INSTALL_DIR='/usr/local/bin' OMEGA_RUN_DIR='/var/lib/omega-qemu' bash scripts/omega-proxmox-install.sh"
-```
+Ou via le script de déploiement intégré (lit `scripts/cluster.conf`) :
 
 ```bash
-# ── pve3 (10.10.0.13) ──────────────────────────────────────────
-ssh root@10.10.0.13 "mkdir -p /opt/omega-remote-paging/target/release /opt/omega-remote-paging/scripts /var/lib/vz/snippets"
-
-scp target/release/omega-daemon target/release/node-a-agent target/release/omega-qemu-launcher root@10.10.0.13:/opt/omega-remote-paging/target/release/
-
-scp scripts/omega-proxmox-install.sh scripts/proxmox_hook.pl root@10.10.0.13:/opt/omega-remote-paging/scripts/
-
-ssh root@10.10.0.13 "cd /opt/omega-remote-paging && OMEGA_STORES='10.10.0.11:9100,10.10.0.12:9100' INSTALL_DIR='/usr/local/bin' OMEGA_RUN_DIR='/var/lib/omega-qemu' bash scripts/omega-proxmox-install.sh"
+bash scripts/deploy.sh
 ```
 
 ### Nettoyage complet (rollback ou réinstallation)
 
-Pour repartir de zéro sur tous les nœuds :
+Utiliser `scripts/uninstall.sh`. Sur un cluster Proxmox tous les nœuds sont identiques —
+chacun peut héberger des VMs et offrir sa RAM comme store. Le script nettoie donc **tout**
+sur chaque nœud listé dans `OMEGA_NODES`.
+
+Ce qu'il supprime sur chaque nœud :
+
+- Services : `omega-daemon`, `node-bc-store`, `omega-agent@*`
+- Binaires : `omega-daemon`, `node-a-agent`, `omega-qemu-launcher`, `kvm-omega`
+- `/usr/bin/kvm` restauré depuis `kvm.real`
+- Hookscript supprimé de toutes les VMs du nœud
+- Bridge LD_PRELOAD (`omega-uffd-bridge.so`)
+- Certs TLS (`/etc/omega-store/tls`)
+- Répertoires : `/opt/omega-remote-paging`, `/var/lib/omega-qemu`, `/var/log/omega`
+
+**Lancer avec DRY_RUN=1 d'abord pour vérifier :**
 
 ```bash
-for node in 10.10.0.11 10.10.0.12 10.10.0.13; do
-    echo "=== Nettoyage $node ==="
-    ssh root@${node} "
-        systemctl stop omega-daemon 2>/dev/null || true
-        systemctl disable omega-daemon 2>/dev/null || true
-        rm -f /etc/systemd/system/omega-daemon.service
-        systemctl daemon-reload
-        rm -f /usr/local/bin/omega-daemon /usr/local/bin/node-a-agent
-        rm -f /usr/local/bin/omega-qemu-launcher /usr/local/bin/kvm-omega
-        rm -f /var/lib/vz/snippets/omega-hook.pl
-        rm -rf /opt/omega-remote-paging /var/lib/omega-qemu /etc/omega-store
-        [ -f /usr/bin/kvm.real ] && mv /usr/bin/kvm.real /usr/bin/kvm || true
-        echo OK
-    "
-done
+DRY_RUN=1 OMEGA_NODES=pve,pve2,pve3 bash scripts/uninstall.sh
+
+# Supprimer pour de vrai
+OMEGA_NODES=pve,pve2,pve3 bash scripts/uninstall.sh
 ```
 
 ---
@@ -954,11 +954,11 @@ Si un store (`node-bc-store`) crashe :
 > **Recommandation production** : activer la réplication sur 2 stores (`--stores ip1,ip2`)
 > pour que le crash d'un store n'entraîne aucune perte de pages.
 
-### Que se passe-t-il si le nœud compute redémarre ?
+### Que se passe-t-il si un nœud redémarre ?
 
-1. Les VMs s'arrêtent (Proxmox shutdown).
-2. L'orphan cleaner (`node-bc-store`) détecte les VMs disparues après 10 minutes de grâce.
-3. Les pages orphelines sont supprimées automatiquement.
+1. Les VMs hébergées sur ce nœud s'arrêtent (Proxmox shutdown).
+2. L'orphan cleaner détecte les VMs disparues après 10 minutes de grâce.
+3. Les pages orphelines sont supprimées automatiquement sur les autres nœuds.
 4. Au redémarrage des VMs, l'agent repart proprement avec un nouveau handler uffd.
 
 ### Forcer un nettoyage manuel

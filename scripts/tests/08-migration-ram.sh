@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test 8 — Migration RAM : recall complet + qm migrate sous pression mémoire
 # Usage : ./08-migration-ram.sh [vmid]
-# Prérequis : cluster 3 nœuds, VM 9001 sur pve1, stores sur pve2/pve3
+# Prérequis : cluster 3 nœuds identiques (OMEGA_NODES), VM 9001 active
 
 source "$(dirname "$0")/lib.sh"
 
@@ -52,7 +52,7 @@ step "Surveillance éviction + migration pendant 120s"
 t0=$SECONDS
 migration_triggered=false
 while [[ $(elapsed $t0) -lt 120 ]]; do
-    evicted=$(grep -c "éviction\|evict" "$LOG_AGENT" 2>/dev/null || echo 0)
+    evicted=$(grep -c "éviction\|evict" "$LOG_AGENT" 2>/dev/null) || evicted=0
     if grep -qi "migration\|qm migrate" "$LOG_AGENT" 2>/dev/null; then
         migration_triggered=true
         info "migration déclenchée à $(elapsed $t0)s"
@@ -66,7 +66,7 @@ echo ""
 kill "$STRESS_PID" 2>/dev/null || true
 
 step "Logs éviction + migration"
-grep -i "éviction\|recall\|migration\|qm migrate" "$LOG_AGENT" | head -30
+grep -i "éviction\|recall\|migration\|qm migrate" "$LOG_AGENT" | head -30 || true
 
 step "Nœud final de la VM"
 node_after=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \

@@ -475,9 +475,7 @@ cat > /etc/systemd/system/omega-controller.service << 'EOF'
 Créer /etc/omega-store/controller.env :  
 cat > /etc/omega-store/controller.env << 'EOF'  
  # URLs des canaux de contrôle des 3 nœuds  
- OMEGA_NODE_A_CONTROL=http://192.168.10.1:9300  
- OMEGA_NODE_B_CONTROL=http://192.168.10.2:9300  
- OMEGA_NODE_C_CONTROL=http://192.168.10.3:9300  
+ OMEGA_NODES_CONTROL=http://192.168.10.1:9300,http://192.168.10.2:9300,http://192.168.10.3:9300  
    
  # Seuils de déclenchement des migrations  
  OMEGA_RAM_HIGH_PCT=85.0  
@@ -762,4 +760,45 @@ source /opt/omega-controller-venv/bin/activate
 | OMEGA_STATS_INTERVAL | 30 | Intervalle stats périodiques (s) |   
 | RUST_LOG | info | Niveau de log (debug, info, warn) |   
 | OMEGA_LOG_FORMAT | text | Format log (text ou json) |   
+
+**Référence — Variables d'environnement node-a-agent (balloon thin-provisioning)**  
+Le balloon permet à la VM de démarrer avec moins de RAM visible que sa configuration Proxmox
+et de grandir jusqu'au plafond selon la demande. Désactivé par défaut.
+
+| | | |  
+|-|-|-|  
+| **Variable** | **Défaut** | **Description** |   
+| AGENT_BALLOON_ENABLED | false | Activer le thin-provisioning RAM guest |   
+| AGENT_BALLOON_INITIAL_MIB | 512 | RAM visible au démarrage (MiB) |   
+| AGENT_BALLOON_STEP_MIB | 256 | Incrément de croissance/shrink par étape (MiB) |   
+| AGENT_BALLOON_INTERVAL_SECS | 10 | Intervalle entre deux ajustements (secondes) |   
+| AGENT_BALLOON_GROW_FAULTS_PER_SEC | 10 | Taux de page-faults/s déclenchant la croissance |   
+| AGENT_BALLOON_SHRINK_FAULTS_PER_SEC | 1 | Taux de page-faults/s déclenchant le shrink |   
+
+Exemple — VM créée avec 2048 MiB, démarre à 512 MiB, croît par paliers de 256 MiB :  
+```bash
+node-a-agent \
+  --stores 10.10.0.12:9100,10.10.0.13:9100 \
+  --vm-id 9001 \
+  --vm-requested-mib 2048 \
+  --region-mib 2048 \
+  --balloon-enabled \
+  --balloon-initial-mib 512 \
+  --balloon-step-mib 256 \
+  --mode daemon
+```
+
+**Référence — Variables d'environnement node-a-agent (politique de migration)**  
+La migration est déclenchée quand le nœud cible est **meilleur** que le nœud courant
+sur au moins une dimension. GPU = veto absolu si la VM en requiert un.
+
+| | | |  
+|-|-|-|  
+| **Variable** | **Défaut** | **Description** |   
+| AGENT_MIGRATION_ENABLED | false | Activer la recherche automatique de migration |   
+| AGENT_MIGRATION_INTERVAL_SECS | 30 | Intervalle entre deux recherches (secondes) |   
+| AGENT_GPU_REQUIRED | false | La VM requiert un GPU (veto si absent sur le cible) |   
+| AGENT_VM_VCPUS | 1 | vCPUs max de la VM (plafond, fixé à la création) |   
+| AGENT_VM_INITIAL_VCPUS | 1 | vCPUs actifs au démarrage |   
+| AGENT_VCPU_SCALE_INTERVAL_SECS | 30 | Intervalle mesure vCPU (secondes) |   
    

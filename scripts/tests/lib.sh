@@ -3,9 +3,8 @@
 # Supporte N nœuds (pas seulement 3)
 #
 # Variables d'environnement clés :
-#   OMEGA_NODES         — liste IPs séparées par virgule (défaut: 10.10.0.11,10.10.0.12,10.10.0.13)
-#   OMEGA_COMPUTE_NODE  — IP du nœud compute (défaut: premier de OMEGA_NODES)
-#   OMEGA_STORE_NODES   — IPs des nœuds store (défaut: tous sauf compute)
+#   OMEGA_NODES         — liste IPs/hostnames séparés par virgule (lu depuis scripts/cluster.conf si absent)
+#   OMEGA_CONTROLLER    — IP du nœud contrôleur (défaut: premier de OMEGA_NODES)
 #   OMEGA_STORE_PORT    — port TCP store    (défaut: 9100)
 #   OMEGA_STATUS_PORT   — port HTTP status  (défaut: 9200)
 #   OMEGA_METRICS_PORT  — port HTTP metrics (défaut: 9300)
@@ -14,6 +13,9 @@
 #   OMEGA_SKIP          — tests à ignorer (ex: "06,07")
 
 set -euo pipefail
+
+# Désactive les codes ANSI dans les binaires Rust (tracing-subscriber respecte NO_COLOR)
+export NO_COLOR=1
 
 # ── Couleurs ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -28,23 +30,22 @@ STORE_BIN="$BIN_DIR/node-bc-store"
 # ── Ports ─────────────────────────────────────────────────────────────────────
 STORE_PORT="${OMEGA_STORE_PORT:-9100}"
 STATUS_PORT="${OMEGA_STATUS_PORT:-9200}"
-METRICS_PORT="${OMEGA_METRICS_PORT:-9300}"
+# 9300 est réservé à omega-daemon (contrôle HTTP) — les agents de test utilisent 9310
+METRICS_PORT="${OMEGA_METRICS_PORT:-9310}"
 
-# ── Nœuds : liste complète, compute, stores ───────────────────────────────────
-_default_nodes="10.10.0.11,10.10.0.12,10.10.0.13"
-IFS=',' read -ra OMEGA_NODES_ARR <<< "${OMEGA_NODES:-$_default_nodes}"
-
-COMPUTE_NODE="${OMEGA_COMPUTE_NODE:-${OMEGA_NODES_ARR[0]}}"
-
-# Store nodes = tous les nœuds sauf le compute
-if [[ -n "${OMEGA_STORE_NODES:-}" ]]; then
-    IFS=',' read -ra STORE_NODES_ARR <<< "$OMEGA_STORE_NODES"
-else
-    STORE_NODES_ARR=()
-    for n in "${OMEGA_NODES_ARR[@]}"; do
-        [[ "$n" != "$COMPUTE_NODE" ]] && STORE_NODES_ARR+=("$n")
-    done
+# ── Nœuds : liste complète, contrôleur, stores ───────────────────────────────
+# Source cluster.conf si OMEGA_NODES n'est pas défini dans l'environnement
+if [[ -z "${OMEGA_NODES:-}" ]]; then
+    _conf="$(dirname "${BASH_SOURCE[0]}")/../cluster.conf"
+    [[ -f "$_conf" ]] && source "$_conf"
 fi
+[[ -n "${OMEGA_NODES:-}" ]] || { echo "ERREUR: OMEGA_NODES non défini (ex: export OMEGA_NODES=192.168.1.1,192.168.1.2,192.168.1.3)" >&2; exit 1; }
+
+IFS=',' read -ra OMEGA_NODES_ARR <<< "$OMEGA_NODES"
+CONTROLLER_NODE="${OMEGA_CONTROLLER:-${OMEGA_NODES_ARR[0]}}"
+
+# Tous les nœuds sont des stores (architecture symétrique)
+STORE_NODES_ARR=("${OMEGA_NODES_ARR[@]}")
 
 # Chaînes CSV utilisées par les binaires
 STORES_CSV=""
@@ -54,10 +55,11 @@ for n in "${STORE_NODES_ARR[@]}"; do
     STATUS_CSV="${STATUS_CSV:+$STATUS_CSV,}${n}:${STATUS_PORT}"
 done
 
-# Compat legacy (pve1/pve2/pve3 pour les scripts qui les utilisent encore)
-PVE1="${COMPUTE_NODE}"
-PVE2="${STORE_NODES_ARR[0]:-10.10.0.12}"
-PVE3="${STORE_NODES_ARR[1]:-10.10.0.13}"
+# Compat legacy (COMPUTE_NODE pour les scripts qui l'utilisent encore)
+PVE1="${OMEGA_NODES_ARR[0]}"
+PVE2="${OMEGA_NODES_ARR[1]:-}"
+PVE3="${OMEGA_NODES_ARR[2]:-}"
+COMPUTE_NODE="$CONTROLLER_NODE"
 TEST_VMID="${OMEGA_TEST_VMID:-9001}"
 
 # ── PIDs / fichiers temporaires à nettoyer ────────────────────────────────────
@@ -97,10 +99,10 @@ require_omega_bins() {
 require_cluster() {
     require_bin qm
     require_bin pvesh
-    [[ ${#STORE_NODES_ARR[@]} -ge 1 ]] || fail "aucun nœud store configuré (OMEGA_STORE_NODES)"
+    [[ ${#OMEGA_NODES_ARR[@]} -ge 2 ]] || fail "cluster requires at least 2 nodes (OMEGA_NODES)"
     for n in "${STORE_NODES_ARR[@]}"; do
         nc -z "$n" "$STORE_PORT" 2>/dev/null || \
-            fail "store $n:$STORE_PORT inaccessible — démarrer node-bc-store sur $n"
+            fail "store $n:$STORE_PORT inaccessible — démarrer omega-daemon sur $n"
     done
 }
 
@@ -209,16 +211,46 @@ assert_json_field() {
 assert_metric_gt() {
     local url="$1" metric="$2" min="$3"
     local val
-    val=$(curl -sf "$url" | grep "^${metric} " | awk '{print $2}' | head -1 || echo "")
+    val=$(curl -sf "$url" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('${metric}',''))" 2>/dev/null || echo "")
     [[ -n "$val" ]] || fail "métrique '$metric' absente de $url"
     python3 -c "import sys; sys.exit(0 if float('$val') > float('$min') else 1)" || \
         fail "métrique '$metric' = $val, attendu > $min"
 }
 
 # ── Cluster state ─────────────────────────────────────────────────────────────
+
+# pvesh retourne le nom d'hôte Proxmox (ex: "pve"), pas l'IP.
+# Cette fonction traduit un nom d'hôte Proxmox en IP depuis OMEGA_NODES_ARR.
+# Résultat mis en cache dans _PVE_IP_MAP (hostname→IP).
+declare -A _PVE_IP_MAP=()   # hostname → IP
+declare -A _PVE_NAME_MAP=() # IP → hostname
+_build_node_maps() {
+    [[ ${#_PVE_IP_MAP[@]} -gt 0 ]] && return  # déjà construit
+    for n in "${OMEGA_NODES_ARR[@]}"; do
+        local hn
+        hn=$(ssh -o ConnectTimeout=2 -o BatchMode=yes "root@${n}" "hostname" 2>/dev/null || echo "")
+        [[ -n "$hn" ]] && _PVE_IP_MAP["$hn"]="$n" && _PVE_NAME_MAP["$n"]="$hn"
+    done
+}
+
+# pvesh node name → IP
+_pve_node_to_ip() {
+    local pve_node="$1"
+    _build_node_maps
+    echo "${_PVE_IP_MAP[$pve_node]:-$pve_node}"
+}
+
+# IP → pvesh node name (for qm migrate etc.)
+_ip_to_pve_node() {
+    local ip="$1"
+    _build_node_maps
+    echo "${_PVE_NAME_MAP[$ip]:-$ip}"
+}
+
 vm_node() {
     local vmid="$1"
-    pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | \
+    local pve_node
+    pve_node=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | \
         python3 -c "
 import sys,json
 vms = json.load(sys.stdin)
@@ -226,7 +258,8 @@ for v in vms:
     if v.get('vmid') == $vmid:
         print(v.get('node',''))
         break
-" | head -1
+" | head -1)
+    _pve_node_to_ip "$pve_node"
 }
 
 cluster_free_mib() {
@@ -252,6 +285,34 @@ print(f\"pages={d.get('page_count',0)}  ram_mib={d.get('available_mib','?')}  ce
     done
 }
 
+# ── Charge CPU via guest exec ou fallback cgroup ─────────────────────────────
+# Tente qm guest exec ; si l'agent invité est absent, injecte stress-ng
+# directement dans le cgroup QEMU de la VM (charge visible par l'agent omega).
+# Usage : vm_cpu_stress <vmid> <duration_secs>
+vm_cpu_stress() {
+    local vmid="$1" dur="${2:-60}"
+    if qm guest exec "$vmid" -- stress-ng --cpu 0 --timeout "${dur}s" &>/dev/null 2>&1; then
+        info "stress-ng lancé dans la VM $vmid via qemu-guest-agent"
+        return
+    fi
+    warn "qemu-guest-agent absent — stress-ng injecté dans le cgroup QEMU"
+    # Proxmox 8 : /sys/fs/cgroup/qemu.slice/<vmid>.scope/
+    # Proxmox 7 : /sys/fs/cgroup/machine.slice/qemu-<vmid>.scope/
+    local cg=""
+    [[ -d "/sys/fs/cgroup/qemu.slice/${vmid}.scope" ]] && \
+        cg="/sys/fs/cgroup/qemu.slice/${vmid}.scope"
+    [[ -z "$cg" && -d "/sys/fs/cgroup/machine.slice/qemu-${vmid}.scope" ]] && \
+        cg="/sys/fs/cgroup/machine.slice/qemu-${vmid}.scope"
+    if [[ -n "$cg" ]]; then
+        (echo $BASHPID > "${cg}/cgroup.procs" 2>/dev/null; \
+         stress-ng --cpu 0 --timeout "${dur}s") &>/dev/null &
+        _PIDS+=($!)
+        info "stress-ng (cgroup=$cg) lancé (pid=$!)"
+    else
+        warn "cgroup QEMU introuvable pour vmid=$vmid — pas de charge CPU simulée"
+    fi
+}
+
 # ── Utilitaires ───────────────────────────────────────────────────────────────
 elapsed() { echo $(( SECONDS - ${1:-0} )); }
 
@@ -259,9 +320,9 @@ node_count() { echo "${#OMEGA_NODES_ARR[@]}"; }
 store_count() { echo "${#STORE_NODES_ARR[@]}"; }
 
 print_cluster_config() {
-    info "Nœuds      : ${OMEGA_NODES_ARR[*]}"
-    info "Compute    : $COMPUTE_NODE"
-    info "Stores     : ${STORE_NODES_ARR[*]} (${#STORE_NODES_ARR[@]} nœuds)"
-    info "STORES_CSV : $STORES_CSV"
-    info "STATUS_CSV : $STATUS_CSV"
+    info "Nœuds       : ${OMEGA_NODES_ARR[*]}"
+    info "Contrôleur  : $CONTROLLER_NODE"
+    info "Stores      : ${STORE_NODES_ARR[*]} (${#STORE_NODES_ARR[@]} nœuds)"
+    info "STORES_CSV  : $STORES_CSV"
+    info "STATUS_CSV  : $STATUS_CSV"
 }

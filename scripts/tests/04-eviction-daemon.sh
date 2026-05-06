@@ -35,24 +35,24 @@ wait_http "http://127.0.0.1:9300/metrics" 15
 
 step "Observation des métriques pendant ${DUREE}s"
 t0=$SECONDS
-evicted_start=$(curl -sf "http://127.0.0.1:9300/metrics" | grep "^pages_evicted " | awk '{print $2}' | head -1 || echo 0)
+evicted_start=$(curl -sf "http://127.0.0.1:9300/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pages_evicted',0))" 2>/dev/null || echo 0)
 
 while [[ $(elapsed $t0) -lt $DUREE ]]; do
-    evicted=$(curl -sf "http://127.0.0.1:9300/metrics" | grep "^pages_evicted " | awk '{print $2}' | head -1 || echo 0)
+    evicted=$(curl -sf "http://127.0.0.1:9300/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pages_evicted',0))" 2>/dev/null || echo 0)
     pages_store=$(curl -sf "http://127.0.0.1:9200/status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo "?")
     printf "\r  [%3ds] pages_evicted=%-6s  store.pages=%-6s" "$(elapsed $t0)" "$evicted" "$pages_store"
     sleep 2
 done
 echo ""
 
-evicted_end=$(curl -sf "http://127.0.0.1:9300/metrics" | grep "^pages_evicted " | awk '{print $2}' | head -1 || echo 0)
+evicted_end=$(curl -sf "http://127.0.0.1:9300/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pages_evicted',0))" 2>/dev/null || echo 0)
 delta=$(( ${evicted_end%.*} - ${evicted_start%.*} ))
 info "pages évincées pendant le test : $delta"
 
 step "Vérification métriques"
 [[ "$delta" -gt 0 ]] || fail "aucune page évincée en ${DUREE}s — éviction non fonctionnelle"
 
-recalls=$(curl -sf "http://127.0.0.1:9300/metrics" | grep "^pages_recalled " | awk '{print $2}' | head -1 || echo 0)
+recalls=$(curl -sf "http://127.0.0.1:9300/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pages_recalled',0))" 2>/dev/null || echo 0)
 info "pages rappelées (attendu ~0) : $recalls"
 
 step "Arrêt agent"

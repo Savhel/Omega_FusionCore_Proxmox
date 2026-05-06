@@ -148,6 +148,174 @@ Si VM 101 tente d'allouer 5 Go :
 
 Le nœud le plus chargé n'est jamais choisi pour une nouvelle VM (placement.py).
 
+### Scénario 5 — Thin-provisioning RAM (balloon)
+
+La VM est créée avec `memory=2048` dans Proxmox mais le `BalloonManager` masque une
+partie de cette RAM au guest au démarrage :
+
+```
+Création VM 101 : memory=2048 MiB
+BalloonManager démarre avec balloon_initial_mib=512 :
+  → qm balloon 101 512
+  → le guest voit 512 MiB, pas 2048 MiB
+  → 1536 MiB sont invisibles au guest (pas de pages allouées, ni locales ni distantes)
+
+Sous charge (fault_rate ≥ 10 faults/s) :
+  BalloonManager step : qm balloon 101 768  → guest voit 768 MiB
+  BalloonManager step : qm balloon 101 1024 → guest voit 1024 MiB
+  ...jusqu'à 2048 MiB maximum
+
+Idle (fault_rate ≤ 1 fault/s) :
+  BalloonManager : qm balloon 101 768 → récupère 256 MiB pour le nœud hôte
+```
+
+**Pourquoi aucune RAM n'est "gaspillée" sur les stores ?**
+Les pages du mmap userfaultfd ne sont matérialisées physiquement que lors d'un page fault.
+Tant que le balloon cache 1536 MiB au guest, le guest n'accède pas à ces adresses,
+donc aucun fault n'est levé, aucune page n'est allouée (ni locale, ni sur les stores distants).
+
+### Scénario 6 — Migration : critère relatif multi-ressources
+
+Quand la VM souffre (pages sur les stores, vCPU saturé), le `MigrationAgent` cherche
+un nœud cible selon une politique **relative** :
+
+```
+Nœud courant (node-a) :
+  available_mib = 256   (presque plein)
+  vcpu_free     = 0     (pool saturé)
+
+Candidats :
+  node-b : available_mib=1800, vcpu_free=4, has_gpu=false
+  node-c : available_mib=800,  vcpu_free=2, has_gpu=true
+
+Règles :
+  1. Veto absolu si vm_needs_gpu ET !target.has_gpu
+  2. Retenu si target.available_mib > 256 OU target.vcpu_free > 0
+
+→ node-b retenu (RAM +1544 MiB, vCPU +4) — meilleur absolu
+→ node-c retenu aussi, mais node-b préféré (plus de RAM)
+
+Si vm_needs_gpu=true :
+  → node-b rejeté (pas de GPU)
+  → node-c retenu (GPU présent, mieux sur RAM et vCPU)
+
+Si personne n'est meilleur → pas de migration.
+```
+
+### Scénario 7 — Recall LIFO
+
+Quand la RAM locale redevient disponible (d'autres VMs se sont arrêtées ou ont libéré
+de la mémoire), le `EvictionEngine` rappelle les pages distantes dans l'ordre inverse
+de l'éviction — les pages les plus récemment évincées d'abord (LIFO = Last In, First Out).
+
+```
+node-a : RAM libère 2 Go (VM 110 s'est arrêtée)
+VM 101 a 80 pages distantes sur node-b (évictions successives t0 < t1 < t2 ... < t79)
+
+recall_engine.rs (recall threshold dépassé) :
+  available_mib (3 200) > recall_threshold_mib (2 048)
+  → commence le recall
+
+Ordre de rappel :
+  1. page évincée en t79 (la plus récente → probablement encore chaude)
+  2. page évincée en t78
+  3. ...jusqu'à t0 (la plus ancienne → probablement froide, rappelée en dernier)
+
+Pour chaque page :
+  GET_PAGE TLS → node-b → [u8; 4096] reçu
+  UFFDIO_COPY  → page réinjectée dans QEMU
+  store_pool.delete(vm_id, page_id) → page supprimée sur node-b
+  region.mark_local(page_id)
+
+Résultat : VM 101 retrouve sa RAM locale, node-b récupère sa mémoire.
+```
+
+Pourquoi LIFO ?
+Les pages les plus récemment paginées ont plus de chances d'être accédées à nouveau
+(localité temporelle). Les rappeler en premier minimise les page faults futurs.
+
+### Scénario 8 — Réplication write-through
+
+Quand `--replication-enabled` est actif, chaque PUT_PAGE est envoyé en parallèle
+à deux stores différents. Cela protège les pages contre la perte d'un store.
+
+```
+Éviction de la page (vm_id=201, page_id=0x1000) :
+
+replication.rs :
+  store primaire   = hash(vm_id, page_id) % 2 = store_0 (node-b)
+  store secondaire = (hash + 1) % 2 = store_1 (node-c)
+
+  Envoi parallèle :
+    PUT_PAGE TLS → node-b:9100  ─┐
+    PUT_PAGE TLS → node-c:9100  ─┴─→ les deux stores confirment OK
+
+  Si store primaire répond en erreur :
+    réessai sur le secondaire uniquement (fallback automatique)
+    warn : "réplication partielle — page sur store_1 seulement"
+
+  Si les deux stores sont down :
+    page gardée en RAM locale (éviction abandonnée pour cette page)
+    erreur loggée : "aucun store disponible"
+```
+
+Quand tous les stores rapportent `ceph_enabled: true`, la réplication
+write-through inter-stores est automatiquement désactivée (Ceph assure déjà
+la redondance en interne).
+
+### Scénario 9 — Failover store
+
+Si le store primaire disparaît (crash, redémarrage), les pages restent accessibles
+sur le store secondaire (réplication préalable requise).
+
+```
+Avant crash :
+  page (vm_id=201, page_id=0x1000) présente sur node-b ET node-c
+
+node-b crash (store TCP 9100 fermé)
+
+Prochain page fault pour page_id=0x1000 :
+  fault_bus.rs → GET_PAGE vers node-b → connexion refused
+
+remote.rs (RemoteStorePool) :
+  erreur sur node-b → tentative sur node-c (fallback ordre de priorité)
+  GET_PAGE TLS → node-c:9100 → [u8; 4096] reçu
+
+  node-b marqué temporairement indisponible (backoff exponentiel)
+  prochaines requêtes → dirigées vers node-c directement
+
+VM 201 reprend son exécution sans interruption visible.
+```
+
+Quand node-b redémarre, le pool de stores le redécouvre automatiquement
+après le délai de backoff.
+
+### Scénario 10 — Recall complet avant migration
+
+Avant de déclencher `qm migrate`, le `MigrationAgent` rappelle toutes les pages
+distantes de la VM. Sans ce recall, les pages resteraient sur les anciens stores
+après la migration — le nœud cible ne saurait pas où les chercher.
+
+```
+VM 301 sur node-a, prête pour la migration vers node-c :
+  - 120 pages distantes sur node-b (pages froides évincées)
+
+migration.rs :
+  étape 1 : recall_all_pages(vm_id=301)
+    → envoie GET_PAGE × 120 vers node-b
+    → UFFDIO_COPY × 120 → pages réinjectées en RAM locale sur node-a
+    → store_pool.delete × 120 → pages supprimées sur node-b
+
+  étape 2 : vérification (remote_count() == 0)
+    → 0 pages distantes confirmées
+
+  étape 3 : qm migrate 301 node-c --online
+    (KVM pre-copy transfère la RAM locale de node-a vers node-c)
+
+  Résultat : node-c reçoit une VM avec 100% de RAM locale, aucune dépendance
+             vers node-b. node-b récupère 120 × 4 Ko = 480 Ko de RAM.
+```
+
 ---
 
 ## Partie 2 — vCPU
@@ -258,9 +426,10 @@ vcpu_scheduler.rs :
   → Si aucun retrait réel n'est possible, VM 104 passe en priorité CPU locale
     via cpu.weight en attendant la migration
 
-balloon.rs peut aussi intervenir :
-  Si VM 105 n'a pas besoin de RAM → libérer sa RAM pour éviter que la
-  saturation vCPU se combine à une saturation RAM
+BalloonManager (node-a-agent) peut aussi intervenir :
+  Si VM 105 n'a pas besoin de RAM → réduire son balloon (qm balloon vmid mib)
+  pour récupérer de la RAM hôte et éviter que la saturation vCPU
+  se combine à une saturation RAM
 ```
 
 ### Lecture des métriques à 1 ms
@@ -281,6 +450,39 @@ Rate-limiting des décisions :
   Max 1 décision de hotplug par fenêtre de 100 ms
   Évite les oscillations (add/remove/add/remove en rafale)
 ```
+
+### Scénario 5 — Recall équitable multi-VM
+
+Sur un nœud avec 3 VMs actives, chaque VM reçoit une part égale du budget recall
+pour éviter qu'une seule VM monopolise la bande passante réseau de retour.
+
+```
+node-a, 3 VMs avec pages distantes :
+  VM 201 : 300 pages sur node-b
+  VM 202 : 60  pages sur node-c
+  VM 203 : 150 pages sur node-b
+
+recall_interval tick :
+  RAM disponible > recall_threshold → recall autorisé
+  vm_count = 3
+  recall_batch_size = 30 (budget total par tick)
+  fair_recall_batch = max(1, 30 / 3) = 10 pages par VM
+
+  Tick 1 :
+    VM 201 : recall 10 pages  → 290 restantes
+    VM 202 : recall 10 pages  → 50  restantes
+    VM 203 : recall 10 pages  → 140 restantes
+
+  Tick N :
+    VM 202 finit la première (60 pages / 10 = 6 ticks)
+    → fair_recall_batch remonté à 15 pour les 2 VMs restantes
+
+  Résultat : aucune VM ne monopolise le lien réseau de retour.
+             latence de recall proportionnelle au nombre de pages distantes.
+```
+
+La priorité de recall est configurable (`--recall-priority`) :
+une VM marquée haute priorité attend moins longtemps avant chaque lot.
 
 ---
 
@@ -379,6 +581,77 @@ Résultat : liste de backends disponibles
   [DrmDriver::Amdgpu at renderD128, DrmDriver::I915 at renderD129]
 
 Le multiplexeur choisit le backend selon la demande de la VM.
+```
+
+### Scénario 6 — GPU Placement Daemon
+
+Le `GpuPlacementDaemon` détecte automatiquement les VMs qui requièrent un
+passthrough GPU (classe PCI `0x03xx`) et les migre vers un nœud GPU si elles
+tournent sur un nœud sans GPU physique.
+
+```
+VM 501 créée sur node-b (nœud sans GPU) :
+  qm config 501 → hostpci0: présent dans la config
+
+gpu_placement.rs (actif sur chaque nœud) :
+  1. Scanne /sys/bus/pci/devices/*/class → "0x030200" (VGA compatible)
+  2. Classe 0x03xx détectée → VM 501 nécessite un GPU
+
+  3. Interroge le cluster : GET /status sur tous les nœuds
+     node-a : has_gpu=true, vram_free=6144 MiB
+     node-b : has_gpu=false  ← nœud actuel
+     node-c : has_gpu=true, vram_free=2048 MiB
+
+  4. Sélectionne node-a (plus de VRAM libre)
+
+  5. Migration offline :
+     qm migrate 501 node-a
+     (VM stoppée, redémarrée sur node-a)
+
+  6. Configure le passthrough GPU :
+     qm set 501 --hostpci0 0000:03:00.0
+     qm start 501
+
+Résultat : VM 501 tourne sur node-a avec le GPU en passthrough.
+           node-b ne possède pas de GPU → il n'essaiera plus de placer des VMs GPU.
+```
+
+### Scénario 7 — GPU Scheduler round-robin
+
+Le `GpuScheduler` partage temporellement un GPU physique entre plusieurs VMs
+via QMP, avec leader election pour qu'un seul scheduler soit actif par GPU.
+
+```
+node-a : 1 GPU physique (BDF 0000:03:00.0)
+  VM 502, VM 503, VM 504 veulent toutes utiliser ce GPU
+
+gpu_scheduler.rs :
+  Leader election :
+    flock /run/omega-gpu-scheduler-0000:03:00.0.lock → un seul actif
+
+  Round-robin (timeslice 10s par VM par défaut) :
+
+  Slot 0 (t=0s) :
+    device_add  → VM 502 reçoit le GPU (QMP : device_add vfio-pci)
+    device_del  → VM 503 perd le GPU   (QMP : device_del vfio-pci)
+    device_del  → VM 504 perd le GPU
+
+  Slot 1 (t=10s) :
+    device_del  → VM 502 perd le GPU
+    device_add  → VM 503 reçoit le GPU
+    device_del  → VM 504 perd le GPU
+
+  Slot 2 (t=20s) :
+    device_del  → VM 502, VM 503 perdent le GPU
+    device_add  → VM 504 reçoit le GPU
+
+Reset GPU entre les slots :
+  ioctl(fd, VFIO_DEVICE_RESET) sur le fd VFIO du GPU
+  → remet le GPU en état propre avant le prochain titulaire
+  → sans module externe (reset implicite via VFIO)
+
+Résultat : chaque VM a accès au GPU ≈ 1/3 du temps.
+           aucune VM ne peut monopoliser le GPU indéfiniment.
 ```
 
 ---
@@ -969,4 +1242,193 @@ curl http://node-a:7200/control/vcpu/status | python3 -m json.tool
 | Durée migration cold | 1–5 min | > 15 min → disque lent |
 | Pages supprimées post-migration | = pages distantes de la VM | 0 → cleanup raté |
 | vCPU libérés post-migration | = slots de la VM | 0 → release_vm raté |
+| RAM disponible après migration | augmente sur source | inchangé → bug store |
+
+---
+
+## Partie 5 — Opérations de maintenance
+
+### Scénario 1 — Compaction du cluster
+
+La compaction est déclenchée quand tous les nœuds sont saturés et qu'aucune
+migration simple n'est possible. Elle vide un nœud en déplaçant plusieurs
+petites VMs plutôt qu'une seule grosse.
+
+```
+État cluster :
+  node-a : 28/32 Go RAM utilisés, 5 VMs (VM 601=8Go, VM 602=4Go, VM 603=2Go, ...)
+  node-b : 29/32 Go RAM utilisés
+  node-c : 27/32 Go RAM utilisés
+
+Aucun nœud n'a 8 Go libres pour accueillir VM 601 directement.
+
+compaction.rs (ClusterCompactor) :
+  1. Trie les VMs par taille croissante (bin-packing)
+  2. Sélectionne node-a comme nœud à vider (le plus chargé)
+
+  3. Tentative de déplacement des VMs les plus petites :
+     VM 603 (2 Go) → node-c (a 5 Go libres)  ✓
+     VM 602 (4 Go) → node-b (a 3 Go libres)  ✗ (insuffisant)
+     VM 602 (4 Go) → node-c (a 3 Go libres post VM603) ✗
+
+  4. Après déplacement de VM 603 :
+     node-a : 26/32 Go → VM 601 (8 Go) peut aller sur node-a maintenant
+              ... mais node-a est encore trop plein
+     Répète jusqu'à libérer assez de place ou épuisement des candidats
+
+Déclenchement automatique :
+  consecutive_alerts ≥ 3 (3 ticks consécutifs avec EvictionEngine en alerte)
+  → compact_ticker déclenche ClusterCompactor.compact()
+
+Déclenchement manuel :
+  curl -X POST http://node-a:9300/control/compact
+```
+
+### Scénario 2 — Drain nœud
+
+Le drain retire toutes les VMs d'un nœud pour permettre sa maintenance.
+Le test 17 (`17-mixed-drain-node.sh`) vérifie ce scénario.
+
+```
+Objectif : vider node-b pour une opération de maintenance (BIOS, RAM, réseau)
+
+Étape 1 : désactiver l'admission (plus de nouvelles VMs sur node-b)
+  curl -X POST http://node-b:9300/control/admission/disable
+
+Étape 2 : migrer toutes les VMs actives de node-b
+  pvesh get /nodes/node-b/qemu --output-format json \
+    | python3 -c "import sys,json; [print(v['vmid']) for v in json.load(sys.stdin)]" \
+    | while read vmid; do
+        qm migrate $vmid node-a --online || qm migrate $vmid node-c --online
+      done
+
+Étape 3 : vérifier que node-b est vide
+  pvesh get /nodes/node-b/qemu --output-format json | python3 -c \
+    "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} VMs restantes')"
+  # → 0 VMs restantes
+
+Étape 4 : maintenance (reboot, mise à jour, etc.)
+  systemctl stop omega-daemon
+  ...
+
+Étape 5 : réintégration
+  systemctl start omega-daemon
+  curl -X POST http://node-b:9300/control/admission/enable
+```
+
+### Scénario 3 — Orphan cleaner
+
+L'`OrphanCleaner` (node-bc-store) supprime les pages des VMs qui n'existent
+plus dans le cluster, après un délai de grâce de 10 minutes.
+
+```
+Scénario typique : VM 701 crashée brutalement (kill -9 sur qemu-system)
+  Pages de VM 701 : 450 pages sur node-b, 450 sur node-c
+
+5 minutes après le crash :
+  OrphanCleaner (tick toutes les 5 minutes) :
+    1. pvesh get /cluster/resources --type vm → liste des vmids actifs
+       → VM 701 absente de la liste
+
+    2. VM 701 dans la liste "suspects depuis t0" (premier ticket de signalement)
+    3. Délai de grâce : maintenant = t0 + 5 min < t0 + 10 min → pas encore supprimé
+       (délai de grâce pour laisser la VM redémarrer ou être restaurée)
+
+10 minutes après le crash :
+  OrphanCleaner (deuxième tick) :
+    1. VM 701 toujours absente
+    2. Délai de grâce écoulé → suppression autorisée
+
+    3. store.delete_all_for_vm(701) → 450 pages supprimées
+       → node-b récupère 450 × 4 Ko = 1,8 Mo de RAM
+
+    4. Log : "orphan supprimé : vm_id=701, pages=450, grâce=10min"
+
+Protection contre faux-positifs :
+  Si pvesh est injoignable (réseau), l'OrphanCleaner ne supprime rien
+  (fail-safe : mieux vaut garder des pages orphelines que supprimer des VMs actives).
+```
+
+---
+
+## Partie 6 — Fonctionnalités avancées
+
+### Scénario 1 — Prefetch et détection de stride
+
+Le `PrefetchEngine` détecte les accès séquentiels (stride régulier) et
+pré-charge les pages suivantes avant que la VM ne les demande.
+
+```
+VM 801 lit un fichier séquentiellement (page après page) :
+  Accès : page 100, page 101, page 102, page 103...
+
+PrefetchEngine.record_access(100) :
+  window = [100]  → historique insuffisant (< 3 points)
+
+PrefetchEngine.record_access(101) :
+  window = [100, 101]  → insuffisant
+
+PrefetchEngine.record_access(102) :
+  window = [100, 101, 102]
+  detect_stride() :
+    stride = 101 - 100 = 1
+    vérification : 101-100 = 1, 102-101 = 1 → tout égal
+    → stride = 1 détecté
+
+  candidates = [103, 104, 105] (lookahead = 3)
+  Pour chaque candidate :
+    GET_PAGE → node-b → stocké dans PrefetchCache
+
+PrefetchEngine.record_access(103) :
+  PrefetchCache.take(103) → page déjà en cache !
+  → UFFDIO_COPY immédiat (sans round-trip réseau)
+  → latence < 50 µs au lieu de 200–500 µs
+
+Impact :
+  Réduction de la latence perçue de ~80% pour les accès séquentiels.
+  CPU supplémentaire : ~1% par VM active en prefetch.
+```
+
+Stride négatif détecté aussi (lecture à rebours), et le prefetch s'arrête
+automatiquement si le pattern séquentiel est rompu.
+
+### Scénario 2 — TLS TOFU (Trust On First Use)
+
+Le canal TCP de paging entre stores est chiffré TLS avec des certificats
+auto-signés. La vérification d'identité se fait par empreinte SHA-256 (TOFU) :
+la première connexion enregistre l'empreinte, les connexions suivantes la vérifient.
+
+```
+Premier démarrage de node-bc-store sur node-b :
+  tls.rs :
+    1. Génère un certificat auto-signé (RSA 2048 ou ECDSA P-256)
+       → /etc/omega-store/tls/cert.pem
+       → /etc/omega-store/tls/key.pem
+
+    2. Calcule l'empreinte SHA-256 du certificat
+       fingerprint = "a3f7b2c1d4e5..."
+
+    3. Expose l'empreinte via l'API status :
+       GET /status → { "tls_fingerprint": "a3f7b2c1d4e5..." }
+
+Configuration de l'agent sur node-a :
+  Admin récupère les empreintes de node-b et node-c :
+    curl http://node-b:9200/status | python3 -c "import sys,json; print(json.load(sys.stdin)['tls_fingerprint'])"
+    # → a3f7b2c1d4e5...
+
+  Démarre l'agent avec les empreintes :
+    AGENT_TLS_FINGERPRINTS="a3f7b2c1d4e5...,ff11ee22dd33..."  node-a-agent ...
+
+Connexion TLS (RemoteStorePool) :
+  TlsConnector vérifie l'empreinte du serveur pendant le handshake
+  → empreinte reçue = a3f7b2c1d4e5... ∈ trusted_fingerprints → OK
+
+Si empreinte inconnue (MITM ou mauvais store) :
+  Handshake TLS refusé → connexion fermée
+  erreur : "empreinte non reconnue : xxxxxxxx"
+
+Renouvellement de certificat :
+  Nouveau certificat → nouvelle empreinte → admin doit mettre à jour AGENT_TLS_FINGERPRINTS
+  (délai de grâce : les deux empreintes peuvent coexister pendant la transition)
+```
 | RAM disponible après migration | augmente sur source | inchangé → bug store |

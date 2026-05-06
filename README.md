@@ -138,7 +138,7 @@ Alternative légère à `omega-daemon` pour des tests ou des setups simples sans
 
 | Binaire | Rôle |
 |---------|------|
-| `node-a-agent` | Agent par VM — uffd, éviction CLOCK, réplication, vCPU élastique, GPU |
+| `node-a-agent` | Agent par VM — uffd, éviction CLOCK, réplication, vCPU élastique, GPU, balloon thin-provisioning |
 | `node-bc-store` | Store distant — stocke les pages en RAM ou Ceph, nettoyage orphelins, TLS |
 
 > **Quand utiliser quoi ?**

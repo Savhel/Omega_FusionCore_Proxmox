@@ -22,16 +22,19 @@ require_omega_bins
 pass "node-a-agent : $AGENT_BIN"
 pass "node-bc-store : $STORE_BIN"
 
-# ── 2. userfaultfd ────────────────────────────────────────────────────────────
+# ── 2. userfaultfd — vérifié sur chaque nœud du cluster ──────────────────────
 step "userfaultfd"
-uffd=$(sysctl -n vm.unprivileged_userfaultfd 2>/dev/null || echo "N/A")
-if [[ "$uffd" == "1" ]]; then
-    pass "vm.unprivileged_userfaultfd=1"
-elif [[ $EUID -eq 0 ]]; then
-    pass "running as root — userfaultfd disponible"
-else
-    fail "vm.unprivileged_userfaultfd=$uffd — lancer: sysctl -w vm.unprivileged_userfaultfd=1"
-fi
+for n in "${OMEGA_NODES_ARR[@]}"; do
+    uffd=$(ssh -o ConnectTimeout=3 "root@${n}" \
+        "sysctl -n vm.unprivileged_userfaultfd 2>/dev/null || echo 0" 2>/dev/null || echo "ERR")
+    if [[ "$uffd" == "1" ]]; then
+        pass "$n : vm.unprivileged_userfaultfd=1"
+    elif [[ "$uffd" == "ERR" ]]; then
+        warn "$n : SSH inaccessible — vérification ignorée"
+    else
+        fail "$n : vm.unprivileged_userfaultfd=$uffd — lancer: sysctl -w vm.unprivileged_userfaultfd=1"
+    fi
+done
 
 # ── 3. Dépendances locales ────────────────────────────────────────────────────
 step "Outils locaux"
@@ -44,33 +47,36 @@ else warn "stress-ng absent (tests de charge impossible) — apt install stress-
 # ── 4. Cluster Proxmox ────────────────────────────────────────────────────────
 if $DO_CLUSTER; then
     step "Stores réseau"
-    for node_port in "${PVE2}:9100" "${PVE3}:9100"; do
-        h="${node_port%:*}"; p="${node_port#*:}"
-        if nc -zv "$h" "$p" 2>/dev/null; then pass "store $h:$p accessible"
-        else fail "store $h:$p inaccessible — démarrer node-bc-store sur $h"; fi
+    for n in "${OMEGA_NODES_ARR[@]}"; do
+        if nc -zv "$n" "$STORE_PORT" 2>/dev/null; then pass "store $n:$STORE_PORT accessible"
+        else fail "store $n:$STORE_PORT inaccessible — démarrer omega-daemon sur $n"; fi
     done
 
     step "HTTP status stores"
-    for node_port in "${PVE2}:9200" "${PVE3}:9200"; do
-        h="${node_port%:*}"; p="${node_port#*:}"
-        if curl -sf "http://$h:$p/status" &>/dev/null; then
-            pass "status HTTP $h:$p OK"
-            curl -sf "http://$h:$p/status" | python3 -m json.tool 2>/dev/null | head -8 | sed 's/^/    /'
-        else warn "status HTTP $h:$p inaccessible (node-bc-store pas encore démarré ?)"; fi
+    for n in "${OMEGA_NODES_ARR[@]}"; do
+        if curl -sf "http://$n:$STATUS_PORT/api/health" &>/dev/null; then
+            pass "status HTTP $n:$STATUS_PORT/api/health OK"
+            curl -sf "http://$n:$STATUS_PORT/api/status" | python3 -m json.tool 2>/dev/null | head -8 | sed 's/^/    /' || true
+        else warn "status HTTP $n:$STATUS_PORT inaccessible (omega-daemon pas encore démarré ?)"; fi
     done
 
-    step "Proxmox CLI"
-    if command -v qm &>/dev/null; then
-        pass "qm disponible"
-        qm list 2>/dev/null | head -5 | sed 's/^/    /' || warn "qm list échoué"
-    else fail "qm absent — ce script doit tourner sur un nœud Proxmox"; fi
+    step "Proxmox CLI (sur les nœuds)"
+    for n in "${OMEGA_NODES_ARR[@]}"; do
+        qm_ok=$(ssh -o ConnectTimeout=3 "root@${n}" "command -v qm &>/dev/null && echo yes || echo no" 2>/dev/null || echo "ERR")
+        if [[ "$qm_ok" == "yes" ]]; then
+            pass "$n : qm disponible"
+        elif [[ "$qm_ok" == "ERR" ]]; then
+            warn "$n : SSH inaccessible"
+        else
+            fail "$n : qm absent — Proxmox VE requis"
+        fi
+    done
 
-    if command -v pvesh &>/dev/null; then
-        pass "pvesh disponible"
-        count=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
-            | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
-        info "$count VMs dans le cluster"
-    else warn "pvesh absent — orphan cleaner non fonctionnel sans Proxmox"; fi
+    pvesh_node="${OMEGA_NODES_ARR[0]}"
+    count=$(ssh -o ConnectTimeout=3 "root@${pvesh_node}" \
+        "pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
+        | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))'" 2>/dev/null || echo "?")
+    info "$count VMs dans le cluster (via $pvesh_node)"
 
     step "Pool vCPU"
     if [[ -f /run/omega-vcpu-pool.json ]]; then

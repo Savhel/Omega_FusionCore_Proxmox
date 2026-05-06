@@ -4,10 +4,10 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Cluster Proxmox (3 nœuds)                                          │
+│  Cluster Proxmox (N nœuds identiques)                               │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Nœud A (compute + store)                                    │   │
+│  │  Chaque nœud (ex: pve, pve2, pve3)                           │   │
 │  │                                                              │   │
 │  │  VMs QEMU/KVM                                               │   │
 │  │    VM 100 : 8 Gio RAM max                                   │   │
@@ -31,11 +31,12 @@
 │  │  └──────────────────────────────────────────────────────┘   │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                     │
-│  Même daemon tourne aussi sur Nœud B et Nœud C                     │
-│  (rôle store + monitoring local)                                    │
+│  Le même daemon tourne sur chaque nœud (rôle symétrique :           │
+│  héberge des VMs ET stocke les pages des autres nœuds)              │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  omega-controller (Python — tourne sur nœud A)              │   │
+│  │  omega-controller (Python — tourne sur un seul nœud)        │   │
+│  │  Nœud contrôleur défini par OMEGA_CONTROLLER (arbitraire)   │   │
 │  │                                                              │   │
 │  │  MigrationPolicy   → GET /control/status (chaque nœud)      │   │
 │  │  MigrationExecutor → POST /control/migrate (nœud source)    │   │
@@ -50,7 +51,7 @@
 ```
 1. Pression mémoire détectée (mem_available < seuil)
 2. EvictionEngine sélectionne les pages froides (algorithme CLOCK)
-3. Page envoyée via PUT_PAGE TCP (TLS) → store du nœud B ou C
+3. Page envoyée via PUT_PAGE TCP (TLS) → store d'un autre nœud du cluster
 4. madvise(MADV_DONTNEED) → page libérée du page table local
 5. Page marquée "distante" dans le VM Tracker
 ```
@@ -125,8 +126,11 @@ Détecte les VMs nécessitant un GPU via `qm config <vmid>` et la classe PCI sys
 ### GPU Scheduler (node-a-agent)
 Partage round-robin d'un GPU physique entre plusieurs VMs via QMP (`device_del` / `device_add`). Leader election par `flock` sur `/run/omega-gpu-scheduler-<pci>.lock` — un seul scheduler actif par GPU sur le nœud. Reset GPU implicite via l'ioctl VFIO `VFIO_DEVICE_RESET` (sans module externe).
 
+### Balloon Manager (node-a-agent)
+Thin-provisioning RAM côté guest : la VM démarre avec `balloon_initial_mib` visibles (défaut 512 MiB) et grandit progressivement jusqu'à `region_mib` (plafond fixé à la création). Signal de croissance : taux de page-faults par seconde (`metrics.fault_count`). Si `fault_rate ≥ grow_faults_per_sec` → `qm balloon <vmid> <mib+step>` ; si `fault_rate ≤ shrink_faults_per_sec` → récupération. Aucune RAM n'est réservée sur les stores tant que les pages ne sont pas effectivement accédées par le guest.
+
 ### Migration Agent (node-a-agent)
-Détecte la pression RAM et CPU du nœud local. Identifie un nœud cible via l'API status. Effectue un recall complet des pages distantes avant de déclencher `qm migrate <vmid> <target> --online`.
+Détecte la pression RAM et CPU du nœud local. Identifie un nœud cible via l'API status avec un critère **relatif** : le nœud cible doit être meilleur que le nœud courant (plus de RAM libre **ou** plus de vCPU libres). Veto absolu si la VM requiert un GPU et que le nœud cible n'en a pas. Effectue un recall complet des pages distantes avant de déclencher `qm migrate <vmid> <target> --online`.
 
 ### vCPU Scheduler (node-a-agent)
 Pool vCPU partagé persisté dans `/run/omega-vcpu-pool.json` avec accès coordonné par `flock`. Mesure la charge CPU via les compteurs cgroup v2 `usage_usec` avec fallback sur `/proc/<pid>/stat`. Hotplug via `qm set --vcpus N`. Overcommit 3× au maximum. Indicateur `cpu_pressure` (AtomicBool) exposé aux décideurs de migration.

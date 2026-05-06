@@ -119,9 +119,8 @@ systemctl status omega-daemon
 
 ```bash
 # Depuis la machine de build
-export NODE_B=192.168.1.2
-export NODE_C=192.168.1.3
-export NODE_A=192.168.1.1
+export OMEGA_NODES=192.168.1.1,192.168.1.2,192.168.1.3
+export OMEGA_CONTROLLER=192.168.1.1
 bash scripts/deploy.sh
 # Attendu : "=== Déploiement terminé ===" sans erreur
 ```

@@ -83,7 +83,7 @@ done
 echo ""
 
 step "Logs store (orphan cleaner)"
-grep -i "orphelin\|orphan\|vmid\|supprim\|clean\|grace" "$LOG_STORE" | head -20
+grep -i "orphelin\|orphan\|vmid\|supprim\|clean\|grace" "$LOG_STORE" | head -20 || true
 
 pages_after=$(curl -sf "http://127.0.0.1:9200/status" | \
     python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo "?")

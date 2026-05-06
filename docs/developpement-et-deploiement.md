@@ -332,7 +332,7 @@ case "$TARGET" in
     ;;
 esac
 
-NODE_A="${NODES[0]}"
+CONTROLLER="${NODES[0]}"   # nœud arbitraire qui tourne le controller
 
 # ─── Compilation ─────────────────────────────────────────────────────────────
 
@@ -428,14 +428,20 @@ for i in "${!NODES[@]}"; do
   fi
 done
 
-# ─── Déploiement du controller Python (node-a uniquement) ───────────────────
+# ─── Déploiement du controller Python (un seul nœud au choix) ───────────────
 
-echo "==> Déploiement controller Python sur $NODE_A..."
+echo "==> Déploiement controller Python sur $CONTROLLER..."
 rsync -aq --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' \
-  controller/ root@"$NODE_A":/opt/omega-remote-paging/controller/
+  controller/ root@"$CONTROLLER":/opt/omega-remote-paging/controller/
+
+# Construire la liste --node http://IP:9300 pour tous les nœuds
+NODE_ARGS=""
+for ip in "${NODES[@]}"; do
+  NODE_ARGS+=" --node http://${ip}:9300"
+done
 
 if $FIRST_INSTALL; then
-  ssh root@"$NODE_A" bash <<EOF
+  ssh root@"$CONTROLLER" bash <<EOF
 set -e
 python3 -m venv /opt/omega-controller-venv
 /opt/omega-controller-venv/bin/pip install -q -e /opt/omega-remote-paging/controller/
@@ -449,9 +455,7 @@ After=omega-daemon.service
 Type=simple
 WorkingDirectory=/opt/omega-remote-paging/controller
 ExecStart=/opt/omega-controller-venv/bin/python3 -m controller.main daemon \
-    --node-a http://${NODES[0]}:9300 \
-    --node-b http://${NODES[1]}:9300 \
-    --node-c http://${NODES[2]}:9300 \
+    $NODE_ARGS \
     --poll-interval 5
 Restart=on-failure
 RestartSec=10
@@ -466,7 +470,7 @@ systemctl enable omega-controller
 systemctl start omega-controller
 EOF
 else
-  ssh root@"$NODE_A" "
+  ssh root@"$CONTROLLER" "
     /opt/omega-controller-venv/bin/pip install -q -e /opt/omega-remote-paging/controller/ 2>/dev/null || true
     systemctl restart omega-controller
     systemctl is-active omega-controller
@@ -481,7 +485,7 @@ for ip in "${NODES[@]}"; do
   status=$(ssh root@"$ip" "systemctl is-active omega-daemon" 2>/dev/null || echo "ERREUR")
   echo "      $ip  omega-daemon : $status"
 done
-echo "      $NODE_A  omega-controller : $(ssh root@$NODE_A 'systemctl is-active omega-controller' 2>/dev/null || echo 'ERREUR')"
+echo "      $CONTROLLER  omega-controller : $(ssh root@$CONTROLLER 'systemctl is-active omega-controller' 2>/dev/null || echo 'ERREUR')"
 ```
 
 ```bash

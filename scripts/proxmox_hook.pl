@@ -33,10 +33,30 @@ my $OMEGA_CONTROL_PORT      = $ENV{OMEGA_CONTROL_PORT}      // "9300";
 my $OMEGA_LOG_FILE          = $ENV{OMEGA_LOG_FILE}          // "/var/log/omega-hook.log";
 my $OMEGA_LAUNCHER_BIN      = $ENV{OMEGA_LAUNCHER_BIN}      // "/usr/local/bin/omega-qemu-launcher";
 my $OMEGA_RUN_DIR           = $ENV{OMEGA_RUN_DIR}           // "/var/lib/omega-qemu";
-my $OMEGA_STORES            = $ENV{OMEGA_STORES}            // "10.10.0.12:9100,10.10.0.13:9100";
 my $OMEGA_START_TIMEOUT     = $ENV{OMEGA_START_TIMEOUT}     // "30";
 my $OMEGA_AGENT_STOP_TIMEOUT = $ENV{OMEGA_AGENT_STOP_TIMEOUT} // "15";
 my $OMEGA_SKIP_DAEMON_CHECK = $ENV{OMEGA_SKIP_DAEMON_CHECK} // "0";
+my $OMEGA_STORE_PORT        = $ENV{OMEGA_STORE_PORT}        // "9100";
+
+# Charger /etc/omega/cluster.env si OMEGA_NODES ou OMEGA_STORES absents
+if (!$ENV{OMEGA_STORES} && !$ENV{OMEGA_NODES} && -f '/etc/omega/cluster.env') {
+    open my $fh, '<', '/etc/omega/cluster.env' or die "impossible de lire /etc/omega/cluster.env: $!\n";
+    while (<$fh>) {
+        chomp; next if /^\s*#/ || !/=/;
+        my ($k, $v) = split /=/, $_, 2;
+        $ENV{$k} = $v unless exists $ENV{$k};
+    }
+}
+
+# Calculer OMEGA_STORES depuis OMEGA_NODES en s'excluant soi-même
+my $OMEGA_STORES = $ENV{OMEGA_STORES};
+if (!$OMEGA_STORES && $ENV{OMEGA_NODES}) {
+    my $self_ip = `hostname -I 2>/dev/null`; chomp $self_ip; $self_ip =~ s/\s.*//;
+    my @nodes   = grep { $_ ne $self_ip } split /,/, $ENV{OMEGA_NODES};
+    $OMEGA_STORES = join ',', map { "$_:$OMEGA_STORE_PORT" } @nodes;
+}
+die "OMEGA_STORES non défini — créer /etc/omega/cluster.env avec OMEGA_NODES=ip1,ip2,ip3\n"
+    unless $OMEGA_STORES;
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 

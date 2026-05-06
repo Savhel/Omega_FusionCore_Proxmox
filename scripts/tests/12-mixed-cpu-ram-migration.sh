@@ -17,6 +17,10 @@ step "Prérequis"
 require_cluster
 require_vm_running "$VMID"
 
+step "Remise à 1 vCPU (état de référence)"
+qm set "$VMID" --vcpus 1 &>/dev/null || true
+sleep 1
+
 step "État initial"
 node_init=$(vm_node "$VMID")
 info "VM $VMID sur : $node_init"
@@ -52,9 +56,11 @@ stress-ng --cpu 0 --timeout 60s &>/dev/null &
 _PIDS+=($!)
 
 info "Charge RAM + CPU dans la VM (70s)"
-qm guest exec "$VMID" -- \
-    stress-ng --vm 1 --vm-bytes 80% --cpu 0 --timeout 70s &>/dev/null &
-_PIDS+=($!)
+if ! qm guest exec "$VMID" -- \
+    stress-ng --vm 1 --vm-bytes 80% --cpu 0 --timeout 70s &>/dev/null 2>&1; then
+    warn "qemu-guest-agent absent — injection CPU via cgroup (RAM stress ignorée)"
+    vm_cpu_stress "$VMID" 70
+fi
 
 step "Surveillance CPU + RAM + migration pendant 100s"
 t0=$SECONDS
@@ -93,7 +99,7 @@ $migration_detected    && pass "migration déclenchée" || warn "migration non d
     warn "VM non déplacée (nœuds cibles peut-être trop chargés aussi)"
 
 step "Logs agent (extraits)"
-grep -i "cpu_pressure\|migration\|évict\|recall" "$LOG" | head -20
+grep -i "cpu_pressure\|migration\|évict\|recall" "$LOG" | head -20 || true
 
 # PASS si au moins éviction ET (pressure ou migration) détectés
 pages_final=0
