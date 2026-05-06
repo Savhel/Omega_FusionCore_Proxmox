@@ -56,8 +56,10 @@ STATUS_CSV=""
 CONFIGURED=false
 
 _load_config() {
-    # Priorité : variables d'environnement > cluster.conf
-    local env_nodes="${OMEGA_NODES:-}"
+    # Priorité : variables d'environnement exportées > cluster.conf
+    # printenv ne retourne que les vraies variables exportées, pas les variables shell de session
+    local env_nodes
+    env_nodes="$(printenv OMEGA_NODES 2>/dev/null || true)"
     [[ -f "$CONF_FILE" ]] && source "$CONF_FILE" 2>/dev/null || true
     [[ -n "$env_nodes" ]] && OMEGA_NODES="$env_nodes"
 
