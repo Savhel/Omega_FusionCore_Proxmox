@@ -17,6 +17,7 @@ header "Test 23 — Scheduler I/O disque"
 # ── 1. Tests unitaires ────────────────────────────────────────────────────────
 
 step "1/3 : tests unitaires disk_scheduler"
+command -v cargo &>/dev/null || fail "cargo absent sur ce nœud — ce test doit tourner sur la machine de dev, pas sur un nœud Proxmox"
 cargo test -p node-a-agent disk_scheduler 2>&1 | tail -20
 pass "tests unitaires disk_scheduler OK"
 

@@ -143,6 +143,18 @@ _run_isolated() {
     _record "$num" "$name" "$rc" "$(( SECONDS - t0 ))"
 }
 
+_run_local() {
+    local num="$1" name="$2" script="$3"; shift 3
+    _hdr "  Test ${num} — ${name}  [local]"
+    _sep
+    local t0=$SECONDS rc=0
+    REPO_ROOT="$ROOT_DIR" \
+    OMEGA_BIN_DIR="$ROOT_DIR/target/release" \
+    OMEGA_NODES="${OMEGA_NODES}" \
+    bash "${TESTS_DIR}/$(basename "$script")" "$@" || rc=$?
+    _record "$num" "$name" "$rc" "$(( SECONDS - t0 ))"
+}
+
 _run_cluster() {
     local num="$1" name="$2" script="$3"; shift 3
     _hdr "  Test ${num} — ${name}  [cluster]"
@@ -350,7 +362,7 @@ run_section_1() {
     _need_config || return
     _hdr "══ Section 1 — Tests isolés (smoke, réplication, failover, éviction) ══"
     _sync
-    _run_isolated "00" "Tests unitaires Rust"  "00-unit-tests.sh"
+    _run_local    "00" "Tests unitaires Rust"  "00-unit-tests.sh"
     _run_isolated "01" "Smoke test"            "01-smoke-test.sh"
     _run_isolated "02" "Réplication 2 stores"  "02-replication.sh"
     _run_isolated "03" "Failover store"        "03-failover.sh"
@@ -365,7 +377,7 @@ run_section_2() {
     _run_isolated "18" "Recall LIFO"         "18-recall-lifo.sh"
     _run_isolated "20" "Prefetch stride"     "20-prefetch-stride.sh"
     _run_isolated "21" "TLS TOFU"            "21-tls-tofu.sh"
-    _run_isolated "23" "Disk I/O scheduler"  "23-disk-io-scheduler.sh"
+    _run_local    "23" "Disk I/O scheduler"  "23-disk-io-scheduler.sh"
 }
 
 run_section_3() {
@@ -444,7 +456,7 @@ run_one() {
     _need_config || return
     _sync
     case "${1^^}" in
-        00) _run_isolated "00" "Tests unitaires Rust"       "00-unit-tests.sh" ;;
+        00) _run_local    "00" "Tests unitaires Rust"       "00-unit-tests.sh" ;;
         01) _run_isolated "01" "Smoke test"                 "01-smoke-test.sh" ;;
         02) _run_isolated "02" "Réplication 2 stores"       "02-replication.sh" ;;
         03) _run_isolated "03" "Failover store"             "03-failover.sh" ;;
@@ -453,7 +465,7 @@ run_one() {
         18) _run_isolated "18" "Recall LIFO"                "18-recall-lifo.sh" ;;
         20) _run_isolated "20" "Prefetch stride"            "20-prefetch-stride.sh" ;;
         21) _run_isolated "21" "TLS TOFU"                   "21-tls-tofu.sh" ;;
-        23) _run_isolated "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
+        23) _run_local    "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
         05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh"         "$OMEGA_TEST_VMID" ;;
         06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh"        "$OMEGA_TEST_VMID" ;;
         07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh"        "$OMEGA_TEST_VMID" "9002" ;;

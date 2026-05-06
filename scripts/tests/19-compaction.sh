@@ -37,9 +37,9 @@ _TMPFILES+=("$LOG_AGENT")
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 32 \
     --eviction-interval-secs 5 \
-    --compaction-enabled true \
+    --compaction-enabled \
     --compaction-interval-secs 30 \
-    --migration-enabled true \
+    --migration-enabled \
     --mode daemon >"$LOG_AGENT" 2>&1 &
 _PIDS+=($!)
 AGENT_PID=$!

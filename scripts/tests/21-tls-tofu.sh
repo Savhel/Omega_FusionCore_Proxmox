@@ -17,17 +17,32 @@ mkdir -p "$TLS_DIR_S0" "$TLS_DIR_S1"
 step "Démarrage store s0 avec TLS activé"
 LOG_S0="/tmp/omega-store-tls-s0.log"
 _TMPFILES+=("$LOG_S0")
+STORE_DATA_DIR_S0="/tmp/omega-store-tls-data-s0"
+mkdir -p "$STORE_DATA_DIR_S0"
+_TMPFILES+=("$STORE_DATA_DIR_S0")
+
 STORE_TLS_ENABLED=true \
 STORE_TLS_DIR="$TLS_DIR_S0" \
 "$STORE_BIN" \
     --listen "127.0.0.1:9100" \
     --status-listen "127.0.0.1:9200" \
     --node-id "tls-store-s0" \
+    --store-data-path "$STORE_DATA_DIR_S0" \
     --tls-enabled \
     --tls-dir "$TLS_DIR_S0" \
     >"$LOG_S0" 2>&1 &
 _PIDS+=($!)
-wait_port 127.0.0.1 9100 15
+
+# Laisser le store 2 secondes pour démarrer ou planter
+sleep 2
+# Si le process est déjà mort, afficher le log avant d'attendre (et d'échouer)
+STORE_PID="${_PIDS[-1]}"
+if ! kill -0 "$STORE_PID" 2>/dev/null; then
+    warn "store TLS s'est arrêté immédiatement — log :"
+    cat "$LOG_S0" 2>/dev/null || true
+    fail "store TLS planté au démarrage"
+fi
+wait_port 127.0.0.1 9100 20
 wait_http "http://127.0.0.1:9200/status" 10
 info "store s0 TLS démarré"
 

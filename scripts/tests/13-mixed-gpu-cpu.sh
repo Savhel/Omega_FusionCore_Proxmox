@@ -53,7 +53,7 @@ _TMPFILES+=("$LOG")
     --vm-requested-mib 2048 \
     --region-mib 2048 \
     --current-node "$COMPUTE_NODE" \
-    --gpu-required true \
+    --gpu-required \
     --gpu-placement-interval-secs 10 \
     --vm-vcpus "$MIN_VCPUS_REQUIRED" \
     --vm-initial-vcpus 1 \

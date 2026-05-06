@@ -23,7 +23,7 @@ _TMPFILES+=("$LOG_AGENT")
     --vm-id 20 \
     --vm-requested-mib 64 \
     --region-mib 64 \
-    --prefetch-enabled true \
+    --prefetch-enabled \
     --prefetch-lookahead 3 \
     --mode demo >"$LOG_AGENT" 2>&1 || true
 

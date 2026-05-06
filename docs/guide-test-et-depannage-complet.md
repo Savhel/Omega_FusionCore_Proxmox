@@ -96,6 +96,90 @@ curl -s http://10.10.0.11:9300/control/metrics
 
 ## 3. Création D’Une VM Test Qui Marche
 
+### 3.0 Prérequis — ce qu’une VM doit avoir pour être gérée par omega
+
+Pour qu’omega puisse gérer une VM correctement (balloon, vCPU élastique, migration, disk I/O), la VM doit être créée avec les bons paramètres dès le départ. Un oubli à la création oblige à recréer la VM.
+
+**Résumé des contraintes obligatoires :**
+
+| Fonctionnalité | Paramètre Proxmox requis | Pourquoi |
+|---|---|---|
+| RAM balloon | `--balloon <max_mib>` = valeur de `--memory` | Active le driver virtio-balloon dans QEMU. Sans ça, `qm balloon` échoue. |
+| RAM thin-provisioning | `--memory <max_mib>` = RAM max souhaitée | C’est le plafond absolu. La VM démarre plus petite via balloon. |
+| vCPU élastique | `--hotplug cpu` + `--cores <max>` + `--vcpus 1` | Sans hotplug cpu, `qm set --vcpus N` échoue. Les cores définissent le plafond. |
+| Migration live | `--net0 virtio,...` + stockage Ceph | La migration QEMU online nécessite un réseau virtio et des disques partagés. |
+| Disk I/O scheduler | Aucun — géré via cgroups v2 automatiquement | Fonctionne dès que le kernel a cgroups v2 actif (PVE 8+). |
+
+**Commande de création complète (VM de test `9001`) :**
+
+```bash
+qm create 9001 \
+  --name omega-test \
+  --memory 2048 \
+  --balloon 2048 \
+  --cores 4 \
+  --sockets 1 \
+  --vcpus 1 \
+  --hotplug cpu,memory \
+  --net0 virtio,bridge=vmbr0 \
+  --ostype l26 \
+  --scsihw virtio-scsi-pci \
+  --scsi0 ceph-vms:20 \
+  --ide2 local:iso/debian-12-netinst.iso,media=cdrom \
+  --boot order=ide2
+```
+
+Points clés :
+- `--memory 2048` = plafond RAM absolu (omega ne dépassera jamais ça)
+- `--balloon 2048` = doit être égal à `--memory` pour activer virtio-balloon
+- `--cores 4 --vcpus 1` = 4 cores disponibles (plafond hotplug), 1 actif au démarrage
+- `--hotplug cpu,memory` = permet à `qm set --vcpus N` de fonctionner à chaud
+- stockage sur Ceph = obligatoire pour la migration live (disques partagés entre nœuds)
+
+**Vérifier qu’une VM existante est correctement configurée :**
+
+```bash
+qm config 9001 | grep -E "memory|balloon|cores|vcpus|hotplug"
+# Doit afficher :
+# balloon: 2048
+# cores: 4
+# hotplug: cpu,memory
+# memory: 2048
+# vcpus: 1
+```
+
+**qemu-guest-agent (obligatoire pour les tests de charge) :**
+
+Les tests qui simulent une charge CPU/RAM dans la VM utilisent `qm guest exec` pour lancer `stress-ng` à l'intérieur du guest. Sans qemu-guest-agent, le test se rabat sur une injection dans le cgroup QEMU côté hôte (moins précis) et affiche des warnings.
+
+```bash
+# 1. Activer l'agent dans la config Proxmox (VM éteinte ou allumée)
+qm set 9001 --agent enabled=1
+
+# 2. Installer le paquet dans la VM
+# Depuis la console de la VM (Debian/Ubuntu) :
+apt install -y qemu-guest-agent
+systemctl enable --now qemu-guest-agent
+
+# 3. Vérifier depuis l'hôte
+qm agent 9001 ping   # doit répondre sans erreur
+```
+
+**Reconfigurer une VM existante sans la recréer :**
+
+```bash
+# Activer balloon (à faire VM éteinte)
+qm set 9001 --balloon 2048
+
+# Activer hotplug CPU (à faire VM éteinte)
+qm set 9001 --hotplug cpu,memory
+qm set 9001 --cores 4 --vcpus 1
+```
+
+> **Note** : `--balloon` et `--hotplug cpu` ne peuvent pas être activés à chaud sur une VM déjà démarrée sans ces options. Il faut arrêter la VM, modifier la config, puis redémarrer.
+
+---
+
 Cette section rassemble les commandes Proxmox qui ont effectivement servi et qui sont compatibles avec le cluster réel.
 
 ### 3.1 Créer une VM vide
@@ -105,9 +189,12 @@ Exemple `9004` :
 ```bash
 qm create 9004 \
   --name omega-test-cpu \
-  --memory 512 \
+  --memory 2048 \
+  --balloon 2048 \
   --cores 4 \
   --sockets 1 \
+  --vcpus 1 \
+  --hotplug cpu,memory \
   --net0 virtio,bridge=vmbr0 \
   --ostype l26 \
   --scsihw virtio-scsi-pci

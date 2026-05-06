@@ -35,7 +35,7 @@ _TMPFILES+=("$LOG_AGENT")
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 64 \
     --eviction-interval-secs 3 \
-    --migration-enabled true \
+    --migration-enabled \
     --migration-interval-secs 20 \
     --mode daemon >"$LOG_AGENT" 2>&1 &
 _PIDS+=($!)

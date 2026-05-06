@@ -23,10 +23,16 @@ use node_a_agent::shared_memory::{MemoryBackendKind, MemoryBackendOptions};
 use node_a_agent::uffd::{spawn_fault_handler_thread, UffdHandle};
 use node_a_agent::balloon::BalloonManager;
 use node_a_agent::disk_scheduler::DiskScheduler;
+use node_a_agent::prefetch::PrefetchEngine;
 use node_a_agent::vcpu_scheduler::VCpuScheduler;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23 ne choisit pas de provider automatiquement.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .unwrap_or(());
+
     let cfg = Config::parse();
 
     let filter =
@@ -123,12 +129,39 @@ async fn main() -> Result<()> {
     uffd.register_region(region.base_ptr(), region_size)?;
     let uffd_fd = uffd.fd();
 
+    // ── Moteur de préfetch séquentiel ─────────────────────────────────────────
+    let prefetch_engine: Option<Arc<PrefetchEngine>> = if cfg.prefetch_enabled {
+        let engine = Arc::new(PrefetchEngine::new(
+            (cfg.region_mib * 1024 * 1024 / node_a_agent::memory::PAGE_SIZE) as u64,
+            cfg.prefetch_lookahead,
+            cfg.prefetch_max_cached,
+        ));
+        info!(
+            lookahead   = cfg.prefetch_lookahead,
+            max_cached  = cfg.prefetch_max_cached,
+            "préfetch séquentiel activé"
+        );
+        Some(engine)
+    } else {
+        None
+    };
+
     // ── Thread handler uffd ───────────────────────────────────────────────────
     let shutdown_flag  = Arc::new(AtomicBool::new(false));
     let region_start   = region.base_ptr() as u64;
     let region_handler = region.clone();
+    let prefetch_ref    = prefetch_engine.clone();
     let fault_handler  = Box::new(move |_vm_id: u32, page_id: u64, _addr: u64, _write: bool| {
-        region_handler.fetch_page(page_id)
+        let result = region_handler.fetch_page(page_id);
+        // Après un fetch réussi, enregistrer l'accès pour la détection de stride.
+        // L'exécution réelle du prefetch (UFFDIO_COPY préventif) nécessite un support
+        // dédié dans MemoryRegion — la détection est active, le cache reste en attente.
+        if result.is_ok() {
+            if let Some(engine) = &prefetch_ref {
+                engine.record_access(page_id);
+            }
+        }
+        result
     });
 
     let _handler_thread = spawn_fault_handler_thread(

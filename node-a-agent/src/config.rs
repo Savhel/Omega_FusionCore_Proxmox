@@ -239,6 +239,21 @@ pub struct Config {
     #[arg(long, default_value_t = 1, env = "AGENT_BALLOON_SHRINK_FAULTS_PER_SEC")]
     pub balloon_shrink_faults_per_sec: u64,
 
+    // ─── Préfetch séquentiel ──────────────────────────────────────────────────
+
+    /// Activer le moteur de préfetch séquentiel (détection stride + GET_PAGE anticipé).
+    #[arg(long, default_value_t = false, env = "AGENT_PREFETCH_ENABLED")]
+    pub prefetch_enabled: bool,
+
+    /// Nombre de pages à préfetcher en avance de phase quand un stride est détecté.
+    #[arg(long, default_value_t = 4, env = "AGENT_PREFETCH_LOOKAHEAD")]
+    pub prefetch_lookahead: u64,
+
+    /// Taille max du cache de pages préfetchées (en nombre de pages).
+    /// Au-delà, les plus anciennes sont évincées (FIFO).
+    #[arg(long, default_value_t = 64, env = "AGENT_PREFETCH_MAX_CACHED")]
+    pub prefetch_max_cached: usize,
+
     // ─── Scheduler I/O disque ─────────────────────────────────────────────────
 
     /// Activer le scheduler de priorité I/O disque (cgroups v2 io.weight + PSI).

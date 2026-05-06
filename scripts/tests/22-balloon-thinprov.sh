@@ -45,7 +45,7 @@ _TMPFILES+=("$LOG_AGENT")
     --vm-requested-mib "$VM_MAX_MIB" \
     --region-mib "$VM_MAX_MIB" \
     --current-node "$(hostname)" \
-    --balloon-enabled true \
+    --balloon-enabled \
     --balloon-initial-mib "$VM_INIT_MIB" \
     --balloon-step-mib "$VM_STEP_MIB" \
     --balloon-interval-secs 5 \

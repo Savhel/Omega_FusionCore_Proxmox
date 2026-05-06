@@ -19,6 +19,11 @@ use node_bc_store::status_server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23 ne choisit pas de provider automatiquement — ring doit être installé explicitement.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .unwrap_or(());  // idempotent : déjà installé dans les tests = OK
+
     let cfg = Config::parse();
 
     let filter =

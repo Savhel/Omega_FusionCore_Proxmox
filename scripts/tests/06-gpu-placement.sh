@@ -45,7 +45,7 @@ _TMPFILES+=("$LOG_AGENT")
     --vm-requested-mib 2048 \
     --region-mib 2048 \
     --current-node "$(hostname)" \
-    --gpu-required true \
+    --gpu-required \
     --gpu-placement-interval-secs 10 \
     --mode daemon >"$LOG_AGENT" 2>&1 &
 _PIDS+=($!)

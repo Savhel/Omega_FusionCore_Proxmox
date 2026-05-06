@@ -44,7 +44,7 @@ _TMPFILES+=("$LOG")
     --vm-initial-vcpus 2 \
     --vcpu-high-threshold-pct 50 \
     --vcpu-overcommit-ratio 3 \
-    --migration-enabled true \
+    --migration-enabled \
     --migration-interval-secs 15 \
     --mode daemon >"$LOG" 2>&1 &
 _PIDS+=($!)

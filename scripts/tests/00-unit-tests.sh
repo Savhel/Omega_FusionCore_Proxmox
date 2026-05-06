@@ -7,6 +7,8 @@ source "$(dirname "$0")/lib.sh"
 
 header "Test 0 — Tests unitaires"
 
+command -v cargo &>/dev/null || fail "cargo absent sur ce nœud — ce test doit tourner sur la machine de dev, pas sur un nœud Proxmox"
+
 step "Compilation workspace"
 cd "$REPO_ROOT"
 cargo build --workspace --quiet || fail "compilation échouée"
