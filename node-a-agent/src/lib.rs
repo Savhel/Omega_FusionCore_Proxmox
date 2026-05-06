@@ -3,6 +3,7 @@ pub mod clock_eviction;
 pub mod cluster;
 pub mod compaction;
 pub mod config;
+pub mod disk_scheduler;
 pub mod gpu_placement;
 pub mod gpu_scheduler;
 pub mod memory;

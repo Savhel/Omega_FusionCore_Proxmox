@@ -194,6 +194,7 @@ run_test_on_node_isolated "10" "Multi-VM 3 agents"    "$TESTS_DIR/10-multi-vm.sh
 run_test_on_node_isolated "18" "Recall LIFO"          "$TESTS_DIR/18-recall-lifo.sh"
 run_test_on_node_isolated "20" "Prefetch stride"      "$TESTS_DIR/20-prefetch-stride.sh"
 run_test_on_node_isolated "21" "TLS TOFU"             "$TESTS_DIR/21-tls-tofu.sh"
+run_test_on_node_isolated "23" "Disk I/O scheduler"   "$TESTS_DIR/23-disk-io-scheduler.sh"
 
 # ── Tests cluster (daemon actif, qm/pvesh disponibles) ────────────────────────
 run_test_on_node "05" "vCPU élastique"              "$TESTS_DIR/05-vcpu-elastic.sh"         "$VMID"

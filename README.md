@@ -200,9 +200,81 @@ JSON sur HTTP plain. Le port 9200 est accessible par le cluster entier. Le port 
 
 ---
 
-## Prérequis
+## Démarrage rapide
 
-- Proxmox VE 8.x ou 9.x, 3 nœuds
+Tout se passe dans un seul script interactif :
+
+```bash
+git clone <ce-repo>
+cd omega-remote-paging
+bash scripts/omega-lab.sh
+```
+
+Le menu couvre l'intégralité du cycle de vie :
+
+```
+── Configuration ──────────────────────────────
+ [c]  Configurer les nœuds (IPs, VM test, user SSH) → sauvegardé dans scripts/cluster.conf
+
+── Installation ───────────────────────────────
+ [I]  Installation complète  (désinstaller → build → déployer sur tous les nœuds)
+ [u]  Désinstaller           (arrêt des services + suppression des fichiers)
+ [b]  Build                  (cargo build --release --workspace)
+ [d]  Déployer               (copie binaires SSH + services systemd + wrapper QEMU)
+
+── Tests ──────────────────────────────────────
+ [A]  Tous les tests — sections 1→5 avec pause entre chaque
+ [1]  Section 1 — Isolés    : smoke · réplication · failover · éviction
+ [2]  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU · disk I/O
+ [3]  Section 3 — Cluster   : vCPU élastique · migration · balloon · compaction
+ [4]  Section 4 — GPU       : placement · scheduler round-robin
+ [5]  Section 5 — Mixtes    : stress · live migration sous pression · drain nœud
+ [g]  Activer/désactiver les tests GPU (machines physiques avec GPU)
+ 00–23 / M1–M7  Lancer un test individuel par numéro
+```
+
+**Workflow typique première installation :**
+
+```
+[c]  → entrer les IPs des nœuds Proxmox + VMID
+[I]  → installation complète (uninstall + build + deploy)
+[A]  → tous les tests avec pause entre sections
+```
+
+**Prérequis :**
+- Rust 1.75+ installé sur la machine de compilation
+- `rsync` disponible en local
+- Accès SSH root sans mot de passe vers tous les nœuds (voir ci-dessous)
+
+**Configurer SSH sans mot de passe (une seule fois) :**
+
+```bash
+# 1. Générer une clé SSH si vous n'en avez pas encore
+ssh-keygen -t ed25519 -C "omega-lab" -N ""
+# → crée ~/.ssh/id_ed25519 et ~/.ssh/id_ed25519.pub
+
+# 2. Copier la clé publique sur chaque nœud
+#    Remplacer pve1, pve2, pve3 par vos IPs ou hostnames
+ssh-copy-id root@pve1
+ssh-copy-id root@pve2
+ssh-copy-id root@pve3
+
+# 3. Vérifier (ne doit plus demander de mot de passe)
+ssh root@pve1 hostname
+ssh root@pve2 hostname
+ssh root@pve3 hostname
+```
+
+> Si `ssh-copy-id` n'est pas disponible, l'équivalent manuel :
+> ```bash
+> cat ~/.ssh/id_ed25519.pub | ssh root@pve1 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+> ```
+
+---
+
+## Prérequis cluster
+
+- Proxmox VE 8.x ou 9.x, 2 nœuds minimum (3 recommandé)
 - Ceph RBD pour le stockage des disques VMs (partagé entre nœuds)
 - Rust 1.75+ (compilation sur la machine de dev)
 - Python 3.10+

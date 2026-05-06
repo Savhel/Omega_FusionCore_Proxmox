@@ -362,9 +362,10 @@ run_section_2() {
     _need_config || return
     _hdr "══ Section 2 — Fonctionnalités avancées store ══"
     _sync
-    _run_isolated "18" "Recall LIFO"       "18-recall-lifo.sh"
-    _run_isolated "20" "Prefetch stride"   "20-prefetch-stride.sh"
-    _run_isolated "21" "TLS TOFU"          "21-tls-tofu.sh"
+    _run_isolated "18" "Recall LIFO"         "18-recall-lifo.sh"
+    _run_isolated "20" "Prefetch stride"     "20-prefetch-stride.sh"
+    _run_isolated "21" "TLS TOFU"            "21-tls-tofu.sh"
+    _run_isolated "23" "Disk I/O scheduler"  "23-disk-io-scheduler.sh"
 }
 
 run_section_3() {
@@ -452,6 +453,7 @@ run_one() {
         18) _run_isolated "18" "Recall LIFO"                "18-recall-lifo.sh" ;;
         20) _run_isolated "20" "Prefetch stride"            "20-prefetch-stride.sh" ;;
         21) _run_isolated "21" "TLS TOFU"                   "21-tls-tofu.sh" ;;
+        23) _run_isolated "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
         05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh"         "$OMEGA_TEST_VMID" ;;
         06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh"        "$OMEGA_TEST_VMID" ;;
         07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh"        "$OMEGA_TEST_VMID" "9002" ;;
@@ -533,7 +535,7 @@ show_menu() {
 
     # ── Tests individuels ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Test individuel (entrer le numéro) ───────────────────────${RESET}"
-    echo -e "   ${DIM}Isolés  :${RESET}  00  01  02  03  04  10  18  20  21"
+    echo -e "   ${DIM}Isolés  :${RESET}  00  01  02  03  04  10  18  20  21  23"
     echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22"
     echo -e "   ${DIM}Mixtes  :${RESET}  M1  M2  M3  M4  M5  M6  M7"
     echo ""

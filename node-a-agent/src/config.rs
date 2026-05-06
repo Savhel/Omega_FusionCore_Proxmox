@@ -239,6 +239,26 @@ pub struct Config {
     #[arg(long, default_value_t = 1, env = "AGENT_BALLOON_SHRINK_FAULTS_PER_SEC")]
     pub balloon_shrink_faults_per_sec: u64,
 
+    // ─── Scheduler I/O disque ─────────────────────────────────────────────────
+
+    /// Activer le scheduler de priorité I/O disque (cgroups v2 io.weight + PSI).
+    #[arg(long, default_value_t = false, env = "AGENT_DISK_SCHEDULER_ENABLED")]
+    pub disk_scheduler_enabled: bool,
+
+    /// Seuil PSI `some avg10` (%) au-delà duquel la contention disque est détectée.
+    /// 0 = utiliser la valeur par défaut (10.0 %).
+    #[arg(long, default_value_t = 0.0, env = "AGENT_DISK_PSI_THRESHOLD")]
+    pub disk_psi_threshold: f32,
+
+    /// Delta I/O (Mio/intervalle) au-dessus duquel une VM est considérée active.
+    /// 0 = utiliser la valeur par défaut (1 Mio).
+    #[arg(long, default_value_t = 0, env = "AGENT_DISK_ACTIVE_BYTES_MIB")]
+    pub disk_active_bytes_mib: u64,
+
+    /// Intervalle en secondes entre deux lectures PSI + io.stat.
+    #[arg(long, default_value_t = 10, env = "AGENT_DISK_INTERVAL_SECS")]
+    pub disk_interval_secs: u64,
+
     // ─── Métriques ────────────────────────────────────────────────────────────
 
     /// Adresse d'écoute du serveur HTTP de métriques.

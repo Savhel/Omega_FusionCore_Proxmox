@@ -230,6 +230,7 @@ impl MigrationAgent {
             // Remettre cpu.weight au défaut : la VM redémarre sur le nœud cible
             // avec un scheduler propre, le boost n'a plus de raison d'être ici.
             crate::vcpu_scheduler::reset_cpu_weight(self.vm_id);
+            crate::disk_scheduler::reset_io_weight(self.vm_id);
             Ok(())
         } else {
             let err = String::from_utf8_lossy(&out.stderr);

@@ -1,5 +1,19 @@
 **Guide d'installation — omega-remote-paging**  
-Ce guide couvre l'installation complète sur un cluster de 3 nœuds Proxmox.  
+Ce guide couvre l'installation complète sur un cluster de 3 nœuds Proxmox.
+
+> **Installation automatisée (recommandée)**
+>
+> Tout peut se faire depuis le script interactif sans lire ce guide :
+>
+> ```bash
+> bash scripts/omega-lab.sh
+> # [c] → configurer les nœuds
+> # [I] → installation complète (uninstall + build + deploy)
+> # [A] → lancer tous les tests
+> ```
+>
+> Ce guide détaille les étapes manuelles pour ceux qui veulent comprendre
+> chaque opération ou déboguer un problème spécifique.  
    
  Toutes les commandes sont à exécuter en **root** sauf mention contraire.  
 ![](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAnEAAAACCAYAAAA3pIp+AAAABmJLR0QA/wD/AP+gvaeTAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAANklEQVR4nO3OQQmAABRAsSeYxZy/lHd7GMACBrCCNxG2BFtmZquOAAD4i3Ot7mr/egIAwGvXA7GTBde8bLBeAAAAAElFTkSuQmCC)  
@@ -39,7 +53,40 @@ Chaque nœud doit être un Proxmox VE 7.x, 8.x ou 9.x.
  mount | grep cgroup2  
  # → cgroup2 on /sys/fs/cgroup type cgroup2 ...  
    
-**1.2 Réseau**  
+**1.2 SSH sans mot de passe (obligatoire pour le déploiement)**
+
+Le script `deploy.sh` et `omega-lab.sh` se connectent en SSH root sur chaque nœud.
+La connexion doit fonctionner sans saisie de mot de passe (clé publique).
+
+```bash
+# Sur la machine de développement (là où vous compilez)
+
+# Générer une clé ED25519 si vous n'en avez pas encore
+ssh-keygen -t ed25519 -C "omega-deploy" -N ""
+# Répond à la question "Enter file" avec Entrée → enregistré dans ~/.ssh/id_ed25519
+
+# Copier la clé sur chaque nœud du cluster
+ssh-copy-id root@192.168.10.1   # node-a / pve1
+ssh-copy-id root@192.168.10.2   # node-b / pve2
+ssh-copy-id root@192.168.10.3   # node-c / pve3
+
+# Vérification — aucun mot de passe ne doit être demandé
+ssh root@192.168.10.1 hostname
+ssh root@192.168.10.2 hostname
+ssh root@192.168.10.3 hostname
+```
+
+Si `ssh-copy-id` n'est pas disponible sur votre distrib :
+
+```bash
+cat ~/.ssh/id_ed25519.pub | ssh root@192.168.10.1 \
+    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+> Sur Proxmox, `PermitRootLogin` est activé par défaut dans `/etc/ssh/sshd_config`.
+> Si vous l'avez désactivé, réactivez-le ou créez un utilisateur sudoers et ajustez `DEPLOY_USER`.
+
+**1.3 Réseau**  
 Les 3 nœuds doivent se joindre sur un réseau dédié (VLAN ou interface de stockage).  
 Exemples d'adresses utilisées dans ce guide :  
    node-a : 192.168.10.1  (hostname: pve-node1)  

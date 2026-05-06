@@ -22,6 +22,7 @@ use node_a_agent::remote::RemoteStorePool;
 use node_a_agent::shared_memory::{MemoryBackendKind, MemoryBackendOptions};
 use node_a_agent::uffd::{spawn_fault_handler_thread, UffdHandle};
 use node_a_agent::balloon::BalloonManager;
+use node_a_agent::disk_scheduler::DiskScheduler;
 use node_a_agent::vcpu_scheduler::VCpuScheduler;
 
 #[tokio::main]
@@ -237,6 +238,25 @@ async fn main() -> Result<()> {
             step_mib    = cfg.balloon_step_mib,
             interval_s  = cfg.balloon_interval_secs,
             "balloon thin-provisioning activé"
+        );
+    }
+
+    // ── Scheduler I/O disque ─────────────────────────────────────────────────
+    if cfg.disk_scheduler_enabled {
+        let ds = Arc::new(DiskScheduler::new(
+            vec![cfg.vm_id],
+            cfg.disk_interval_secs,
+            cfg.disk_psi_threshold,
+            cfg.disk_active_bytes_mib * 1024 * 1024,
+        ));
+        let sd = shutdown_flag.clone();
+        tokio::spawn(async move { ds.run(sd).await });
+        info!(
+            vm_id          = cfg.vm_id,
+            psi_threshold  = cfg.disk_psi_threshold,
+            active_mib     = cfg.disk_active_bytes_mib,
+            interval_s     = cfg.disk_interval_secs,
+            "scheduler I/O disque activé"
         );
     }
 
