@@ -448,11 +448,11 @@ run_section_3() {
     _need_config || return
     _hdr "══ Section 3 — Tests cluster (vCPU, migration, balloon, compaction) ══"
     _sync
-    _run_cluster "05" "vCPU élastique"            "05-vcpu-elastic.sh"         "$OMEGA_TEST_VMID"
-    _run_cluster "08" "Migration RAM"             "08-migration-ram.sh"        "$OMEGA_TEST_VMID"
+    _run_cluster "05" "vCPU élastique"            "05-vcpu-elastic.sh"
+    _run_cluster "08" "Migration RAM"             "08-migration-ram.sh"
     _run_cluster "09" "Orphan cleaner"            "09-orphan-cleaner.sh"
-    _run_cluster "19" "Compaction cluster"        "19-compaction.sh"           "$OMEGA_TEST_VMID"
-    _run_cluster "22" "Balloon thin-provisioning" "22-balloon-thinprov.sh"     "$OMEGA_TEST_VMID"
+    _run_cluster "19" "Compaction cluster"        "19-compaction.sh"
+    _run_cluster "22" "Balloon thin-provisioning" "22-balloon-thinprov.sh"
 }
 
 run_section_4() {
@@ -464,8 +464,8 @@ run_section_4() {
         return
     fi
     _sync
-    _run_cluster "06" "GPU placement"  "06-gpu-placement.sh"  "$OMEGA_TEST_VMID"
-    _run_cluster "07" "GPU scheduler"  "07-gpu-scheduler.sh"  "$OMEGA_TEST_VMID" "9002"
+    _run_cluster "06" "GPU placement"  "06-gpu-placement.sh"
+    _run_cluster "07" "GPU scheduler"  "07-gpu-scheduler.sh"
 }
 
 run_section_5() {
@@ -473,15 +473,15 @@ run_section_5() {
     _hdr "══ Section 5 — Tests mixtes (stress, pression cluster) ══"
     _sync
     local nc="${#NODES_ARR[@]}"
-    _run_cluster "M1" "RAM + CPU simultanés"        "11-mixed-ram-cpu.sh"               "$OMEGA_TEST_VMID"
-    _run_cluster "M2" "CPU+RAM → migration"         "12-mixed-cpu-ram-migration.sh"     "$OMEGA_TEST_VMID"
+    _run_cluster "M1" "RAM + CPU simultanés"        "11-mixed-ram-cpu.sh"
+    _run_cluster "M2" "CPU+RAM → migration"         "12-mixed-cpu-ram-migration.sh"
     if $DO_GPU; then
-        _run_cluster "M3" "GPU+CPU multi"           "13-mixed-gpu-cpu.sh"               "$OMEGA_TEST_VMID"
+        _run_cluster "M3" "GPU+CPU multi"           "13-mixed-gpu-cpu.sh"
     else
         RESULTS["M3"]="SKIP"; ((TOTAL_SKIP++)) || true
     fi
     _run_cluster "M4" "Stress cluster complet"      "14-mixed-cluster-pressure.sh"      "$nc" 60
-    _run_cluster "M5" "Live migration pression"     "15-mixed-live-migration-pressure.sh" "$OMEGA_TEST_VMID"
+    _run_cluster "M5" "Live migration pression"     "15-mixed-live-migration-pressure.sh"
     _run_cluster "M6" "Rafale démarrages"           "16-mixed-burst-starts.sh"          6
     _run_cluster "M7" "Drain nœud"                  "17-mixed-drain-node.sh"            "${CONTROLLER_NODE}"
 }
@@ -530,18 +530,18 @@ run_one() {
         20) _run_isolated "20" "Prefetch stride"            "20-prefetch-stride.sh" ;;
         21) _run_isolated "21" "TLS TOFU"                   "21-tls-tofu.sh" ;;
         23) _run_local    "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
-        05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh"         "$OMEGA_TEST_VMID" ;;
-        06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh"        "$OMEGA_TEST_VMID" ;;
-        07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh"        "$OMEGA_TEST_VMID" "9002" ;;
-        08) _run_cluster  "08" "Migration RAM"              "08-migration-ram.sh"        "$OMEGA_TEST_VMID" ;;
+        05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh" ;;
+        06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh" ;;
+        07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh" ;;
+        08) _run_cluster  "08" "Migration RAM"              "08-migration-ram.sh" ;;
         09) _run_cluster  "09" "Orphan cleaner"             "09-orphan-cleaner.sh" ;;
-        19) _run_cluster  "19" "Compaction cluster"         "19-compaction.sh"           "$OMEGA_TEST_VMID" ;;
-        22) _run_cluster  "22" "Balloon thin-provisioning"  "22-balloon-thinprov.sh"     "$OMEGA_TEST_VMID" ;;
-        M1) _run_cluster  "M1" "RAM + CPU simultanés"       "11-mixed-ram-cpu.sh"             "$OMEGA_TEST_VMID" ;;
-        M2) _run_cluster  "M2" "CPU+RAM → migration"        "12-mixed-cpu-ram-migration.sh"   "$OMEGA_TEST_VMID" ;;
-        M3) _run_cluster  "M3" "GPU+CPU multi"              "13-mixed-gpu-cpu.sh"             "$OMEGA_TEST_VMID" ;;
+        19) _run_cluster  "19" "Compaction cluster"         "19-compaction.sh" ;;
+        22) _run_cluster  "22" "Balloon thin-provisioning"  "22-balloon-thinprov.sh" ;;
+        M1) _run_cluster  "M1" "RAM + CPU simultanés"       "11-mixed-ram-cpu.sh" ;;
+        M2) _run_cluster  "M2" "CPU+RAM → migration"        "12-mixed-cpu-ram-migration.sh" ;;
+        M3) _run_cluster  "M3" "GPU+CPU multi"              "13-mixed-gpu-cpu.sh" ;;
         M4) _run_cluster  "M4" "Stress cluster"             "14-mixed-cluster-pressure.sh"    "${#NODES_ARR[@]}" 60 ;;
-        M5) _run_cluster  "M5" "Live migration pression"    "15-mixed-live-migration-pressure.sh" "$OMEGA_TEST_VMID" ;;
+        M5) _run_cluster  "M5" "Live migration pression"    "15-mixed-live-migration-pressure.sh" ;;
         M6) _run_cluster  "M6" "Rafale démarrages"          "16-mixed-burst-starts.sh"        6 ;;
         M7) _run_cluster  "M7" "Drain nœud"                 "17-mixed-drain-node.sh"          "${CONTROLLER_NODE}" ;;
         *)  _warn "ID de test inconnu : $1" ;;
