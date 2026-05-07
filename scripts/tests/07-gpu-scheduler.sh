@@ -5,22 +5,12 @@
 
 source "$(dirname "$0")/lib.sh"
 
-if [[ -n "${1:-}" ]]; then
-    VMID1="$1"
-    qm status "$VMID1" | grep -q "running" || fail "VM $VMID1 non démarrée (qm start $VMID1)"
-else
-    VMID1=$(alloc_test_vmid)
-    create_test_vm "$VMID1" 2048 2
-    start_test_vm  "$VMID1" 90
-fi
-if [[ -n "${2:-}" ]]; then
-    VMID2="$2"
-    qm status "$VMID2" | grep -q "running" || fail "VM $VMID2 non démarrée (qm start $VMID2)"
-else
-    VMID2=$(alloc_test_vmid)
-    create_test_vm "$VMID2" 2048 2
-    start_test_vm  "$VMID2" 90
-fi
+VMID1="${1:-${TEST_VMIDS_ARR[0]:-$TEST_VMID}}"
+VMID2="${2:-${TEST_VMIDS_ARR[1]:-}}"
+[[ -n "$VMID1" ]] || fail "VMID1 non défini — vérifier OMEGA_TEST_VMIDS dans cluster.conf"
+[[ -n "$VMID2" ]] || fail "VMID2 non défini — ce test requiert 2 VMIDs dans OMEGA_TEST_VMIDS"
+qm status "$VMID1" | grep -q "running" || fail "VM $VMID1 non démarrée (qm start $VMID1)"
+qm status "$VMID2" | grep -q "running" || fail "VM $VMID2 non démarrée (qm start $VMID2)"
 
 header "Test 7 — GPU scheduler round-robin (VM $VMID1 + VM $VMID2)"
 

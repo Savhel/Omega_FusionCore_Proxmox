@@ -25,13 +25,7 @@ pass "tests unitaires disk_scheduler OK"
 
 step "2/3 : démarrage agent avec disk-scheduler-enabled"
 
-STORE_PID=""
-cleanup() {
-    [[ -n "$STORE_PID" ]] && kill "$STORE_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-start_store 0 9100
+start_store "ds0" 9100 9200
 
 AGENT_LOG=$(mktemp /tmp/omega-disk-sched-XXXXXX.log)
 "${AGENT_BIN}" \
@@ -46,6 +40,8 @@ AGENT_LOG=$(mktemp /tmp/omega-disk-sched-XXXXXX.log)
     --log-level           debug \
     2>&1 | tee "$AGENT_LOG" &
 AGENT_PID=$!
+_PIDS+=($AGENT_PID)
+_TMPFILES+=("$AGENT_LOG")
 
 # Attendre le log de démarrage ou la fin du mode demo
 for i in $(seq 1 20); do
@@ -69,21 +65,19 @@ if grep -q "SUCCÈS" "$AGENT_LOG"; then
 else
     fail "mode demo n'a pas retourné SUCCÈS"
 fi
-rm -f "$AGENT_LOG"
-
 # ── 3. Test cluster (charge I/O réelle) ───────────────────────────────────────
 
 if [[ "${CLUSTER_MODE:-0}" != "1" ]]; then
     warn "CLUSTER_MODE non activé — test de charge I/O disque ignoré"
     info "Pour le tester sur cluster : CLUSTER_MODE=1 VMID=<vmid> ./23-disk-io-scheduler.sh"
-    summary "Test 23 terminé (unitaire + isolation OK, cluster ignoré)"
+    pass "Test 23 terminé (unitaire + isolation OK, cluster ignoré)"
     exit 0
 fi
 
 step "3/3 : test cluster — io.weight sous charge I/O (VM ${VMID})"
 
-require_var VMID "identifiant VM Proxmox"
-require_var CONTROLLER_NODE "nœud Proxmox pour les commandes qm"
+[[ -n "${VMID:-}" ]]           || fail "VMID non défini (ex: VMID=9001 CLUSTER_MODE=1 ./23-disk-io-scheduler.sh)"
+[[ -n "${CONTROLLER_NODE:-}" ]] || fail "CONTROLLER_NODE non défini"
 
 # Démarrer l'agent en mode daemon avec disk-scheduler-enabled
 ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "
@@ -141,4 +135,4 @@ ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "
     done
 " 2>/dev/null || true
 
-summary "Test 23 — Scheduler I/O disque : OK"
+pass "Test 23 — Scheduler I/O disque : OK"

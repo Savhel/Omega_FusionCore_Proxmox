@@ -27,15 +27,9 @@ for v in vms:
 " 2>/dev/null || echo "")
 fi
 
-if [[ ${#VMS_TO_DRAIN[@]} -eq 0 ]]; then
-    info "aucune VM trouvée sur $DRAIN_NODE_PVE — création de 3 VMs de test"
-    _vmid=""
-    for _i in 1 2 3; do
-        _vmid=$(alloc_test_vmid)
-        create_test_vm "$_vmid" 1024 2
-        start_test_vm  "$_vmid" 90
-        VMS_TO_DRAIN+=("$_vmid")
-    done
+if [[ ${#VMS_TO_DRAIN[@]} -eq 0 && -n "${TEST_VMIDS_ARR[*]:-}" ]]; then
+    info "aucune VM trouvée sur $DRAIN_NODE_PVE — utilisation de OMEGA_TEST_VMIDS"
+    VMS_TO_DRAIN=("${TEST_VMIDS_ARR[@]}")
 fi
 
 # Si toujours aucune VM (ex: déjà migrée par M5), trouver la VM sur n'importe quel nœud

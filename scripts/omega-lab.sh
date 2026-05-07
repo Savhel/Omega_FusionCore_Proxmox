@@ -46,10 +46,12 @@ _ask()  { echo -en "${YELLOW}  → ${RESET}$* : "; }
 OMEGA_NODES=""
 OMEGA_CONTROLLER=""
 OMEGA_TEST_VMID="9001"
+OMEGA_TEST_VMIDS=""
 DEPLOY_USER="root"
 STORE_PORT="9100"
 STATUS_PORT="9200"
 NODES_ARR=()
+TEST_VMIDS_ARR=()
 CONTROLLER_NODE=""
 STORES_CSV=""
 STATUS_CSV=""
@@ -65,6 +67,8 @@ _load_config() {
 
     OMEGA_NODES="${OMEGA_NODES:-}"
     OMEGA_TEST_VMID="${OMEGA_TEST_VMID:-9001}"
+    OMEGA_TEST_VMIDS="${OMEGA_TEST_VMIDS:-$OMEGA_TEST_VMID}"
+    IFS=',' read -ra TEST_VMIDS_ARR <<< "$OMEGA_TEST_VMIDS"
     DEPLOY_USER="${DEPLOY_USER:-root}"
     STORE_PORT="${STORE_PORT:-9100}"
     STATUS_PORT="${STATUS_PORT:-9200}"
@@ -138,6 +142,7 @@ _remote_env() {
     echo "OMEGA_NODES='${OMEGA_NODES}' \
 OMEGA_CONTROLLER='${CONTROLLER_NODE}' \
 OMEGA_TEST_VMID='${OMEGA_TEST_VMID}' \
+OMEGA_TEST_VMIDS='${OMEGA_TEST_VMIDS}' \
 OMEGA_BIN_DIR='/tmp/omega-tests-bins'"
 }
 
@@ -253,9 +258,19 @@ do_configure() {
     read -r input_ctrl
     input_ctrl="${input_ctrl:-$first_node}"
 
-    _ask "VM test VMID [défaut : ${OMEGA_TEST_VMID}]"
-    read -r input_vmid
-    input_vmid="${input_vmid:-${OMEGA_TEST_VMID}}"
+    echo ""
+    echo -e "  VMIDs des VMs de test (séparés par virgule, doivent exister dans le cluster)."
+    echo -e "  ${DIM}Exemple : 9001,9002,9003${RESET}"
+    echo -e "  ${DIM}Tests qui ont besoin de 2 VMs (07-gpu-scheduler) utilisent les 2 premiers.${RESET}"
+    echo -e "  ${DIM}Test M7 drain utilise toute la liste.${RESET}"
+    echo ""
+    _ask "VMIDs de test [défaut : ${OMEGA_TEST_VMIDS:-9001}]"
+    read -r input_vmids
+    input_vmids="${input_vmids:-${OMEGA_TEST_VMIDS:-9001}}"
+    input_vmids="${input_vmids// /}"
+    # Premier VMID = OMEGA_TEST_VMID (compat legacy)
+    IFS=',' read -ra _tmp_vmids <<< "$input_vmids"
+    input_vmid="${_tmp_vmids[0]}"
 
     _ask "Utilisateur SSH [défaut : ${DEPLOY_USER}]"
     read -r input_user
@@ -272,7 +287,9 @@ OMEGA_NODES="${input_nodes}"
 # Nœud qui exécute le contrôleur (un seul au choix).
 OMEGA_CONTROLLER="${input_ctrl}"
 
-# VM principale utilisée pour les tests cluster.
+# VMIDs des VMs de test existantes dans le cluster (séparées par virgule).
+# Ces VMs doivent être démarrées avant de lancer les tests cluster.
+OMEGA_TEST_VMIDS="${input_vmids}"
 OMEGA_TEST_VMID="${input_vmid}"
 
 # Utilisateur SSH pour la connexion aux nœuds.
@@ -291,7 +308,7 @@ EOF
 
     echo -e "  ${GREEN}✓${RESET} Nœuds      : ${CYAN}${OMEGA_NODES}${RESET}"
     echo -e "  ${GREEN}✓${RESET} Contrôleur : ${CYAN}${CONTROLLER_NODE}${RESET}"
-    echo -e "  ${GREEN}✓${RESET} VM test    : ${CYAN}${OMEGA_TEST_VMID}${RESET}"
+    echo -e "  ${GREEN}✓${RESET} VMs test   : ${CYAN}${OMEGA_TEST_VMIDS}${RESET}"
     echo -e "  ${GREEN}✓${RESET} User SSH   : ${CYAN}${DEPLOY_USER}${RESET}"
     echo ""
 
@@ -448,11 +465,11 @@ run_section_3() {
     _need_config || return
     _hdr "══ Section 3 — Tests cluster (vCPU, migration, balloon, compaction) ══"
     _sync
-    _run_cluster "05" "vCPU élastique"            "05-vcpu-elastic.sh"
-    _run_cluster "08" "Migration RAM"             "08-migration-ram.sh"
+    _run_cluster "05" "vCPU élastique"            "05-vcpu-elastic.sh"         "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "08" "Migration RAM"             "08-migration-ram.sh"        "${TEST_VMIDS_ARR[0]}"
     _run_cluster "09" "Orphan cleaner"            "09-orphan-cleaner.sh"
-    _run_cluster "19" "Compaction cluster"        "19-compaction.sh"
-    _run_cluster "22" "Balloon thin-provisioning" "22-balloon-thinprov.sh"
+    _run_cluster "19" "Compaction cluster"        "19-compaction.sh"           "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "22" "Balloon thin-provisioning" "22-balloon-thinprov.sh"     "${TEST_VMIDS_ARR[0]}"
 }
 
 run_section_4() {
@@ -464,8 +481,8 @@ run_section_4() {
         return
     fi
     _sync
-    _run_cluster "06" "GPU placement"  "06-gpu-placement.sh"
-    _run_cluster "07" "GPU scheduler"  "07-gpu-scheduler.sh"
+    _run_cluster "06" "GPU placement"  "06-gpu-placement.sh"  "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "07" "GPU scheduler"  "07-gpu-scheduler.sh"  "${TEST_VMIDS_ARR[0]}" "${TEST_VMIDS_ARR[1]:-}"
 }
 
 run_section_5() {
@@ -473,15 +490,15 @@ run_section_5() {
     _hdr "══ Section 5 — Tests mixtes (stress, pression cluster) ══"
     _sync
     local nc="${#NODES_ARR[@]}"
-    _run_cluster "M1" "RAM + CPU simultanés"        "11-mixed-ram-cpu.sh"
-    _run_cluster "M2" "CPU+RAM → migration"         "12-mixed-cpu-ram-migration.sh"
+    _run_cluster "M1" "RAM + CPU simultanés"        "11-mixed-ram-cpu.sh"               "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "M2" "CPU+RAM → migration"         "12-mixed-cpu-ram-migration.sh"     "${TEST_VMIDS_ARR[0]}"
     if $DO_GPU; then
-        _run_cluster "M3" "GPU+CPU multi"           "13-mixed-gpu-cpu.sh"
+        _run_cluster "M3" "GPU+CPU multi"           "13-mixed-gpu-cpu.sh"               "${TEST_VMIDS_ARR[0]}"
     else
         RESULTS["M3"]="SKIP"; ((TOTAL_SKIP++)) || true
     fi
     _run_cluster "M4" "Stress cluster complet"      "14-mixed-cluster-pressure.sh"      "$nc" 60
-    _run_cluster "M5" "Live migration pression"     "15-mixed-live-migration-pressure.sh"
+    _run_cluster "M5" "Live migration pression"     "15-mixed-live-migration-pressure.sh" "${TEST_VMIDS_ARR[0]}"
     _run_cluster "M6" "Rafale démarrages"           "16-mixed-burst-starts.sh"          6
     _run_cluster "M7" "Drain nœud"                  "17-mixed-drain-node.sh"            "${CONTROLLER_NODE}"
 }
@@ -530,18 +547,18 @@ run_one() {
         20) _run_isolated "20" "Prefetch stride"            "20-prefetch-stride.sh" ;;
         21) _run_isolated "21" "TLS TOFU"                   "21-tls-tofu.sh" ;;
         23) _run_local    "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
-        05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh" ;;
-        06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh" ;;
-        07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh" ;;
-        08) _run_cluster  "08" "Migration RAM"              "08-migration-ram.sh" ;;
+        05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh"          "${TEST_VMIDS_ARR[0]}" ;;
+        06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh"         "${TEST_VMIDS_ARR[0]}" ;;
+        07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh"         "${TEST_VMIDS_ARR[0]}" "${TEST_VMIDS_ARR[1]:-}" ;;
+        08) _run_cluster  "08" "Migration RAM"              "08-migration-ram.sh"         "${TEST_VMIDS_ARR[0]}" ;;
         09) _run_cluster  "09" "Orphan cleaner"             "09-orphan-cleaner.sh" ;;
-        19) _run_cluster  "19" "Compaction cluster"         "19-compaction.sh" ;;
-        22) _run_cluster  "22" "Balloon thin-provisioning"  "22-balloon-thinprov.sh" ;;
-        M1) _run_cluster  "M1" "RAM + CPU simultanés"       "11-mixed-ram-cpu.sh" ;;
-        M2) _run_cluster  "M2" "CPU+RAM → migration"        "12-mixed-cpu-ram-migration.sh" ;;
-        M3) _run_cluster  "M3" "GPU+CPU multi"              "13-mixed-gpu-cpu.sh" ;;
-        M4) _run_cluster  "M4" "Stress cluster"             "14-mixed-cluster-pressure.sh"    "${#NODES_ARR[@]}" 60 ;;
-        M5) _run_cluster  "M5" "Live migration pression"    "15-mixed-live-migration-pressure.sh" ;;
+        19) _run_cluster  "19" "Compaction cluster"         "19-compaction.sh"            "${TEST_VMIDS_ARR[0]}" ;;
+        22) _run_cluster  "22" "Balloon thin-provisioning"  "22-balloon-thinprov.sh"      "${TEST_VMIDS_ARR[0]}" ;;
+        M1) _run_cluster  "M1" "RAM + CPU simultanés"       "11-mixed-ram-cpu.sh"         "${TEST_VMIDS_ARR[0]}" ;;
+        M2) _run_cluster  "M2" "CPU+RAM → migration"        "12-mixed-cpu-ram-migration.sh" "${TEST_VMIDS_ARR[0]}" ;;
+        M3) _run_cluster  "M3" "GPU+CPU multi"              "13-mixed-gpu-cpu.sh"         "${TEST_VMIDS_ARR[0]}" ;;
+        M4) _run_cluster  "M4" "Stress cluster"             "14-mixed-cluster-pressure.sh" "${#NODES_ARR[@]}" 60 ;;
+        M5) _run_cluster  "M5" "Live migration pression"    "15-mixed-live-migration-pressure.sh" "${TEST_VMIDS_ARR[0]}" ;;
         M6) _run_cluster  "M6" "Rafale démarrages"          "16-mixed-burst-starts.sh"        6 ;;
         M7) _run_cluster  "M7" "Drain nœud"                 "17-mixed-drain-node.sh"          "${CONTROLLER_NODE}" ;;
         *)  _warn "ID de test inconnu : $1" ;;
@@ -562,7 +579,7 @@ show_menu() {
         echo -e "  ${GREEN}●${RESET} Cluster configuré"
         echo -e "    Nœuds (${#NODES_ARR[@]}) : ${CYAN}${OMEGA_NODES}${RESET}"
         echo -e "    Contrôleur        : ${CYAN}${CONTROLLER_NODE}${RESET}"
-        echo -e "    VM test           : ${CYAN}${OMEGA_TEST_VMID}${RESET}"
+        echo -e "    VMs test          : ${CYAN}${OMEGA_TEST_VMIDS}${RESET}  ${DIM}(${#TEST_VMIDS_ARR[@]} VM(s))${RESET}"
         echo -e "    GPU               : $(${DO_GPU} && echo "${GREEN}activé${RESET}" || echo "${DIM}non (--gpu)${RESET}")"
     else
         echo -e "  ${RED}●${RESET} ${BOLD}Cluster non configuré${RESET} — entrez ${BOLD}[c]${RESET} pour définir les nœuds"

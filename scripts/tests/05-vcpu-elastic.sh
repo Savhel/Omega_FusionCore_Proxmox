@@ -5,14 +5,8 @@
 
 source "$(dirname "$0")/lib.sh"
 
-if [[ -n "${1:-}" ]]; then
-    VMID="$1"
-    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
-else
-    VMID=$(alloc_test_vmid)
-    create_test_vm "$VMID" 2048 4
-    start_test_vm  "$VMID" 90
-fi
+VMID="${1:-$TEST_VMID}"
+qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
 
 header "Test 5 — vCPU élastique (VM $VMID)"
 
