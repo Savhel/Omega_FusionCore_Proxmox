@@ -6,7 +6,14 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID="${1:-$TEST_VMID}"
+if [[ -n "${1:-}" ]]; then
+    VMID="$1"
+    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
+else
+    VMID=$(alloc_test_vmid)
+    create_test_vm "$VMID" 2048 4
+    start_test_vm  "$VMID" 90
+fi
 MIN_VCPUS_REQUIRED=4
 
 header "Test M3 — Mixte GPU + CPU (VM $VMID)"
@@ -14,7 +21,6 @@ print_cluster_config
 
 step "Prérequis"
 require_cluster
-require_vm_running "$VMID"
 
 step "Inventaire GPU dans le cluster"
 GPU_NODES=()

@@ -5,7 +5,14 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID="${1:-$TEST_VMID}"
+if [[ -n "${1:-}" ]]; then
+    VMID="$1"
+    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
+else
+    VMID=$(alloc_test_vmid)
+    create_test_vm "$VMID" 2048 2
+    start_test_vm  "$VMID" 90
+fi
 
 header "Test 19 — Compaction cluster (VM $VMID)"
 
@@ -13,7 +20,6 @@ step "Vérifications prérequis"
 require_bin qm
 require_bin pvesh
 require_cluster
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée"
 
 step "État initial du cluster"
 for n in "${OMEGA_NODES_ARR[@]}"; do

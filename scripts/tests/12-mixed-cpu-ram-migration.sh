@@ -6,7 +6,14 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID="${1:-$TEST_VMID}"
+if [[ -n "${1:-}" ]]; then
+    VMID="$1"
+    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
+else
+    VMID=$(alloc_test_vmid)
+    create_test_vm "$VMID" 2048 4
+    start_test_vm  "$VMID" 90
+fi
 
 header "Test M2 — CPU + RAM saturés → migration (VM $VMID)"
 print_cluster_config
@@ -15,7 +22,6 @@ print_cluster_config
 
 step "Prérequis"
 require_cluster
-require_vm_running "$VMID"
 
 step "Remise à 1 vCPU (état de référence)"
 qm set "$VMID" --vcpus 1 &>/dev/null || true

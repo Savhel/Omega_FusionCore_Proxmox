@@ -5,7 +5,14 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID="${1:-$TEST_VMID}"
+if [[ -n "${1:-}" ]]; then
+    VMID="$1"
+    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
+else
+    VMID=$(alloc_test_vmid)
+    create_test_vm "$VMID" 2048 2
+    start_test_vm  "$VMID" 90
+fi
 # La VM doit avoir été créée avec au moins 2048 MiB de RAM dans Proxmox
 VM_MAX_MIB="${BALLOON_MAX_MIB:-2048}"
 VM_INIT_MIB="${BALLOON_INIT_MIB:-512}"
@@ -15,7 +22,6 @@ header "Test 22 — Balloon thin-provisioning (VM $VMID)"
 
 step "Vérifications prérequis"
 require_bin qm
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée"
 
 # Vérifier que la VM a un balloon virtio
 if ! qm config "$VMID" | grep -qi "balloon\|virtio.*balloon\|memory.*$VM_MAX_MIB"; then

@@ -5,13 +5,19 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID="${1:-$TEST_VMID}"
+if [[ -n "${1:-}" ]]; then
+    VMID="$1"
+    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
+else
+    VMID=$(alloc_test_vmid)
+    create_test_vm "$VMID" 2048 4
+    start_test_vm  "$VMID" 90
+fi
 
 header "Test 5 — vCPU élastique (VM $VMID)"
 
 step "Vérifications prérequis"
 require_bin qm
-qm status "$VMID" | grep -q "running" || fail "VM $VMID n'est pas démarrée (qm start $VMID)"
 pass "VM $VMID en cours d'exécution"
 
 step "Remise à 1 vCPU (état de référence)"

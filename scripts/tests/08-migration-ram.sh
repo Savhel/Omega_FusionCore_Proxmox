@@ -5,14 +5,20 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID="${1:-$TEST_VMID}"
+if [[ -n "${1:-}" ]]; then
+    VMID="$1"
+    qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée (qm start $VMID)"
+else
+    VMID=$(alloc_test_vmid)
+    create_test_vm "$VMID" 2048 2
+    start_test_vm  "$VMID" 90
+fi
 
 header "Test 8 — Migration RAM (VM $VMID)"
 
 step "Vérifications prérequis"
 require_bin qm
 require_bin pvesh
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée"
 nc -zv "${PVE2}" 9100 2>/dev/null || fail "store ${PVE2}:9100 inaccessible"
 nc -zv "${PVE3}" 9100 2>/dev/null || fail "store ${PVE3}:9100 inaccessible"
 

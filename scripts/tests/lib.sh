@@ -66,9 +66,88 @@ TEST_VMID="${OMEGA_TEST_VMID:-9001}"
 _PIDS=()
 _TMPFILES=()
 
+# ── Cycle de vie des VM de test ───────────────────────────────────────────────
+# VMIDs 9800-9899 réservés aux tests automatisés.
+_TEST_VMIDS=()
+TEST_VM_BASE="${OMEGA_TEST_VM_BASE:-9800}"
+
+alloc_test_vmid() {
+    local id="$TEST_VM_BASE"
+    while qm status "$id" &>/dev/null 2>&1; do
+        ((id++))
+        [[ $id -ge 9900 ]] && fail "plus de VMIDs disponibles dans la plage 9800-9899"
+    done
+    echo "$id"
+}
+
+create_test_vm() {
+    local vmid="$1" mem="${2:-2048}" cores="${3:-4}"
+    local template="${OMEGA_TEMPLATE_VMID:-}"
+    require_bin qm
+
+    if [[ -n "$template" ]] && qm status "$template" &>/dev/null 2>&1; then
+        info "clone template $template → VM $vmid"
+        qm clone "$template" "$vmid" --name "omega-test-${vmid}" --full 2>/dev/null || \
+        qm clone "$template" "$vmid" --name "omega-test-${vmid}"           || \
+            fail "échec clone template $template → $vmid"
+    else
+        [[ -n "$template" ]] && warn "template VMID $template introuvable — VM minimale sans disque"
+        qm create "$vmid" \
+            --name    "omega-test-${vmid}" \
+            --memory  "$mem" \
+            --balloon "$mem" \
+            --cores   "$cores" \
+            --vcpus   1 \
+            --hotplug cpu,memory \
+            --agent   enabled=1 \
+            --ostype  l26 || fail "échec création VM $vmid"
+    fi
+
+    qm set "$vmid" \
+        --memory  "$mem" \
+        --balloon "$mem" \
+        --cores   "$cores" \
+        --vcpus   1 \
+        --hotplug cpu,memory \
+        --agent   enabled=1 2>/dev/null || true
+
+    _TEST_VMIDS+=("$vmid")
+    info "VM $vmid configurée (mem=${mem} Mio, cores=${cores})"
+}
+
+start_test_vm() {
+    local vmid="$1" timeout="${2:-90}"
+    qm start "$vmid" 2>/dev/null || true
+    local i=0
+    while ! qm status "$vmid" 2>/dev/null | grep -q "running"; do
+        ((i++)) || true
+        [[ $i -ge $timeout ]] && \
+            fail "VM $vmid non démarrée après ${timeout}s (astuce : définir OMEGA_TEMPLATE_VMID=<vmid_template> pour cloner une vraie VM)"
+        sleep 1
+    done
+    info "VM $vmid démarrée"
+}
+
+destroy_test_vm() {
+    local vmid="$1"
+    qm stop    "$vmid" --skiplock 1 &>/dev/null 2>&1 || true
+    sleep 2
+    qm destroy "$vmid" --skiplock 1 --purge 1  &>/dev/null 2>&1 || true
+    info "VM $vmid supprimée"
+}
+
+_cleanup_test_vms() {
+    local vmid
+    for vmid in "${_TEST_VMIDS[@]:-}"; do
+        [[ -n "$vmid" ]] && destroy_test_vm "$vmid" 2>/dev/null || true
+    done
+    _TEST_VMIDS=()
+}
+
 cleanup() {
     for pid in "${_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     for f in "${_TMPFILES[@]}"; do rm -f "$f" 2>/dev/null || true; done
+    _cleanup_test_vms
     _PIDS=(); _TMPFILES=()
 }
 trap cleanup EXIT INT TERM

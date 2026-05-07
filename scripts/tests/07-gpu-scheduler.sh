@@ -5,15 +5,27 @@
 
 source "$(dirname "$0")/lib.sh"
 
-VMID1="${1:-9001}"
-VMID2="${2:-9002}"
+if [[ -n "${1:-}" ]]; then
+    VMID1="$1"
+    qm status "$VMID1" | grep -q "running" || fail "VM $VMID1 non démarrée (qm start $VMID1)"
+else
+    VMID1=$(alloc_test_vmid)
+    create_test_vm "$VMID1" 2048 2
+    start_test_vm  "$VMID1" 90
+fi
+if [[ -n "${2:-}" ]]; then
+    VMID2="$2"
+    qm status "$VMID2" | grep -q "running" || fail "VM $VMID2 non démarrée (qm start $VMID2)"
+else
+    VMID2=$(alloc_test_vmid)
+    create_test_vm "$VMID2" 2048 2
+    start_test_vm  "$VMID2" 90
+fi
 
 header "Test 7 — GPU scheduler round-robin (VM $VMID1 + VM $VMID2)"
 
 step "Vérifications prérequis"
 require_bin qm
-qm status "$VMID1" | grep -q "running" || fail "VM $VMID1 non démarrée"
-qm status "$VMID2" | grep -q "running" || fail "VM $VMID2 non démarrée"
 
 step "Vérification lock GPU (aucun scheduler actif)"
 ls /run/omega-gpu-scheduler-*.lock 2>/dev/null && \
