@@ -9,6 +9,8 @@
 #   OMEGA_BIN_DIR=/usr/local/bin                    — si binaires déployés
 #   OMEGA_REMOTE_BIN_DIR=/usr/local/bin             — binaires sur les nœuds distants
 #   OMEGA_SKIP=M3,M7                                — tests à ignorer
+#   OMEGA_SCALE_VMIDS=9001,...,9500                 — VMs pour le test 31
+#   OMEGA_SCALE_TARGET=500                          — nombre cible du test 31
 #
 # Tests 01-04 et 10 s'exécutent sur CONTROLLER_NODE (userfaultfd requis).
 # Les tests cluster (05, 08, 09, Mx) s'exécutent aussi sur le nœud contrôleur
@@ -18,6 +20,7 @@ source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"; shift || true
 DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_DESTRUCTIVE=false
+DO_SCALE=false
 SKIP_LIST="${OMEGA_SKIP:-}"
 DRAIN_NODE=""
 
@@ -26,6 +29,7 @@ for arg in "$@"; do
         --gpu)          DO_GPU=true ;;
         --ceph)         DO_CEPH=true ;;
         --long)         DO_LONG=true ;;
+        --scale)        DO_SCALE=true ;;
         --destructive)  DO_DESTRUCTIVE=true ;;
         --skip=*)       SKIP_LIST="${arg#--skip=}" ;;
         --drain-node=*) DRAIN_NODE="${arg#--drain-node=}" ;;
@@ -55,6 +59,11 @@ remote_env() {
     printf '%q=%q ' CLUSTER_MODE "1"
     $DO_DESTRUCTIVE && printf '%q=%q ' OMEGA_DESTRUCTIVE "1"
     $DO_LONG && printf '%q=%q ' OMEGA_SOAK_SECS "${OMEGA_SOAK_SECS:-1800}"
+    $DO_SCALE && printf '%q=%q ' OMEGA_SCALE_ENABLED "1"
+    printf '%q=%q ' OMEGA_SCALE_VMIDS "${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS:-$VMID}}"
+    printf '%q=%q ' OMEGA_SCALE_TARGET "${OMEGA_SCALE_TARGET:-500}"
+    printf '%q=%q ' OMEGA_SCALE_BATCH_SIZE "${OMEGA_SCALE_BATCH_SIZE:-20}"
+    printf '%q=%q ' OMEGA_SCALE_SOAK_SECS "${OMEGA_SCALE_SOAK_SECS:-1800}"
 }
 
 rsync_ssh_cmd() {
@@ -192,6 +201,7 @@ info "VM test      : $VMID"
 info "GPU          : $DO_GPU"
 info "Ceph         : $DO_CEPH"
 info "Long         : $DO_LONG"
+info "Scale        : $DO_SCALE"
 info "Destructif   : $DO_DESTRUCTIVE"
 info "Skip         : ${SKIP_LIST:-aucun}"
 info "Nœuds        : $(node_count) ($(store_count) store(s))"
@@ -229,6 +239,7 @@ run_test_on_node "09" "Orphan cleaner"              "$TESTS_DIR/09-orphan-cleane
 run_test_on_node "19" "Compaction cluster"          "$TESTS_DIR/19-compaction.sh"           "$VMID"
 run_test_on_node "22" "Balloon thin-provisioning"   "$TESTS_DIR/22-balloon-thinprov.sh"     "$VMID"
 run_test_on_node "23C" "Disk I/O scheduler cluster" "$TESTS_DIR/23-disk-io-scheduler.sh"    "$VMID"
+run_test_on_node "30" "Conformité VMs Omega"        "$TESTS_DIR/30-vm-conformity.sh"        "${OMEGA_TEST_VMIDS:-$VMID}"
 run_test_on_node "24" "Installation doctor"         "$TESTS_DIR/24-install-doctor.sh"
 run_test_on_node "25" "Réseau VM invitée"           "$TESTS_DIR/25-vm-network.sh"            "$VMID"
 
@@ -290,6 +301,17 @@ if $DO_LONG; then
     run_test_on_node "29" "Soak long physique" "$TESTS_DIR/29-long-run-soak.sh" "$VMID" "${OMEGA_SOAK_SECS:-1800}"
 else
     RESULTS+=("SKIP  29 Soak long physique (passer --long)")
+    ((SKIP++)) || true
+fi
+
+if $DO_SCALE; then
+    run_test_on_node "31" "Scalabilité VMs physiques" "$TESTS_DIR/31-scale-vms.sh" \
+        "${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS:-$VMID}}" \
+        "${OMEGA_SCALE_TARGET:-500}" \
+        "${OMEGA_SCALE_BATCH_SIZE:-20}" \
+        "${OMEGA_SCALE_SOAK_SECS:-1800}"
+else
+    RESULTS+=("SKIP  31 Scalabilité VMs physiques (passer --scale)")
     ((SKIP++)) || true
 fi
 

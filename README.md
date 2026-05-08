@@ -187,6 +187,49 @@ omega-qemu-launcher status --vm-id 9004
 omega-qemu-launcher cleanup --vm-id 9004 --keep-log
 ```
 
+### Validation sur cluster physique
+
+Pour un vrai cluster Proxmox/datacenter, utilisez le guide dédié :
+
+```bash
+less docs/VALIDATION_DATACENTER.md
+```
+
+Création de VMs de test conformes au projet :
+
+```bash
+./scripts/create-omega-vm.sh \
+  --vmids 9001,9002,9003 \
+  --storage ceph-vms \
+  --bridge vmbr0 \
+  --image /var/lib/vz/template/iso/debian-12-generic-amd64.qcow2 \
+  --sshkey /root/.ssh/id_rsa.pub \
+  --memory 2048 \
+  --balloon 512 \
+  --cores 4 \
+  --vcpus 1 \
+  --start
+```
+
+Validation réelle non destructive :
+
+```bash
+./scripts/omega-lab.sh --gpu --ceph --auto
+```
+
+Validation scalabilité 500 VMs :
+
+```bash
+OMEGA_SCALE_VMIDS="$(seq -s, 9001 9500)" \
+OMEGA_SCALE_TARGET=500 \
+OMEGA_SCALE_BATCH_SIZE=20 \
+OMEGA_SCALE_SOAK_SECS=3600 \
+./scripts/omega-lab.sh --gpu --ceph --long --scale --auto
+```
+
+Le test `30-vm-conformity` vérifie avant les tests lourds que les VMs exposent bien `-smp ...,maxcpus=...`, `hotplug cpu`, `qemu-guest-agent`, disque virtio-scsi, réseau virtio et les métadonnées Omega.
+Le test `31-scale-vms` vérifie explicitement le scénario grand volume : VMs existantes, conformité rapide, démarrage par lots, stabilité des daemons et disponibilité des APIs Omega pendant la fenêtre de soak.
+
 ---
 
 ### omega-controller (Python)

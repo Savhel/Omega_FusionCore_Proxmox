@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # omega-lab.sh — Lab interactif : configuration + installation + tests
 #
-# Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--long] [--destructive] [--auto]
+# Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--long] [--scale] [--destructive] [--auto]
 #
 # Le script lit scripts/cluster.conf pour la configuration du cluster.
 # Si le fichier n'existe pas ou si les nœuds ne sont pas encore définis,
@@ -11,6 +11,7 @@
 #   --gpu    activer les tests GPU
 #   --ceph   activer les tests Ceph
 #   --long   active les tests longue durée
+#   --scale  active le test de scalabilité VMs physiques
 #   --destructive active les tests qui modifient temporairement le réseau/services
 #   --auto   toutes les sections sans pause (mode CI)
 
@@ -21,12 +22,13 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONF_FILE="${SCRIPT_DIR}/cluster.conf"
 
 # ── Options CLI ───────────────────────────────────────────────────────────────
-DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_DESTRUCTIVE=false; AUTO=false
+DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_DESTRUCTIVE=false; AUTO=false
 for arg in "$@"; do
     case "$arg" in
         --gpu)         DO_GPU=true  ;;
         --ceph)        DO_CEPH=true ;;
         --long)        DO_LONG=true ;;
+        --scale)       DO_SCALE=true ;;
         --destructive) DO_DESTRUCTIVE=true ;;
         --auto)        AUTO=true    ;;
     esac
@@ -155,7 +157,11 @@ DEPLOY_USER='${DEPLOY_USER}' \
 VMID='${OMEGA_TEST_VMID}' \
 CLUSTER_MODE='1' \
 OMEGA_DESTRUCTIVE='$($DO_DESTRUCTIVE && echo 1 || echo 0)' \
-OMEGA_SOAK_SECS='${OMEGA_SOAK_SECS:-1800}'"
+OMEGA_SOAK_SECS='${OMEGA_SOAK_SECS:-1800}' \
+OMEGA_SCALE_VMIDS='${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS}}' \
+OMEGA_SCALE_TARGET='${OMEGA_SCALE_TARGET:-500}' \
+OMEGA_SCALE_BATCH_SIZE='${OMEGA_SCALE_BATCH_SIZE:-20}' \
+OMEGA_SCALE_SOAK_SECS='${OMEGA_SCALE_SOAK_SECS:-1800}'"
 }
 
 _quote_args() {
@@ -533,6 +539,7 @@ run_section_6() {
     _need_config || return
     _hdr "══ Section 6 — Production physique (install, réseau, Ceph/GPU réel, panne, soak) ══"
     _sync
+    _run_cluster "30" "Conformité VMs Omega"      "30-vm-conformity.sh" "${OMEGA_TEST_VMIDS}"
     _run_cluster "24" "Installation doctor"       "24-install-doctor.sh"
     _run_cluster "25" "Réseau VM invitée"         "25-vm-network.sh"       "${TEST_VMIDS_ARR[0]}"
     if $DO_CEPH; then
@@ -558,6 +565,16 @@ run_section_6() {
     else
         _warn "Test 29 ignoré — relancer avec --long"
         RESULTS["29"]="SKIP"; ((TOTAL_SKIP++)) || true
+    fi
+    if $DO_SCALE; then
+        _run_cluster "31" "Scalabilité VMs physiques" "31-scale-vms.sh" \
+            "${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS}}" \
+            "${OMEGA_SCALE_TARGET:-500}" \
+            "${OMEGA_SCALE_BATCH_SIZE:-20}" \
+            "${OMEGA_SCALE_SOAK_SECS:-1800}"
+    else
+        _warn "Test 31 ignoré — relancer avec --scale"
+        RESULTS["31"]="SKIP"; ((TOTAL_SKIP++)) || true
     fi
 }
 
@@ -606,6 +623,7 @@ run_one() {
         20) _run_isolated "20" "Prefetch stride"            "20-prefetch-stride.sh" ;;
         21) _run_isolated "21" "TLS TOFU"                   "21-tls-tofu.sh" ;;
         23) _run_local    "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
+        30) _run_cluster  "30" "Conformité VMs Omega"         "30-vm-conformity.sh"      "${OMEGA_TEST_VMIDS}" ;;
         05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh"          "${TEST_VMIDS_ARR[0]}" ;;
         06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh"         "${TEST_VMIDS_ARR[0]}" ;;
         07) if [[ -n "${TEST_VMIDS_ARR[1]:-}" ]]; then
@@ -624,6 +642,7 @@ run_one() {
         27) _run_cluster  "27" "GPU réel / rendu"           "27-gpu-real-render.sh"       "${TEST_VMIDS_ARR[0]}" ;;
         28) _run_cluster  "28" "Partition réseau"           "28-network-partition.sh"     "${NODES_ARR[1]:-}" ;;
         29) _run_cluster  "29" "Soak long physique"         "29-long-run-soak.sh"         "${TEST_VMIDS_ARR[0]}" "${OMEGA_SOAK_SECS:-1800}" ;;
+        31) _run_cluster  "31" "Scalabilité VMs physiques"   "31-scale-vms.sh"            "${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS}}" "${OMEGA_SCALE_TARGET:-500}" "${OMEGA_SCALE_BATCH_SIZE:-20}" "${OMEGA_SCALE_SOAK_SECS:-1800}" ;;
         M1) _run_cluster  "M1" "RAM + CPU simultanés"       "11-mixed-ram-cpu.sh"         "${TEST_VMIDS_ARR[0]}" ;;
         M2) _run_cluster  "M2" "CPU+RAM → migration"        "12-mixed-cpu-ram-migration.sh" "${TEST_VMIDS_ARR[0]}" ;;
         M3) _run_cluster  "M3" "GPU+CPU multi"              "13-mixed-gpu-cpu.sh"         "${TEST_VMIDS_ARR[0]}" ;;
@@ -651,7 +670,8 @@ show_menu() {
         echo -e "    Contrôleur        : ${CYAN}${CONTROLLER_NODE}${RESET}"
         echo -e "    VMs test          : ${CYAN}${OMEGA_TEST_VMIDS}${RESET}  ${DIM}(${#TEST_VMIDS_ARR[@]} VM(s))${RESET}"
         echo -e "    GPU               : $(${DO_GPU} && echo "${GREEN}activé${RESET}" || echo "${DIM}non (--gpu)${RESET}")"
-        echo -e "    Long/destructif   : $(${DO_LONG} && echo "${GREEN}long${RESET}" || echo "${DIM}long off${RESET}") / $(${DO_DESTRUCTIVE} && echo "${RED}destructif${RESET}" || echo "${DIM}destructif off${RESET}")"
+        echo -e "    Long/scale        : $(${DO_LONG} && echo "${GREEN}long${RESET}" || echo "${DIM}long off${RESET}") / $(${DO_SCALE} && echo "${GREEN}scale${RESET}" || echo "${DIM}scale off${RESET}")"
+        echo -e "    Destructif        : $(${DO_DESTRUCTIVE} && echo "${RED}activé${RESET}" || echo "${DIM}off${RESET}")"
     else
         echo -e "  ${RED}●${RESET} ${BOLD}Cluster non configuré${RESET} — entrez ${BOLD}[c]${RESET} pour définir les nœuds"
     fi
@@ -689,7 +709,7 @@ show_menu() {
 
     # ── Tests par section ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Tests ─────────────────────────────────────────────────────${RESET}"
-    echo -e "   ${BOLD}[A]${RESET}  Tout — sections 1→5 avec pause entre chaque"
+    echo -e "   ${BOLD}[A]${RESET}  Tout — sections 1→6 avec pause entre chaque"
     echo -e "   ${BOLD}[1]${RESET}  Section 1 — Isolés    : smoke · réplication · failover · éviction"
     echo -e "   ${BOLD}[2]${RESET}  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU"
     echo -e "   ${BOLD}[3]${RESET}  Section 3 — Cluster   : vCPU · migration · balloon · compaction"
@@ -701,12 +721,13 @@ show_menu() {
     # ── Tests individuels ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Test individuel (entrer le numéro) ───────────────────────${RESET}"
     echo -e "   ${DIM}Isolés  :${RESET}  00  01  02  03  04  10  18  20  21  23"
-    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29"
+    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29  30  31"
     echo -e "   ${DIM}Mixtes  :${RESET}  M1  M2  M3  M4  M5  M6  M7"
     echo ""
 
     echo -e "   ${BOLD}[g]${RESET}  GPU tests : $(${DO_GPU} && echo "${GREEN}activé  ${RESET}→ [g] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [g] pour activer")"
     echo -e "   ${BOLD}[l]${RESET}  Long tests : $(${DO_LONG} && echo "${GREEN}activé  ${RESET}→ [l] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [l] pour activer")"
+    echo -e "   ${BOLD}[s]${RESET}  Scale 500 : $(${DO_SCALE} && echo "${GREEN}activé  ${RESET}→ [s] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [s] pour activer")"
     echo -e "   ${BOLD}[x]${RESET}  Destructif : $(${DO_DESTRUCTIVE} && echo "${RED}activé  ${RESET}→ [x] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [x] pour activer")"
     echo -e "   ${BOLD}[r]${RESET}  Résumé détaillé des résultats       ${BOLD}[q]${RESET}  Quitter"
     echo ""
@@ -738,6 +759,9 @@ main_loop() {
                  fi ;;
             l|L) if $DO_LONG; then DO_LONG=false; _info "Tests longue durée désactivés"
                  else DO_LONG=true; _info "Tests longue durée activés"
+                 fi ;;
+            s|S) if $DO_SCALE; then DO_SCALE=false; _info "Tests scalabilité désactivés"
+                 else DO_SCALE=true; _info "Tests scalabilité activés"
                  fi ;;
             x|X) if $DO_DESTRUCTIVE; then DO_DESTRUCTIVE=false; _info "Tests destructifs désactivés"
                  else DO_DESTRUCTIVE=true; _warn "Tests destructifs activés"

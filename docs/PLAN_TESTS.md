@@ -25,6 +25,44 @@
 
 ---
 
+## Validation physique rapide
+
+Le plan complet pour un cluster Proxmox/datacenter est dans [`docs/VALIDATION_DATACENTER.md`](VALIDATION_DATACENTER.md). Il contient les commandes de creation de VMs conformes, les scenarios physiques, les criteres d'acceptation et le depannage des erreurs deja rencontrees.
+
+Commandes minimales:
+
+```bash
+# Creer des VMs compatibles Omega
+./scripts/create-omega-vm.sh \
+  --vmids 9001,9002,9003 \
+  --storage ceph-vms \
+  --bridge vmbr0 \
+  --image /var/lib/vz/template/iso/debian-12-generic-amd64.qcow2 \
+  --sshkey /root/.ssh/id_rsa.pub \
+  --start
+
+# Verifier la conformite avant les tests lourds
+./scripts/tests/30-vm-conformity.sh 9001,9002,9003
+
+# Lancer la validation physique non destructive
+./scripts/omega-lab.sh --gpu --ceph --auto
+
+# Lancer le soak long
+OMEGA_SOAK_SECS=7200 ./scripts/omega-lab.sh --gpu --ceph --long --auto
+
+# Lancer la validation scalabilite 500 VMs
+OMEGA_SCALE_VMIDS="$(seq -s, 9001 9500)" \
+OMEGA_SCALE_TARGET=500 \
+OMEGA_SCALE_BATCH_SIZE=20 \
+OMEGA_SCALE_SOAK_SECS=3600 \
+./scripts/omega-lab.sh --gpu --ceph --long --scale --auto
+```
+
+Le test `30` est volontairement strict: il bloque les VMs qui n'ont pas `vcpus`, `maxcpus`, `hotplug cpu`, agent invite, disque virtio-scsi, reseau virtio et metadata Omega.
+Le test `31` valide le passage a grande echelle: inventaire, conformite rapide, demarrage par lots, surveillance daemons/API et stabilite Proxmox.
+
+---
+
 ## 1. Tests automatisés (CI)
 
 Ces tests se lancent sans cluster réel.
