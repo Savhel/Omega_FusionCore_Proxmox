@@ -25,7 +25,7 @@ pass "node-bc-store : $STORE_BIN"
 # ── 2. userfaultfd — vérifié sur chaque nœud du cluster ──────────────────────
 step "userfaultfd"
 for n in "${OMEGA_NODES_ARR[@]}"; do
-    uffd=$(ssh -o ConnectTimeout=3 "root@${n}" \
+    uffd=$(ssh_run "$n" \
         "sysctl -n vm.unprivileged_userfaultfd 2>/dev/null || echo 0" 2>/dev/null || echo "ERR")
     if [[ "$uffd" == "1" ]]; then
         pass "$n : vm.unprivileged_userfaultfd=1"
@@ -62,7 +62,7 @@ if $DO_CLUSTER; then
 
     step "Proxmox CLI (sur les nœuds)"
     for n in "${OMEGA_NODES_ARR[@]}"; do
-        qm_ok=$(ssh -o ConnectTimeout=3 "root@${n}" "command -v qm &>/dev/null && echo yes || echo no" 2>/dev/null || echo "ERR")
+        qm_ok=$(ssh_run "$n" "command -v qm &>/dev/null && echo yes || echo no" 2>/dev/null || echo "ERR")
         if [[ "$qm_ok" == "yes" ]]; then
             pass "$n : qm disponible"
         elif [[ "$qm_ok" == "ERR" ]]; then
@@ -73,7 +73,7 @@ if $DO_CLUSTER; then
     done
 
     pvesh_node="${OMEGA_NODES_ARR[0]}"
-    count=$(ssh -o ConnectTimeout=3 "root@${pvesh_node}" \
+    count=$(ssh_run "$pvesh_node" \
         "pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
         | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))'" 2>/dev/null || echo "?")
     info "$count VMs dans le cluster (via $pvesh_node)"

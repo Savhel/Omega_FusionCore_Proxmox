@@ -6,7 +6,9 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
 
 header "Test 19 — Compaction cluster (VM $VMID)"
 
@@ -17,9 +19,9 @@ require_cluster
 
 step "État initial du cluster"
 for n in "${OMEGA_NODES_ARR[@]}"; do
-    avail=$(curl -sf "http://${n}:9200/status" \
+    avail=$(curl -sf "http://${n}:${STATUS_PORT}/status" \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('available_mib','?'))" 2>/dev/null || echo "?")
-    pages=$(curl -sf "http://${n}:9200/status" \
+    pages=$(curl -sf "http://${n}:${STATUS_PORT}/status" \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('page_count','?'))" 2>/dev/null || echo "?")
     info "  $n : RAM libre=${avail} MiB, pages stockées=${pages}"
 done
@@ -31,9 +33,9 @@ _TMPFILES+=("$LOG_AGENT")
     --stores "$STORES_CSV" \
     --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
-    --current-node "$(hostname)" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
+    --current-node "$(local_pve_node)" \
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 32 \
     --eviction-interval-secs 5 \
@@ -64,7 +66,7 @@ while [[ $(elapsed $t0) -lt 150 ]]; do
     fi
     pages_total=0
     for n in "${OMEGA_NODES_ARR[@]}"; do
-        p=$(curl -sf "http://${n}:9200/status" \
+        p=$(curl -sf "http://${n}:${STATUS_PORT}/status" \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo 0)
         pages_total=$(( pages_total + p ))
     done
@@ -83,7 +85,7 @@ grep -i "compact\|migrat\|bin.pack\|vider" "$LOG_AGENT" | head -20 || true
 
 step "État final du cluster"
 for n in "${OMEGA_NODES_ARR[@]}"; do
-    avail=$(curl -sf "http://${n}:9200/status" \
+    avail=$(curl -sf "http://${n}:${STATUS_PORT}/status" \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('available_mib','?'))" 2>/dev/null || echo "?")
     info "  $n : RAM libre=${avail} MiB"
 done

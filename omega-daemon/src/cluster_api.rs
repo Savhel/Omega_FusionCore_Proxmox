@@ -65,8 +65,10 @@ async fn node_status(State(state): State<Arc<NodeState>>) -> Json<Value> {
 async fn node_status_compat(State(state): State<Arc<NodeState>>) -> Json<Value> {
     let snap = state.snapshot();
     let available_mib = snap.mem_available_kb / 1024;
-    let total_mib     = snap.mem_total_kb / 1024;
-    let (has_gpu, gpu_count) = snap.gpu.as_ref()
+    let total_mib = snap.mem_total_kb / 1024;
+    let (has_gpu, gpu_count) = snap
+        .gpu
+        .as_ref()
         .map(|g| (g.enabled, if g.enabled { 1u32 } else { 0u32 }))
         .unwrap_or((false, 0));
     Json(json!({

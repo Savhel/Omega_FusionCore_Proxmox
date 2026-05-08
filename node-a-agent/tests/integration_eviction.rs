@@ -31,32 +31,37 @@ async fn free_port() -> u16 {
 async fn start_store(port: u16) -> String {
     let addr = format!("127.0.0.1:{port}");
     let cfg = node_bc_store::config::Config {
-        listen:          addr.clone(),
-        node_id:         "test-store".into(),
-        max_pages:       0,
-        log_format:      "text".into(),
-        log_level:       "error".into(),
-        stats_interval:  3600,
-        status_listen:   "127.0.0.1:0".into(),
+        listen: addr.clone(),
+        node_id: "test-store".into(),
+        max_pages: 0,
+        log_format: "text".into(),
+        log_level: "error".into(),
+        stats_interval: 3600,
+        status_listen: "127.0.0.1:0".into(),
         store_data_path: "/tmp".into(),
-        ceph_conf:                    "/etc/ceph/ceph.conf".into(),
-        ceph_pool:                    "omega-pages".into(),
-        ceph_user:                    "client.admin".into(),
-        orphan_check_interval_secs:   0,
-        orphan_grace_secs:            600,
-        proxmox_api_url:              "".into(),
-        tls_enabled:                  false,
-        tls_dir:                      "/tmp/omega-test-tls".into(),
+        ceph_conf: "/etc/ceph/ceph.conf".into(),
+        ceph_pool: "omega-pages".into(),
+        ceph_user: "client.admin".into(),
+        orphan_check_interval_secs: 0,
+        orphan_grace_secs: 600,
+        proxmox_api_url: "".into(),
+        tls_enabled: false,
+        tls_dir: "/tmp/omega-test-tls".into(),
     };
     tokio::spawn(async move {
         let metrics = std::sync::Arc::new(node_bc_store::metrics::StoreMetrics::default());
-        node_bc_store::server::run(cfg, None, metrics).await.unwrap();
+        node_bc_store::server::run(cfg, None, metrics)
+            .await
+            .unwrap();
     });
 
     // Attendre que le store soit prêt (timeout 2 s).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
-        if tokio::net::TcpStream::connect(&format!("127.0.0.1:{port}")).await.is_ok() {
+        if tokio::net::TcpStream::connect(&format!("127.0.0.1:{port}"))
+            .await
+            .is_ok()
+        {
             break;
         }
         if tokio::time::Instant::now() > deadline {
@@ -72,13 +77,9 @@ async fn start_store(port: u16) -> String {
 /// `spawn_blocking` est utilisé par les appelants pour éviter que `block_on`
 /// soit appelé depuis un thread Tokio (ce qui deadlockrait sur un runtime
 /// current-thread).
-fn make_region(
-    store_addr:       String,
-    num_pages:        usize,
-    vm_requested_mib: u64,
-) -> Arc<MemoryRegion> {
-    let handle  = tokio::runtime::Handle::current();
-    let store   = Arc::new(RemoteStorePool::new(vec![store_addr.clone()], 2000, vec![]));
+fn make_region(store_addr: String, num_pages: usize, vm_requested_mib: u64) -> Arc<MemoryRegion> {
+    let handle = tokio::runtime::Handle::current();
+    let store = Arc::new(RemoteStorePool::new(vec![store_addr.clone()], 2000, vec![]));
     let metrics = Arc::new(AgentMetrics::default());
     let cluster = Arc::new(ClusterState::new(
         vec![store_addr],
@@ -92,7 +93,10 @@ fn make_region(
             store,
             metrics,
             handle,
-            MemoryBackendOptions { kind: MemoryBackendKind::Anonymous, memfd_name: String::new() },
+            MemoryBackendOptions {
+                kind: MemoryBackendKind::Anonymous,
+                memfd_name: String::new(),
+            },
             cluster,
             Arc::new(AtomicBool::new(false)),
         )
@@ -131,15 +135,26 @@ async fn test_eviction_round_trip() {
 
     // Rappel via fetch_page (même chemin que le handler uffd)
     for page_id in [0u64, 2, 4, 6] {
-        let r    = region.clone();
+        let r = region.clone();
         let data = tokio::task::spawn_blocking(move || r.fetch_page(page_id).unwrap())
             .await
             .unwrap();
-        assert_eq!(data[0], page_id as u8, "page_id={page_id} : marqueur incorrect");
-        assert_eq!(&data[1..], &pattern[1..], "page_id={page_id} : motif corrompu");
+        assert_eq!(
+            data[0], page_id as u8,
+            "page_id={page_id} : marqueur incorrect"
+        );
+        assert_eq!(
+            &data[1..],
+            &pattern[1..],
+            "page_id={page_id} : motif corrompu"
+        );
     }
 
-    assert_eq!(region.remote_count(), 0, "plus aucune page distante après recall");
+    assert_eq!(
+        region.remote_count(),
+        0,
+        "plus aucune page distante après recall"
+    );
 }
 
 /// Vérification que les pages non évinvées (locales) ne sont pas touchées.
@@ -162,7 +177,7 @@ async fn test_local_pages_unaffected_by_eviction() {
         .await
         .unwrap();
 
-    assert!(region.is_remote(0),  "page 0 doit être distante");
+    assert!(region.is_remote(0), "page 0 doit être distante");
     assert!(!region.is_remote(1), "page 1 ne doit pas être distante");
 
     // La page 1 reste accessible localement via read_page_local
@@ -208,7 +223,7 @@ async fn test_cap_enforcement_via_daemon_path() {
     assert_eq!(region.remote_cap(), 0);
 
     // L'éviction doit échouer avec le message "cap vm_requested"
-    let r   = region.clone();
+    let r = region.clone();
     let err = tokio::task::spawn_blocking(move || r.evict_page_to(0, 0).unwrap_err())
         .await
         .unwrap();
@@ -249,7 +264,7 @@ async fn test_cap_exact_limit() {
         .unwrap();
 
     // Et pas de page_id=4 (hors limites) → bounds error, pas cap
-    let r   = region.clone();
+    let r = region.clone();
     let err = tokio::task::spawn_blocking(move || r.evict_page_to(4, 0).unwrap_err())
         .await
         .unwrap();
@@ -291,21 +306,21 @@ async fn test_recall_lifo_order() {
     // recall_n_pages sur uffd_fd=-1 échoue sur UFFDIO_COPY, donc on passe par
     // fetch_page qui suit le même chemin de dépilage LIFO.
     // On vérifie l'ordre via remote_count qui diminue et via les données.
-    let r    = region.clone();
+    let r = region.clone();
     let data = tokio::task::spawn_blocking(move || r.fetch_page(2).unwrap())
         .await
         .unwrap();
     assert_eq!(data[0], 2, "LIFO : premier rappel doit être page 2");
     assert_eq!(region.remote_count(), 2);
 
-    let r    = region.clone();
+    let r = region.clone();
     let data = tokio::task::spawn_blocking(move || r.fetch_page(1).unwrap())
         .await
         .unwrap();
     assert_eq!(data[0], 1, "LIFO : deuxième rappel doit être page 1");
     assert_eq!(region.remote_count(), 1);
 
-    let r    = region.clone();
+    let r = region.clone();
     let data = tokio::task::spawn_blocking(move || r.fetch_page(0).unwrap())
         .await
         .unwrap();
@@ -329,7 +344,11 @@ async fn test_freeze_eviction_blocks_new_evictions() {
     tokio::task::spawn_blocking(move || r.evict_page_to(0, 0).unwrap())
         .await
         .unwrap();
-    assert_eq!(region.remote_count(), 1, "page 0 doit être distante avant gel");
+    assert_eq!(
+        region.remote_count(),
+        1,
+        "page 0 doit être distante avant gel"
+    );
 
     // Gel
     region.freeze_eviction();
@@ -344,8 +363,15 @@ async fn test_freeze_eviction_blocks_new_evictions() {
         .unwrap();
 
     // La page 1 doit être restée locale malgré l'appel à evict_page_to
-    assert_eq!(region.remote_count(), 1, "le gel doit bloquer toute nouvelle éviction");
-    assert!(!region.is_remote(1), "page 1 doit être locale (éviction gelée)");
+    assert_eq!(
+        region.remote_count(),
+        1,
+        "le gel doit bloquer toute nouvelle éviction"
+    );
+    assert!(
+        !region.is_remote(1),
+        "page 1 doit être locale (éviction gelée)"
+    );
 }
 
 /// Test du chemin de migration complet (item 7).
@@ -373,7 +399,11 @@ async fn test_migration_path_freeze_then_recall_all() {
             .await
             .unwrap();
     }
-    assert_eq!(region.remote_count(), 4, "4 pages doivent être distantes avant migration");
+    assert_eq!(
+        region.remote_count(),
+        4,
+        "4 pages doivent être distantes avant migration"
+    );
 
     // 2. Geler l'éviction (la migration est imminente)
     region.freeze_eviction();
@@ -386,19 +416,36 @@ async fn test_migration_path_freeze_then_recall_all() {
     tokio::task::spawn_blocking(move || r.evict_page_to(4, 0).unwrap())
         .await
         .unwrap();
-    assert!(!region.is_remote(4), "page 4 ne doit pas être évinvée (freeze actif)");
-    assert_eq!(region.remote_count(), 4, "le freeze doit bloquer toute nouvelle éviction");
+    assert!(
+        !region.is_remote(4),
+        "page 4 ne doit pas être évinvée (freeze actif)"
+    );
+    assert_eq!(
+        region.remote_count(),
+        4,
+        "le freeze doit bloquer toute nouvelle éviction"
+    );
 
     // 4. Rapatrier toutes les pages via fetch_page (même chemin que le handler uffd)
     for page_id in 0u64..4 {
-        let r    = region.clone();
+        let r = region.clone();
         let data = tokio::task::spawn_blocking(move || r.fetch_page(page_id).unwrap())
             .await
             .unwrap();
-        assert_eq!(data[0], page_id as u8, "intégrité : marqueur page_id={page_id} incorrect");
-        assert_eq!(data[1], 0xDE, "intégrité : motif page_id={page_id} corrompu");
+        assert_eq!(
+            data[0], page_id as u8,
+            "intégrité : marqueur page_id={page_id} incorrect"
+        );
+        assert_eq!(
+            data[1], 0xDE,
+            "intégrité : motif page_id={page_id} corrompu"
+        );
     }
 
     // 5. Toutes les pages distantes ont été rapatriées
-    assert_eq!(region.remote_count(), 0, "remote_count doit être 0 après recall complet");
+    assert_eq!(
+        region.remote_count(),
+        0,
+        "remote_count doit être 0 après recall complet"
+    );
 }

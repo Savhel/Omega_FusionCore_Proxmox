@@ -34,13 +34,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use tracing::warn;
 
 #[cfg(ceph_detected)]
 use {
     std::sync::atomic::AtomicUsize,
     tokio::sync::Mutex,
-    tracing::{debug, info},
+    tracing::{debug, info, warn},
 };
 
 use crate::metrics::StoreMetrics;
@@ -50,6 +49,7 @@ use crate::store::PageKey;
 // ─── Pool de contextes ────────────────────────────────────────────────────────
 
 /// Nombre maximum de rados_ioctx en parallèle (un par cœur disponible, min 4).
+#[cfg(any(ceph_detected, test))]
 fn max_ioctx() -> usize {
     (std::thread::available_parallelism()
         .map(|n| n.get())
@@ -63,23 +63,23 @@ fn max_ioctx() -> usize {
 mod ffi {
     use std::os::raw::{c_char, c_int, c_void};
 
-    pub type rados_t        = *mut c_void;
-    pub type rados_ioctx_t  = *mut c_void;
+    pub type rados_t = *mut c_void;
+    pub type rados_ioctx_t = *mut c_void;
 
     #[repr(C)]
     pub struct rados_cluster_stat_t {
-        pub kb:          u64,
-        pub kb_used:     u64,
-        pub kb_avail:    u64,
+        pub kb: u64,
+        pub kb_used: u64,
+        pub kb_avail: u64,
         pub num_objects: u64,
     }
 
     extern "C" {
         pub fn rados_create2(
-            cluster:      *mut rados_t,
+            cluster: *mut rados_t,
             cluster_name: *const c_char,
-            user_name:    *const c_char,
-            flags:        u64,
+            user_name: *const c_char,
+            flags: u64,
         ) -> c_int;
 
         pub fn rados_conf_read_file(cluster: rados_t, path: *const c_char) -> c_int;
@@ -89,16 +89,16 @@ mod ffi {
         pub fn rados_shutdown(cluster: rados_t);
 
         pub fn rados_ioctx_create(
-            cluster:   rados_t,
+            cluster: rados_t,
             pool_name: *const c_char,
-            ioctx:     *mut rados_ioctx_t,
+            ioctx: *mut rados_ioctx_t,
         ) -> c_int;
 
         pub fn rados_ioctx_destroy(io: rados_ioctx_t);
 
         /// Écrase l'objet entier avec buf (crée si inexistant).
         pub fn rados_write_full(
-            io:  rados_ioctx_t,
+            io: rados_ioctx_t,
             oid: *const c_char,
             buf: *const u8,
             len: usize,
@@ -107,7 +107,7 @@ mod ffi {
         /// Lit `len` octets depuis l'offset `off`.
         /// Retourne le nombre d'octets lus, ou errno négatif.
         pub fn rados_read(
-            io:  rados_ioctx_t,
+            io: rados_ioctx_t,
             oid: *const c_char,
             buf: *mut u8,
             len: usize,
@@ -116,10 +116,7 @@ mod ffi {
 
         pub fn rados_remove(io: rados_ioctx_t, oid: *const c_char) -> c_int;
 
-        pub fn rados_cluster_stat(
-            cluster: rados_t,
-            result:  *mut rados_cluster_stat_t,
-        ) -> c_int;
+        pub fn rados_cluster_stat(cluster: rados_t, result: *mut rados_cluster_stat_t) -> c_int;
     }
 
     // SAFETY : les handles Ceph sont opaques mais thread-safe pour les opérations
@@ -165,11 +162,11 @@ pub struct CephStore {
     #[cfg(ceph_detected)]
     cluster: Arc<ffi::ClusterHandle>,
     #[cfg(ceph_detected)]
-    ioctxs:  Vec<Arc<Mutex<ffi::IoctxHandle>>>,
+    ioctxs: Vec<Arc<Mutex<ffi::IoctxHandle>>>,
     #[cfg(ceph_detected)]
     counter: AtomicUsize,
     #[cfg(ceph_detected)]
-    pool:    String,
+    pool: String,
     metrics: Arc<StoreMetrics>,
 }
 
@@ -181,9 +178,9 @@ impl CephStore {
     /// - `user`      : utilisateur Ceph (ex: "client.omega")
     pub fn connect(
         #[allow(unused_variables)] conf_path: &str,
-        #[allow(unused_variables)] pool:      &str,
-        #[allow(unused_variables)] user:      &str,
-        #[allow(unused_variables)] metrics:   Arc<StoreMetrics>,
+        #[allow(unused_variables)] pool: &str,
+        #[allow(unused_variables)] user: &str,
+        #[allow(unused_variables)] metrics: Arc<StoreMetrics>,
     ) -> Result<Self> {
         #[cfg(not(ceph_detected))]
         {
@@ -195,18 +192,23 @@ impl CephStore {
 
         #[cfg(ceph_detected)]
         {
-            use std::ffi::CString;
             use ffi::*;
+            use std::ffi::CString;
 
             let c_cluster_name = CString::new("ceph")?;
-            let c_user         = CString::new(user)?;
-            let c_conf         = CString::new(conf_path)?;
-            let c_pool         = CString::new(pool)?;
+            let c_user = CString::new(user)?;
+            let c_conf = CString::new(conf_path)?;
+            let c_pool = CString::new(pool)?;
 
             // 1. Créer le handle cluster
             let mut cluster_raw: rados_t = std::ptr::null_mut();
             let ret = unsafe {
-                rados_create2(&mut cluster_raw, c_cluster_name.as_ptr(), c_user.as_ptr(), 0)
+                rados_create2(
+                    &mut cluster_raw,
+                    c_cluster_name.as_ptr(),
+                    c_user.as_ptr(),
+                    0,
+                )
             };
             if ret < 0 {
                 bail!("rados_create2 : errno {}", -ret);
@@ -223,7 +225,10 @@ impl CephStore {
             let ret = unsafe { rados_connect(cluster_raw) };
             if ret < 0 {
                 unsafe { rados_shutdown(cluster_raw) };
-                bail!("rados_connect : errno {} — vérifiez que Ceph est accessible", -ret);
+                bail!(
+                    "rados_connect : errno {} — vérifiez que Ceph est accessible",
+                    -ret
+                );
             }
             info!(pool, user, "connecté au cluster Ceph");
 
@@ -234,11 +239,12 @@ impl CephStore {
             let mut ioctxs = Vec::with_capacity(n);
             for i in 0..n {
                 let mut ioctx_raw: rados_ioctx_t = std::ptr::null_mut();
-                let ret = unsafe {
-                    rados_ioctx_create(cluster.0, c_pool.as_ptr(), &mut ioctx_raw)
-                };
+                let ret = unsafe { rados_ioctx_create(cluster.0, c_pool.as_ptr(), &mut ioctx_raw) };
                 if ret < 0 {
-                    bail!("rados_ioctx_create (slot {i}) pour pool '{pool}' : errno {}", -ret);
+                    bail!(
+                        "rados_ioctx_create (slot {i}) pour pool '{pool}' : errno {}",
+                        -ret
+                    );
                 }
                 ioctxs.push(Arc::new(Mutex::new(IoctxHandle(ioctx_raw))));
             }
@@ -262,9 +268,9 @@ impl CephStore {
     /// Aucune action manuelle n'est requise — appelé automatiquement au démarrage.
     pub fn try_auto_connect(
         #[allow(unused_variables)] conf_path: &str,
-        #[allow(unused_variables)] pool:      &str,
-        #[allow(unused_variables)] user:      &str,
-        #[allow(unused_variables)] metrics:   Arc<StoreMetrics>,
+        #[allow(unused_variables)] pool: &str,
+        #[allow(unused_variables)] user: &str,
+        #[allow(unused_variables)] metrics: Arc<StoreMetrics>,
     ) -> Option<Self> {
         #[cfg(not(ceph_detected))]
         return None;
@@ -298,6 +304,7 @@ impl CephStore {
 
     // ── Formatage de l'OID ────────────────────────────────────────────────────
 
+    #[cfg(any(ceph_detected, test))]
     fn oid(key: &PageKey) -> String {
         format!("{:08x}_{:016x}", key.vm_id, key.page_id)
     }
@@ -307,7 +314,11 @@ impl CephStore {
     /// Stocke une page de 4 Kio dans le pool RADOS.
     pub async fn put(&self, #[allow(unused_variables)] key: PageKey, data: Vec<u8>) -> Result<()> {
         if data.len() != PAGE_SIZE {
-            bail!("CephStore::put : taille incorrecte {} (attendu {})", data.len(), PAGE_SIZE);
+            bail!(
+                "CephStore::put : taille incorrecte {} (attendu {})",
+                data.len(),
+                PAGE_SIZE
+            );
         }
 
         #[cfg(not(ceph_detected))]
@@ -315,19 +326,18 @@ impl CephStore {
 
         #[cfg(ceph_detected)]
         {
-            use std::ffi::CString;
             use ffi::*;
+            use std::ffi::CString;
 
-            let oid_str  = Self::oid(&key);
-            let c_oid    = CString::new(oid_str.as_str())?;
-            let ioctx    = self.ioctx();
-            let oid_err  = oid_str.clone(); // évite le move dans la closure
+            let oid_str = Self::oid(&key);
+            let c_oid = CString::new(oid_str.as_str())?;
+            let ioctx = self.ioctx();
+            let oid_err = oid_str.clone(); // évite le move dans la closure
 
             tokio::task::spawn_blocking(move || -> Result<()> {
-                let io  = ioctx.blocking_lock();
-                let ret = unsafe {
-                    rados_write_full(io.0, c_oid.as_ptr(), data.as_ptr(), data.len())
-                };
+                let io = ioctx.blocking_lock();
+                let ret =
+                    unsafe { rados_write_full(io.0, c_oid.as_ptr(), data.as_ptr(), data.len()) };
                 if ret < 0 {
                     bail!("rados_write_full {oid_err} : errno {}", -ret);
                 }
@@ -350,20 +360,19 @@ impl CephStore {
 
         #[cfg(ceph_detected)]
         {
-            use std::ffi::CString;
             use ffi::*;
+            use std::ffi::CString;
 
             let oid_str = Self::oid(key);
-            let c_oid   = CString::new(oid_str.as_str())?;
-            let ioctx   = self.ioctx();
+            let c_oid = CString::new(oid_str.as_str())?;
+            let ioctx = self.ioctx();
             let oid_err = oid_str.clone(); // évite le move dans la closure
 
             let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
                 let io = ioctx.blocking_lock();
                 let mut buf = vec![0u8; PAGE_SIZE];
-                let ret = unsafe {
-                    rados_read(io.0, c_oid.as_ptr(), buf.as_mut_ptr(), PAGE_SIZE, 0)
-                };
+                let ret =
+                    unsafe { rados_read(io.0, c_oid.as_ptr(), buf.as_mut_ptr(), PAGE_SIZE, 0) };
                 if ret == -libc::ENOENT {
                     return Ok(None);
                 }
@@ -371,7 +380,11 @@ impl CephStore {
                     bail!("rados_read {oid_err} : errno {}", -ret);
                 }
                 if ret as usize != PAGE_SIZE {
-                    bail!("rados_read {oid_err} : lu {} octets (attendu {})", ret, PAGE_SIZE);
+                    bail!(
+                        "rados_read {oid_err} : lu {} octets (attendu {})",
+                        ret,
+                        PAGE_SIZE
+                    );
                 }
                 Ok(Some(buf))
             })
@@ -397,18 +410,22 @@ impl CephStore {
 
         #[cfg(ceph_detected)]
         {
-            use std::ffi::CString;
             use ffi::*;
+            use std::ffi::CString;
 
             let oid_str = Self::oid(key);
-            let c_oid   = CString::new(oid_str.as_str())?;
-            let ioctx   = self.ioctx();
+            let c_oid = CString::new(oid_str.as_str())?;
+            let ioctx = self.ioctx();
 
             let found = tokio::task::spawn_blocking(move || -> Result<bool> {
-                let io  = ioctx.blocking_lock();
+                let io = ioctx.blocking_lock();
                 let ret = unsafe { rados_remove(io.0, c_oid.as_ptr()) };
-                if ret == 0 { return Ok(true); }
-                if ret == -libc::ENOENT { return Ok(false); }
+                if ret == 0 {
+                    return Ok(true);
+                }
+                if ret == -libc::ENOENT {
+                    return Ok(false);
+                }
                 bail!("rados_remove {oid_str} : errno {}", -ret);
             })
             .await??;
@@ -430,7 +447,12 @@ impl CephStore {
         #[cfg(ceph_detected)]
         {
             use ffi::*;
-            let mut stat = rados_cluster_stat_t { kb: 0, kb_used: 0, kb_avail: 0, num_objects: 0 };
+            let mut stat = rados_cluster_stat_t {
+                kb: 0,
+                kb_used: 0,
+                kb_avail: 0,
+                num_objects: 0,
+            };
             let ret = unsafe { rados_cluster_stat(self.cluster.0, &mut stat) };
             if ret < 0 {
                 warn!("rados_cluster_stat : errno {}", -ret);
@@ -482,7 +504,10 @@ mod tests {
         #[cfg(not(ceph_detected))]
         {
             let err = CephStore::connect(
-                "/etc/ceph/ceph.conf", "omega-pages", "client.admin", dummy_metrics(),
+                "/etc/ceph/ceph.conf",
+                "omega-pages",
+                "client.admin",
+                dummy_metrics(),
             )
             .unwrap_err();
             assert!(

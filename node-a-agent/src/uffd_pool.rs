@@ -28,9 +28,9 @@
 //! Le kernel met en attente le thread fauteur en espace noyau — la VM ne crash pas.
 
 use std::os::unix::io::RawFd;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
@@ -42,26 +42,26 @@ use crate::metrics::AgentMetrics;
 
 #[repr(C, packed)]
 struct UffdMsg {
-    event:     u8,
+    event: u8,
     reserved1: u8,
     reserved2: u16,
     reserved3: u32,
-    flags:     u64,
-    address:   u64,
-    ptid:      u32,
-    _pad:      u32,
+    flags: u64,
+    address: u64,
+    ptid: u32,
+    _pad: u32,
 }
 
-const UFFD_MSG_SIZE:          usize = std::mem::size_of::<UffdMsg>();
-const UFFD_EVENT_PAGEFAULT:   u8    = 0x12;
+const UFFD_MSG_SIZE: usize = std::mem::size_of::<UffdMsg>();
+const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
 const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1 << 1;
-const UFFDIO_COPY:            libc::c_ulong = 0xC028AA03;
+const UFFDIO_COPY: libc::c_ulong = 0xC028AA03;
 
 #[repr(C)]
 struct UffdioCopy {
-    dst:  u64,
-    src:  u64,
-    len:  u64,
+    dst: u64,
+    src: u64,
+    len: u64,
     mode: u64,
     copy: i64,
 }
@@ -70,9 +70,9 @@ struct UffdioCopy {
 
 /// Requête de faute envoyée du reader vers les workers.
 pub struct FaultRequest {
-    pub page_id:       u64,
-    pub fault_addr:    u64,  // adresse page-alignée
-    pub is_write:      bool,
+    pub page_id: u64,
+    pub fault_addr: u64, // adresse page-alignée
+    pub is_write: bool,
 }
 
 /// Handler appelé par chaque worker pour résoudre une faute.
@@ -81,11 +81,11 @@ pub type FaultHandlerFn = Arc<dyn Fn(u64, bool) -> Result<[u8; 4096]> + Send + S
 
 /// Configuration du pool.
 pub struct PoolConfig {
-    pub num_workers:    usize,
-    pub channel_cap:    usize,
-    pub region_start:   u64,
-    pub page_size:      u64,
-    pub vm_id:          u32,
+    pub num_workers: usize,
+    pub channel_cap: usize,
+    pub region_start: u64,
+    pub page_size: u64,
+    pub vm_id: u32,
 }
 
 // ─── Pool ─────────────────────────────────────────────────────────────────────
@@ -94,21 +94,21 @@ pub struct PoolConfig {
 ///
 /// Retourne les JoinHandle des threads lancés.
 pub fn spawn_uffd_pool(
-    uffd_fd:  RawFd,
-    cfg:      PoolConfig,
-    handler:  FaultHandlerFn,
+    uffd_fd: RawFd,
+    cfg: PoolConfig,
+    handler: FaultHandlerFn,
     shutdown: Arc<AtomicBool>,
-    metrics:  Arc<AgentMetrics>,
+    metrics: Arc<AgentMetrics>,
 ) -> Vec<thread::JoinHandle<()>> {
     let mut handles = Vec::new();
 
     // Canal borné : backpressure si workers surchargés
     let (tx, rx) = mpsc::sync_channel::<FaultRequest>(cfg.channel_cap);
-    let rx        = Arc::new(std::sync::Mutex::new(rx));
+    let rx = Arc::new(std::sync::Mutex::new(rx));
 
     // ── Lancement des workers ──────────────────────────────────────────────
     for worker_id in 0..cfg.num_workers {
-        let rx      = rx.clone();
+        let rx = rx.clone();
         let handler = handler.clone();
         let metrics = metrics.clone();
         let shutdown = shutdown.clone();
@@ -118,12 +118,16 @@ pub fn spawn_uffd_pool(
             .spawn(move || {
                 info!(worker_id, "worker uffd démarré");
                 loop {
-                    if shutdown.load(Ordering::Relaxed) { break; }
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
 
                     // Attente d'une requête (timeout 100ms pour vérifier shutdown)
                     let req = {
                         let guard = rx.lock().unwrap();
-                        guard.recv_timeout(std::time::Duration::from_millis(100)).ok()
+                        guard
+                            .recv_timeout(std::time::Duration::from_millis(100))
+                            .ok()
                     };
 
                     let Some(req) = req else { continue };
@@ -134,9 +138,9 @@ pub fn spawn_uffd_pool(
                         Ok(page_data) => {
                             // SAFETY: fd valide (même durée de vie que le pool),
                             // page_data et fault_addr valides.
-                            if let Err(e) = unsafe {
-                                copy_page_raw(uffd_fd, req.fault_addr, &page_data)
-                            } {
+                            if let Err(e) =
+                                unsafe { copy_page_raw(uffd_fd, req.fault_addr, &page_data) }
+                            {
                                 error!(page_id = req.page_id, error = %e, "UFFDIO_COPY échoué");
                                 metrics.fault_errors.fetch_add(1, Ordering::Relaxed);
                             } else {
@@ -162,9 +166,9 @@ pub fn spawn_uffd_pool(
     // ── Thread reader (unique, bloquant) ──────────────────────────────────
     {
         let shutdown = shutdown.clone();
-        let metrics  = metrics.clone();
+        let metrics = metrics.clone();
         let region_start = cfg.region_start;
-        let page_size    = cfg.page_size;
+        let page_size = cfg.page_size;
 
         // Passer le fd en mode bloquant
         unsafe {
@@ -177,12 +181,20 @@ pub fn spawn_uffd_pool(
             .spawn(move || {
                 info!("thread uffd-reader démarré");
                 let mut msg = UffdMsg {
-                    event: 0, reserved1: 0, reserved2: 0, reserved3: 0,
-                    flags: 0, address: 0, ptid: 0, _pad: 0,
+                    event: 0,
+                    reserved1: 0,
+                    reserved2: 0,
+                    reserved3: 0,
+                    flags: 0,
+                    address: 0,
+                    ptid: 0,
+                    _pad: 0,
                 };
 
                 loop {
-                    if shutdown.load(Ordering::Relaxed) { break; }
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
 
                     // Lecture bloquante d'un événement uffd
                     let n = unsafe {
@@ -193,24 +205,43 @@ pub fn spawn_uffd_pool(
                         )
                     };
 
-                    if n == 0 { info!("uffd fd fermé"); break; }
+                    if n == 0 {
+                        info!("uffd fd fermé");
+                        break;
+                    }
                     if n < 0 {
                         let e = std::io::Error::last_os_error();
-                        if e.kind() == std::io::ErrorKind::Interrupted { continue; }
-                        error!(error = %e, "read uffd échoué"); break;
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        error!(error = %e, "read uffd échoué");
+                        break;
                     }
-                    if n as usize != UFFD_MSG_SIZE { continue; }
-                    if msg.event != UFFD_EVENT_PAGEFAULT { continue; }
+                    if n as usize != UFFD_MSG_SIZE {
+                        continue;
+                    }
+                    if msg.event != UFFD_EVENT_PAGEFAULT {
+                        continue;
+                    }
 
-                    let fault_addr  = msg.address;
-                    let is_write    = (msg.flags & UFFD_PAGEFAULT_FLAG_WRITE) != 0;
-                    let page_id     = (fault_addr - region_start) / page_size;
-                    let aligned     = fault_addr & !(page_size - 1);
+                    let fault_addr = msg.address;
+                    let is_write = (msg.flags & UFFD_PAGEFAULT_FLAG_WRITE) != 0;
+                    let page_id = (fault_addr - region_start) / page_size;
+                    let aligned = fault_addr & !(page_size - 1);
 
                     metrics.fault_count.fetch_add(1, Ordering::Relaxed);
-                    debug!(page_id, fault_addr = format!("0x{:x}", fault_addr), is_write, "faute reçue");
+                    debug!(
+                        page_id,
+                        fault_addr = format!("0x{:x}", fault_addr),
+                        is_write,
+                        "faute reçue"
+                    );
 
-                    let req = FaultRequest { page_id, fault_addr: aligned, is_write };
+                    let req = FaultRequest {
+                        page_id,
+                        fault_addr: aligned,
+                        is_write,
+                    };
 
                     // Envoi vers le pool (bloquant si canal plein → backpressure)
                     if tx.send(req).is_err() {
@@ -234,9 +265,9 @@ pub fn spawn_uffd_pool(
 /// `fd` valide, `page_data` pointe vers 4096 octets valides et alignés.
 unsafe fn copy_page_raw(fd: RawFd, dst_addr: u64, page_data: &[u8; 4096]) -> Result<()> {
     let mut copy = UffdioCopy {
-        dst:  dst_addr,
-        src:  page_data.as_ptr() as u64,
-        len:  4096,
+        dst: dst_addr,
+        src: page_data.as_ptr() as u64,
+        len: 4096,
         mode: 0,
         copy: 0,
     };

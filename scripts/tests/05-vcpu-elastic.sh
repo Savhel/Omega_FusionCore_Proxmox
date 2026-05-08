@@ -6,13 +6,16 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
+VM_CORES=$(vm_cores "$VMID");     VM_CORES="${VM_CORES:-4}"
 
 header "Test 5 — vCPU élastique (VM $VMID)"
 
 step "Vérifications prérequis"
 require_bin qm
-pass "VM $VMID en cours d'exécution"
+pass "VM $VMID en cours d'exécution — RAM=${VM_RAM_MIB} MiB cores=${VM_CORES}"
 
 step "Remise à 1 vCPU (état de référence)"
 qm set "$VMID" --vcpus 1 &>/dev/null || true
@@ -22,22 +25,22 @@ step "État initial vCPU"
 vcpus_init=$(qm config "$VMID" | grep "^vcpus:" | awk '{print $2}' || echo "1")
 info "vCPUs actuels : $vcpus_init"
 
-step "Démarrage agent avec vCPU initial=1, max=4"
+step "Démarrage agent avec vCPU initial=1, max=$VM_CORES"
 LOG_AGENT="/tmp/omega-agent-vcpu.log"
 _TMPFILES+=("$LOG_AGENT")
 "$AGENT_BIN" \
-    --stores "${PVE2}:9100,${PVE3}:9100" \
-    --status-addrs "${PVE2}:9200,${PVE3}:9200" \
+    --stores "$STORES_CSV" \
+    --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
-    --vm-vcpus 4 \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
+    --vm-vcpus "$VM_CORES" \
     --vm-initial-vcpus 1 \
     --vcpu-high-threshold-pct 60 \
     --vcpu-low-threshold-pct 20 \
     --vcpu-scale-interval-secs 10 \
     --vcpu-overcommit-ratio 3 \
-    --current-node "$(hostname)" \
+    --current-node "$(local_pve_node)" \
     --mode daemon >"$LOG_AGENT" 2>&1 &
 _PIDS+=($!)
 AGENT_PID=$!

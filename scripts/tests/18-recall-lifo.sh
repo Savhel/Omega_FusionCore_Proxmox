@@ -5,28 +5,31 @@
 
 source "$(dirname "$0")/lib.sh"
 
-header "Test 18 — Recall LIFO"
+VMID="${TEST_VMIDS_ARR[0]:-$TEST_VMID}"
+VM_RAM_MIB=$(vm_ram_mib "$VMID" 2>/dev/null || echo ""); VM_RAM_MIB="${VM_RAM_MIB:-512}"
+
+header "Test 18 — Recall LIFO (VM $VMID, ${VM_RAM_MIB} MiB)"
 
 require_omega_bins
 
 step "Démarrage store s0"
-start_store "lifo0" 9100 9200
+start_store "lifo0" "$STORE_PORT" "$STATUS_PORT"
 
 step "Éviction de pages dans le store (mode demo)"
 LOG_EVICT="/tmp/omega-agent-lifo-evict.log"
 _TMPFILES+=("$LOG_EVICT")
 "$AGENT_BIN" \
-    --stores "127.0.0.1:9100" \
-    --status-addrs "127.0.0.1:9200" \
-    --vm-id 18 \
-    --vm-requested-mib 64 \
-    --region-mib 64 \
+    --stores "127.0.0.1:$STORE_PORT" \
+    --status-addrs "127.0.0.1:$STATUS_PORT" \
+    --vm-id "$VMID" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     --mode demo >"$LOG_EVICT" 2>&1 || true
 
 echo "$LOG_EVICT contents:"
 head -5 "$LOG_EVICT" || true
 
-pages_evicted=$(curl -sf "http://127.0.0.1:9200/status" \
+pages_evicted=$(curl -sf "http://127.0.0.1:$STATUS_PORT/status" \
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo 0)
 info "pages évincées dans le store : $pages_evicted"
 [[ "${pages_evicted:-0}" -gt 0 ]] || fail "aucune page évincée — le demo n'a pas fonctionné"
@@ -41,17 +44,17 @@ step "Recall depuis un agent séparé (simule redémarrage après éviction)"
 LOG_RECALL="/tmp/omega-agent-lifo-recall.log"
 _TMPFILES+=("$LOG_RECALL")
 
-pages_before_recall=$(curl -sf "http://127.0.0.1:9200/status" \
+pages_before_recall=$(curl -sf "http://127.0.0.1:$STATUS_PORT/status" \
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo 0)
 info "pages dans le store avant recall : $pages_before_recall"
 
 # L'agent en mode demo effectue : éviction + recall complet → vérifie que les données sont intègres
 "$AGENT_BIN" \
-    --stores "127.0.0.1:9100" \
-    --status-addrs "127.0.0.1:9200" \
-    --vm-id 18 \
-    --vm-requested-mib 64 \
-    --region-mib 64 \
+    --stores "127.0.0.1:$STORE_PORT" \
+    --status-addrs "127.0.0.1:$STATUS_PORT" \
+    --vm-id "$VMID" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     --mode demo >"$LOG_RECALL" 2>&1 || true
 
 echo "$LOG_RECALL:"
@@ -61,7 +64,7 @@ step "Vérification intégrité du recall"
 grep -q "SUCCÈS" "$LOG_RECALL" || fail "recall échoué — intégrité des données non vérifiée"
 
 # Après un demo complet (éviction + recall), le store peut être vide ou non selon l'implémentation
-pages_after=$(curl -sf "http://127.0.0.1:9200/status" \
+pages_after=$(curl -sf "http://127.0.0.1:$STATUS_PORT/status" \
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo "?")
 info "pages dans le store après recall : $pages_after"
 

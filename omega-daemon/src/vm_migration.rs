@@ -549,7 +549,8 @@ mod tests {
             source: "node-a".into(),
             target: "node-b".into(),
             mtype,
-            reason: MigrationReason::AdminRequest, with_local_disks: false,
+            reason: MigrationReason::AdminRequest,
+            with_local_disks: false,
         }
     }
 
@@ -639,7 +640,8 @@ mod tests {
             source: "node-a".into(),
             target: "node-b".into(),
             mtype: MigrationType::Live,
-            reason: MigrationReason::AdminRequest, with_local_disks: false,
+            reason: MigrationReason::AdminRequest,
+            with_local_disks: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"live\""));
@@ -697,7 +699,8 @@ mod tests {
             source: "node-a".into(),
             target: "node-b".into(),
             mtype: MigrationType::Cold,
-            reason: MigrationReason::AdminRequest, with_local_disks: false,
+            reason: MigrationReason::AdminRequest,
+            with_local_disks: false,
         };
         let req2 = MigrationRequest {
             vm_id: 102,

@@ -30,15 +30,15 @@ pub struct AgentMetrics {
 impl AgentMetrics {
     pub fn snapshot(&self) -> AgentMetricsSnapshot {
         AgentMetricsSnapshot {
-            fault_count:       self.fault_count.load(Ordering::Relaxed),
-            fault_served:      self.fault_served.load(Ordering::Relaxed),
-            fault_errors:      self.fault_errors.load(Ordering::Relaxed),
-            pages_evicted:     self.pages_evicted.load(Ordering::Relaxed),
-            pages_fetched:     self.pages_fetched.load(Ordering::Relaxed),
-            fetch_zeros:       self.fetch_zeros.load(Ordering::Relaxed),
-            local_present:     self.local_present.load(Ordering::Relaxed),
-            pages_recalled:    self.pages_recalled.load(Ordering::Relaxed),
-            eviction_alerts:   self.eviction_alerts.load(Ordering::Relaxed),
+            fault_count: self.fault_count.load(Ordering::Relaxed),
+            fault_served: self.fault_served.load(Ordering::Relaxed),
+            fault_errors: self.fault_errors.load(Ordering::Relaxed),
+            pages_evicted: self.pages_evicted.load(Ordering::Relaxed),
+            pages_fetched: self.pages_fetched.load(Ordering::Relaxed),
+            fetch_zeros: self.fetch_zeros.load(Ordering::Relaxed),
+            local_present: self.local_present.load(Ordering::Relaxed),
+            pages_recalled: self.pages_recalled.load(Ordering::Relaxed),
+            eviction_alerts: self.eviction_alerts.load(Ordering::Relaxed),
             migration_searches: self.migration_searches.load(Ordering::Relaxed),
         }
     }
@@ -46,14 +46,14 @@ impl AgentMetrics {
 
 #[derive(Debug, Serialize)]
 pub struct AgentMetricsSnapshot {
-    pub fault_count:        u64,
-    pub fault_served:       u64,
-    pub fault_errors:       u64,
-    pub pages_evicted:      u64,
-    pub pages_fetched:      u64,
-    pub fetch_zeros:        u64,
-    pub local_present:      u64,
-    pub pages_recalled:     u64,
-    pub eviction_alerts:    u64,
+    pub fault_count: u64,
+    pub fault_served: u64,
+    pub fault_errors: u64,
+    pub pages_evicted: u64,
+    pub pages_fetched: u64,
+    pub fetch_zeros: u64,
+    pub local_present: u64,
+    pub pages_recalled: u64,
+    pub eviction_alerts: u64,
     pub migration_searches: u64,
 }

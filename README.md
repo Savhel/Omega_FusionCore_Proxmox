@@ -140,6 +140,8 @@ Alternative légère à `omega-daemon` pour des tests ou des setups simples sans
 |---------|------|
 | `node-a-agent` | Agent par VM — uffd, éviction CLOCK, réplication, vCPU élastique, GPU, balloon thin-provisioning |
 | `node-bc-store` | Store distant — stocke les pages en RAM ou Ceph, nettoyage orphelins, TLS |
+| `omega-qemu-launcher` | Wrapper de lancement QEMU/Proxmox — prépare l'agent memfd, injecte `memory-backend-file`, lance le vrai QEMU |
+| `omega-uffd-bridge.so` | Bridge `LD_PRELOAD` chargé uniquement dans QEMU — enregistre le mapping memfd auprès de `userfaultfd` et transmet le fd à l'agent |
 
 > **Quand utiliser quoi ?**
 >
@@ -150,6 +152,40 @@ Alternative légère à `omega-daemon` pour des tests ou des setups simples sans
 > | Nœud standalone (1 seul serveur) | **`node-a-agent` + `node-bc-store` local** — simple et sans overhead |
 >
 > Les deux modes partagent le même protocole TCP — compatible à 100 %.
+
+### Voie QEMU Proxmox transparente
+
+Le chemin Proxmox complet utilise maintenant trois pièces coordonnées :
+
+```text
+Proxmox -> /usr/bin/kvm -> kvm-omega -> omega-qemu-launcher exec-proxmox
+        -> node-a-agent memfd -> QEMU réel + omega-uffd-bridge.so
+```
+
+Le launcher déduit `vm_id` et RAM depuis la ligne QEMU de Proxmox, démarre
+l'agent `memfd`, injecte :
+
+```bash
+-object memory-backend-file,id=ram0,size=<RAM>M,mem-path=/proc/<agent_pid>/fd/<fd>,share=on
+-machine ...,memory-backend=ram0
+```
+
+Le bridge `omega-uffd-bridge.so` est injecté uniquement dans le vrai QEMU, pas
+dans le launcher. Il détecte le mapping `memfd:omega-vm-<vmid>-...`, crée le
+`userfaultfd`, puis transmet ce fd à `node-a-agent` via le socket
+`/var/lib/omega-qemu/vm-<vmid>/uffd.sock`.
+
+Commandes utiles :
+
+```bash
+omega-qemu-launcher doctor \
+  --qemu-bin /usr/bin/kvm.real \
+  --agent-bin /usr/local/bin/node-a-agent \
+  --bridge-lib /usr/local/lib/omega-uffd-bridge.so
+
+omega-qemu-launcher status --vm-id 9004
+omega-qemu-launcher cleanup --vm-id 9004 --keep-log
+```
 
 ---
 

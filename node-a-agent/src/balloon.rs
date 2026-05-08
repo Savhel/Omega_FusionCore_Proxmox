@@ -29,30 +29,30 @@ use tracing::{info, warn};
 use crate::metrics::AgentMetrics;
 
 pub struct BalloonManager {
-    vm_id:                 u32,
-    min_mib:               u64,
-    max_mib:               u64,
-    step_mib:              u64,
-    interval:              Duration,
-    grow_faults_per_sec:   u64,
+    vm_id: u32,
+    min_mib: u64,
+    max_mib: u64,
+    step_mib: u64,
+    interval: Duration,
+    grow_faults_per_sec: u64,
     shrink_faults_per_sec: u64,
-    current_mib:           Arc<AtomicU64>,
-    metrics:               Arc<AgentMetrics>,
+    current_mib: Arc<AtomicU64>,
+    metrics: Arc<AgentMetrics>,
 }
 
 impl BalloonManager {
     pub fn new(
-        vm_id:                 u32,
-        min_mib:               u64,
-        max_mib:               u64,
-        step_mib:              u64,
-        interval_secs:         u64,
-        grow_faults_per_sec:   u64,
+        vm_id: u32,
+        min_mib: u64,
+        max_mib: u64,
+        step_mib: u64,
+        interval_secs: u64,
+        grow_faults_per_sec: u64,
         shrink_faults_per_sec: u64,
-        metrics:               Arc<AgentMetrics>,
+        metrics: Arc<AgentMetrics>,
     ) -> Self {
-        let min_mib  = min_mib.max(64);          // plancher absolu de sécurité
-        let max_mib  = max_mib.max(min_mib);
+        let min_mib = min_mib.max(64); // plancher absolu de sécurité
+        let max_mib = max_mib.max(min_mib);
         let step_mib = step_mib.max(64);
 
         Self {
@@ -74,15 +74,15 @@ impl BalloonManager {
             warn!(vm_id = self.vm_id, error = %e, "balloon init échoué — guest voit la RAM complète");
         } else {
             info!(
-                vm_id   = self.vm_id,
-                mib     = self.min_mib,
+                vm_id = self.vm_id,
+                mib = self.min_mib,
                 max_mib = self.max_mib,
                 "balloon initialisé — guest démarre avec RAM réduite"
             );
         }
 
         let mut prev_faults = self.metrics.fault_count.load(Ordering::Relaxed);
-        let interval_secs   = self.interval.as_secs().max(1);
+        let interval_secs = self.interval.as_secs().max(1);
 
         loop {
             sleep(self.interval).await;
@@ -93,10 +93,10 @@ impl BalloonManager {
                 break;
             }
 
-            let cur_faults  = self.metrics.fault_count.load(Ordering::Relaxed);
-            let delta       = cur_faults.saturating_sub(prev_faults);
-            let fault_rate  = delta / interval_secs;
-            prev_faults     = cur_faults;
+            let cur_faults = self.metrics.fault_count.load(Ordering::Relaxed);
+            let delta = cur_faults.saturating_sub(prev_faults);
+            let fault_rate = delta / interval_secs;
+            prev_faults = cur_faults;
 
             let current = self.current_mib.load(Ordering::Relaxed);
 
@@ -115,9 +115,9 @@ impl BalloonManager {
                     Ok(_) => {
                         self.current_mib.store(target, Ordering::Relaxed);
                         info!(
-                            vm_id      = self.vm_id,
-                            prev_mib   = current,
-                            new_mib    = target,
+                            vm_id = self.vm_id,
+                            prev_mib = current,
+                            new_mib = target,
                             fault_rate,
                             "balloon ajusté"
                         );

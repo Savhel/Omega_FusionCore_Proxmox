@@ -5,8 +5,8 @@
 # les 3 nœuds dans des processus distincts sur localhost.
 #
 # Architecture simulée :
-#   - node-bc-store sur :9100 (simule nœud B)
-#   - node-bc-store sur :9101 (simule nœud C)
+#   - node-bc-store sur :${OMEGA_STORE_PORT:-9100} (simule nœud B)
+#   - node-bc-store sur :${OMEGA_STORE_PORT:-9100}+1 (simule nœud C)
 #   - node-a-agent en mode demo
 #
 # Usage :
@@ -61,6 +61,10 @@ fi
 
 STORE_BIN="${ROOT_DIR}/target/release/node-bc-store"
 AGENT_BIN="${ROOT_DIR}/target/release/node-a-agent"
+STORE_PORT="${OMEGA_STORE_PORT:-9100}"
+STATUS_PORT="${OMEGA_STATUS_PORT:-9200}"
+VMID="${OMEGA_TEST_VMID:-1}"
+REGION_MIB="${OMEGA_TEST_REGION_MIB:-16}"
 
 [[ -x "$STORE_BIN" ]] || fail "node-bc-store non compilé — lancez avec --build ou 'make build'"
 [[ -x "$AGENT_BIN" ]] || fail "node-a-agent non compilé — lancez avec --build ou 'make build'"
@@ -76,13 +80,19 @@ fi
 
 # ─── Lancement des stores ─────────────────────────────────────────────────────
 
-info "Démarrage node-bc-store sur :9100 (simule nœud B)..."
-LOG_LEVEL=info "$STORE_BIN" --listen 127.0.0.1:9100 --node-id node-b &
+info "Démarrage node-bc-store sur :${STORE_PORT} (simule nœud B)..."
+LOG_LEVEL=info "$STORE_BIN" \
+    --listen "127.0.0.1:${STORE_PORT}" \
+    --status-listen "127.0.0.1:${STATUS_PORT}" \
+    --node-id node-b &
 PIDS+=($!)
 STORE_B_PID=${!}
 
-info "Démarrage node-bc-store sur :9101 (simule nœud C)..."
-LOG_LEVEL=info "$STORE_BIN" --listen 127.0.0.1:9101 --node-id node-c &
+info "Démarrage node-bc-store sur :$((STORE_PORT + 1)) (simule nœud C)..."
+LOG_LEVEL=info "$STORE_BIN" \
+    --listen "127.0.0.1:$((STORE_PORT + 1))" \
+    --status-listen "127.0.0.1:$((STATUS_PORT + 1))" \
+    --node-id node-c &
 PIDS+=($!)
 STORE_C_PID=${!}
 
@@ -91,7 +101,7 @@ info "Attente du démarrage des stores..."
 sleep 1
 
 # Vérification de la connectivité avec nc
-for port in 9100 9101; do
+for port in "$STORE_PORT" "$((STORE_PORT + 1))"; do
     if nc -z -w2 127.0.0.1 "$port" 2>/dev/null; then
         success "Store :${port} accessible"
     else
@@ -112,9 +122,11 @@ echo
 
 RUST_LOG="${RUST_LOG:-info}" \
     "$AGENT_BIN" \
-    --stores "127.0.0.1:9100,127.0.0.1:9101" \
-    --vm-id 1 \
-    --region-mib 16 \
+    --stores "127.0.0.1:${STORE_PORT},127.0.0.1:$((STORE_PORT + 1))" \
+    --status-addrs "127.0.0.1:${STATUS_PORT},127.0.0.1:$((STATUS_PORT + 1))" \
+    --vm-id "$VMID" \
+    --vm-requested-mib "$REGION_MIB" \
+    --region-mib "$REGION_MIB" \
     --mode demo
 
 AGENT_EXIT=$?

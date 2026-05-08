@@ -34,13 +34,16 @@ use node_bc_store::protocol::PAGE_SIZE;
 
 /// Fenêtre d'observation des page_ids récents pour détecter la séquentialité.
 struct AccessHistory {
-    window:     VecDeque<u64>,
-    capacity:   usize,
+    window: VecDeque<u64>,
+    capacity: usize,
 }
 
 impl AccessHistory {
     fn new(capacity: usize) -> Self {
-        Self { window: VecDeque::with_capacity(capacity), capacity }
+        Self {
+            window: VecDeque::with_capacity(capacity),
+            capacity,
+        }
     }
 
     fn push(&mut self, page_id: u64) {
@@ -62,7 +65,8 @@ impl AccessHistory {
         let stride = pages[1] as i64 - pages[0] as i64;
 
         // Vérifier que tous les écarts sont égaux
-        let all_equal = pages.windows(2)
+        let all_equal = pages
+            .windows(2)
             .all(|w| (w[1] as i64 - w[0] as i64) == stride);
 
         if all_equal && stride != 0 {
@@ -78,17 +82,17 @@ impl AccessHistory {
 /// Cache local des pages préfetchées en avance de phase.
 pub struct PrefetchCache {
     /// page_id → données de la page
-    cache:       Arc<DashMap<u64, Box<[u8; PAGE_SIZE]>>>,
+    cache: Arc<DashMap<u64, Box<[u8; PAGE_SIZE]>>>,
     /// File d'insertion (pour évincer les plus anciennes en FIFO)
-    insertion:   std::sync::Mutex<VecDeque<u64>>,
-    max_cached:  usize,
+    insertion: std::sync::Mutex<VecDeque<u64>>,
+    max_cached: usize,
 }
 
 impl PrefetchCache {
     pub fn new(max_cached: usize) -> Self {
         Self {
-            cache:      Arc::new(DashMap::new()),
-            insertion:  std::sync::Mutex::new(VecDeque::new()),
+            cache: Arc::new(DashMap::new()),
+            insertion: std::sync::Mutex::new(VecDeque::new()),
             max_cached,
         }
     }
@@ -133,20 +137,20 @@ impl PrefetchCache {
 
 /// Moteur de préfetch — détecte la séquentialité et déclenche des GET_PAGE anticipés.
 pub struct PrefetchEngine {
-    history:      std::sync::Mutex<AccessHistory>,
-    pub cache:    Arc<PrefetchCache>,
+    history: std::sync::Mutex<AccessHistory>,
+    pub cache: Arc<PrefetchCache>,
     /// Nombre de pages à préfetcher en avance
-    lookahead:    u64,
+    lookahead: u64,
     /// Seuil minimum de confiance (nombre d'accès séquentiels avant de préfetcher)
-    min_history:  usize,
-    num_pages:    u64,
+    min_history: usize,
+    num_pages: u64,
 }
 
 impl PrefetchEngine {
     pub fn new(num_pages: u64, lookahead: u64, max_cached: usize) -> Self {
         Self {
-            history:     std::sync::Mutex::new(AccessHistory::new(8)),
-            cache:       Arc::new(PrefetchCache::new(max_cached)),
+            history: std::sync::Mutex::new(AccessHistory::new(8)),
+            cache: Arc::new(PrefetchCache::new(max_cached)),
             lookahead,
             min_history: 3,
             num_pages,
@@ -247,7 +251,7 @@ mod tests {
     #[test]
     fn test_cache_take() {
         let cache = PrefetchCache::new(10);
-        let data  = [0xABu8; PAGE_SIZE];
+        let data = [0xABu8; PAGE_SIZE];
         cache.insert(42, data);
         assert!(cache.contains(42));
         let got = cache.take(42).unwrap();

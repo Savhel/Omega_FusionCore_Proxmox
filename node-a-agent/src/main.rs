@@ -9,21 +9,21 @@ use clap::Parser;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
+use node_a_agent::balloon::BalloonManager;
 use node_a_agent::cluster::{local_available_mib, ClusterState};
 use node_a_agent::compaction::ClusterCompactor;
 use node_a_agent::config::Config;
+use node_a_agent::disk_scheduler::DiskScheduler;
 use node_a_agent::gpu_placement::GpuPlacementDaemon;
 use node_a_agent::gpu_scheduler::GpuScheduler;
 use node_a_agent::memory::{MemoryRegion, PAGE_SIZE};
 use node_a_agent::metrics::AgentMetrics;
 use node_a_agent::metrics_server;
 use node_a_agent::migration::MigrationAgent;
+use node_a_agent::prefetch::PrefetchEngine;
 use node_a_agent::remote::RemoteStorePool;
 use node_a_agent::shared_memory::{MemoryBackendKind, MemoryBackendOptions};
 use node_a_agent::uffd::{spawn_fault_handler_thread, UffdHandle};
-use node_a_agent::balloon::BalloonManager;
-use node_a_agent::disk_scheduler::DiskScheduler;
-use node_a_agent::prefetch::PrefetchEngine;
 use node_a_agent::vcpu_scheduler::VCpuScheduler;
 
 #[tokio::main]
@@ -38,8 +38,12 @@ async fn main() -> Result<()> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
     match cfg.log_format.as_str() {
-        "json" => fmt().json().with_env_filter(filter).with_current_span(false).init(),
-        _      => fmt().with_env_filter(filter).with_target(false).init(),
+        "json" => fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_current_span(false)
+            .init(),
+        _ => fmt().with_env_filter(filter).with_target(false).init(),
     }
 
     info!(
@@ -56,12 +60,17 @@ async fn main() -> Result<()> {
     );
 
     // ── Pool de stores ────────────────────────────────────────────────────────
-    let tls_fps: Vec<String> = cfg.tls_fingerprints
+    let tls_fps: Vec<String> = cfg
+        .tls_fingerprints
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let store = Arc::new(RemoteStorePool::new(cfg.stores.clone(), cfg.store_timeout_ms, tls_fps));
+    let store = Arc::new(RemoteStorePool::new(
+        cfg.stores.clone(),
+        cfg.store_timeout_ms,
+        tls_fps,
+    ));
 
     info!("vérification de la connectivité aux stores...");
     let ping_results = store.ping_all().await;
@@ -80,7 +89,8 @@ async fn main() -> Result<()> {
 
     // ── État cluster ──────────────────────────────────────────────────────────
     let status_addrs = if cfg.status_addrs.is_empty() || cfg.status_addrs == [""] {
-        cfg.stores.iter()
+        cfg.stores
+            .iter()
             .map(|s| format!("{}:9200", s.splitn(2, ':').next().unwrap_or("127.0.0.1")))
             .collect()
     } else {
@@ -97,10 +107,10 @@ async fn main() -> Result<()> {
     let metrics = Arc::new(AgentMetrics::default());
 
     // ── Région mémoire ────────────────────────────────────────────────────────
-    let region_size       = cfg.region_mib * 1024 * 1024;
-    let backend_kind      = MemoryBackendKind::parse(&cfg.backend)?;
-    let replication_flag  = Arc::new(AtomicBool::new(cfg.replication_enabled));
-    let region            = Arc::new(
+    let region_size = cfg.region_mib * 1024 * 1024;
+    let backend_kind = MemoryBackendKind::parse(&cfg.backend)?;
+    let replication_flag = Arc::new(AtomicBool::new(cfg.replication_enabled));
+    let region = Arc::new(
         MemoryRegion::allocate(
             region_size,
             cfg.vm_id,
@@ -108,7 +118,10 @@ async fn main() -> Result<()> {
             store.clone(),
             metrics.clone(),
             tokio_handle.clone(),
-            MemoryBackendOptions { kind: backend_kind, memfd_name: cfg.memfd_name.clone() },
+            MemoryBackendOptions {
+                kind: backend_kind,
+                memfd_name: cfg.memfd_name.clone(),
+            },
             cluster.clone(),
             replication_flag,
         )
@@ -123,7 +136,6 @@ async fn main() -> Result<()> {
         info!(path = %metadata_path.display(), "métadonnées backend exportées");
     }
 
-
     // ── userfaultfd ───────────────────────────────────────────────────────────
     let uffd = UffdHandle::open().context("ouverture userfaultfd échouée")?;
     uffd.register_region(region.base_ptr(), region_size)?;
@@ -137,8 +149,8 @@ async fn main() -> Result<()> {
             cfg.prefetch_max_cached,
         ));
         info!(
-            lookahead   = cfg.prefetch_lookahead,
-            max_cached  = cfg.prefetch_max_cached,
+            lookahead = cfg.prefetch_lookahead,
+            max_cached = cfg.prefetch_max_cached,
             "préfetch séquentiel activé"
         );
         Some(engine)
@@ -147,11 +159,11 @@ async fn main() -> Result<()> {
     };
 
     // ── Thread handler uffd ───────────────────────────────────────────────────
-    let shutdown_flag  = Arc::new(AtomicBool::new(false));
-    let region_start   = region.base_ptr() as u64;
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let region_start = region.base_ptr() as u64;
     let region_handler = region.clone();
-    let prefetch_ref    = prefetch_engine.clone();
-    let fault_handler  = Box::new(move |_vm_id: u32, page_id: u64, _addr: u64, _write: bool| {
+    let prefetch_ref = prefetch_engine.clone();
+    let fault_handler = Box::new(move |_vm_id: u32, page_id: u64, _addr: u64, _write: bool| {
         let result = region_handler.fetch_page(page_id);
         // Après un fetch réussi, enregistrer l'accès pour la détection de stride.
         // L'exécution réelle du prefetch (UFFDIO_COPY préventif) nécessite un support
@@ -201,7 +213,11 @@ async fn main() -> Result<()> {
         ));
         let sd = shutdown_flag.clone();
         tokio::spawn(async move { daemon.run(sd).await });
-        info!(vm_id = cfg.vm_id, gpu_explicit = cfg.gpu_required, "démon GPU placement activé");
+        info!(
+            vm_id = cfg.vm_id,
+            gpu_explicit = cfg.gpu_required,
+            "démon GPU placement activé"
+        );
 
         // Scheduler de partage GPU : round-robin QMP entre les VMs GPU du nœud
         // Actif uniquement si la VM a déjà hostpci0 configuré (passthrough prêt)
@@ -219,13 +235,16 @@ async fn main() -> Result<()> {
                 "scheduler GPU partage démarré (leader election via flock)"
             );
         } else {
-            info!(vm_id = cfg.vm_id, "hostpci0 pas encore configuré — scheduler GPU en attente du placement");
+            info!(
+                vm_id = cfg.vm_id,
+                "hostpci0 pas encore configuré — scheduler GPU en attente du placement"
+            );
         }
     }
 
     // ── Scheduler vCPU élastique ──────────────────────────────────────────────
     let initial_vcpus = cfg.vm_initial_vcpus.min(cfg.vm_vcpus).max(1);
-    let vcpu_sched    = Arc::new(VCpuScheduler::new(
+    let vcpu_sched = Arc::new(VCpuScheduler::new(
         cfg.vm_id,
         cfg.vm_vcpus,
         initial_vcpus,
@@ -241,11 +260,11 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { vs.run(sd).await });
     }
     info!(
-        vm_id           = cfg.vm_id,
+        vm_id = cfg.vm_id,
         initial_vcpus,
-        max_vcpus       = cfg.vm_vcpus,
-        overcommit      = cfg.vcpu_overcommit_ratio,
-        scale_interval  = cfg.vcpu_scale_interval_secs,
+        max_vcpus = cfg.vm_vcpus,
+        overcommit = cfg.vcpu_overcommit_ratio,
+        scale_interval = cfg.vcpu_scale_interval_secs,
         "scheduler vCPU élastique activé"
     );
 
@@ -265,11 +284,11 @@ async fn main() -> Result<()> {
         let sd = shutdown_flag.clone();
         tokio::spawn(async move { balloon_mgr.run(sd).await });
         info!(
-            vm_id       = cfg.vm_id,
+            vm_id = cfg.vm_id,
             initial_mib,
-            max_mib     = cfg.region_mib,
-            step_mib    = cfg.balloon_step_mib,
-            interval_s  = cfg.balloon_interval_secs,
+            max_mib = cfg.region_mib,
+            step_mib = cfg.balloon_step_mib,
+            interval_s = cfg.balloon_interval_secs,
             "balloon thin-provisioning activé"
         );
     }
@@ -285,35 +304,47 @@ async fn main() -> Result<()> {
         let sd = shutdown_flag.clone();
         tokio::spawn(async move { ds.run(sd).await });
         info!(
-            vm_id          = cfg.vm_id,
-            psi_threshold  = cfg.disk_psi_threshold,
-            active_mib     = cfg.disk_active_bytes_mib,
-            interval_s     = cfg.disk_interval_secs,
+            vm_id = cfg.vm_id,
+            psi_threshold = cfg.disk_psi_threshold,
+            active_mib = cfg.disk_active_bytes_mib,
+            interval_s = cfg.disk_interval_secs,
             "scheduler I/O disque activé"
         );
     }
 
     // ── Exécution ─────────────────────────────────────────────────────────────
     match cfg.mode.as_str() {
-        "demo"   => run_demo(&region, &cfg, &metrics, &store, uffd_fd).await?,
-        "daemon" => run_daemon(&shutdown_flag, &region, &cluster, &metrics, &cfg, uffd_fd, cpu_pressure, needs_gpu).await,
-        m        => bail!("mode inconnu : {m} (valides : demo, daemon)"),
+        "demo" => run_demo(&region, &cfg, &metrics, &store, uffd_fd).await?,
+        "daemon" => {
+            run_daemon(
+                &shutdown_flag,
+                &region,
+                &cluster,
+                &metrics,
+                &cfg,
+                uffd_fd,
+                cpu_pressure,
+                needs_gpu,
+            )
+            .await
+        }
+        m => bail!("mode inconnu : {m} (valides : demo, daemon)"),
     }
 
     shutdown_flag.store(true, Ordering::Relaxed);
 
     let snap = metrics.snapshot();
     info!(
-        faults         = snap.fault_count,
-        served         = snap.fault_served,
-        errors         = snap.fault_errors,
-        evicted        = snap.pages_evicted,
-        fetched        = snap.pages_fetched,
-        recalled       = snap.pages_recalled,
-        zeros          = snap.fetch_zeros,
-        local_present  = snap.local_present,
-        alerts         = snap.eviction_alerts,
-        migrations     = snap.migration_searches,
+        faults = snap.fault_count,
+        served = snap.fault_served,
+        errors = snap.fault_errors,
+        evicted = snap.pages_evicted,
+        fetched = snap.pages_fetched,
+        recalled = snap.pages_recalled,
+        zeros = snap.fetch_zeros,
+        local_present = snap.local_present,
+        alerts = snap.eviction_alerts,
+        migrations = snap.migration_searches,
         "métriques finales"
     );
 
@@ -324,19 +355,19 @@ async fn main() -> Result<()> {
 
 async fn run_daemon(
     shutdown_flag: &Arc<AtomicBool>,
-    region:        &Arc<MemoryRegion>,
-    cluster:       &Arc<ClusterState>,
-    metrics:       &Arc<AgentMetrics>,
-    cfg:           &Config,
-    uffd_fd:       std::os::unix::io::RawFd,
-    cpu_pressure:  Arc<AtomicBool>,
-    needs_gpu:     bool,
+    region: &Arc<MemoryRegion>,
+    cluster: &Arc<ClusterState>,
+    metrics: &Arc<AgentMetrics>,
+    cfg: &Config,
+    uffd_fd: std::os::unix::io::RawFd,
+    cpu_pressure: Arc<AtomicBool>,
+    needs_gpu: bool,
 ) {
     use tokio::signal::unix::{signal, SignalKind};
     use tokio::time::interval;
 
     let eviction_enabled = cfg.eviction_threshold_mib > 0;
-    let recall_enabled   = cfg.recall_threshold_mib > 0;
+    let recall_enabled = cfg.recall_threshold_mib > 0;
 
     let recall_priority_delay = priority_delay(cfg.recall_priority);
     // Item 6 : auto-détection du nombre de VMs si vm_count_hint est à sa valeur par défaut.
@@ -353,24 +384,24 @@ async fn run_daemon(
 
     info!(
         eviction_threshold_mib = cfg.eviction_threshold_mib,
-        recall_threshold_mib   = cfg.recall_threshold_mib,
-        recall_priority        = cfg.recall_priority,
+        recall_threshold_mib = cfg.recall_threshold_mib,
+        recall_priority = cfg.recall_priority,
         recall_priority_delay_ms = recall_priority_delay.as_millis(),
         fair_recall_batch,
         vm_count,
-        migration_enabled      = cfg.migration_enabled,
-        compaction_enabled     = cfg.compaction_enabled,
+        migration_enabled = cfg.migration_enabled,
+        compaction_enabled = cfg.compaction_enabled,
         "mode daemon démarré"
     );
 
-    let mut sigterm          = signal(SignalKind::terminate()).expect("impossible d'écouter SIGTERM");
-    let mut eviction_ticker  = interval(Duration::from_secs(cfg.eviction_interval_secs.max(1)));
-    let mut recall_ticker    = interval(Duration::from_secs(cfg.recall_interval_secs.max(1)));
-    let mut cluster_ticker   = interval(Duration::from_secs(cfg.cluster_refresh_secs.max(5)));
+    let mut sigterm = signal(SignalKind::terminate()).expect("impossible d'écouter SIGTERM");
+    let mut eviction_ticker = interval(Duration::from_secs(cfg.eviction_interval_secs.max(1)));
+    let mut recall_ticker = interval(Duration::from_secs(cfg.recall_interval_secs.max(1)));
+    let mut cluster_ticker = interval(Duration::from_secs(cfg.cluster_refresh_secs.max(5)));
     // Compaction globale : vérification toutes les 5 minutes si des alertes se sont accumulées
-    let mut compact_ticker   = interval(Duration::from_secs(300));
+    let mut compact_ticker = interval(Duration::from_secs(300));
     // Surveillance pression CPU : déclenche migration si vCPU saturé
-    let mut cpu_ticker       = interval(Duration::from_secs(cfg.vcpu_scale_interval_secs.max(10)));
+    let mut cpu_ticker = interval(Duration::from_secs(cfg.vcpu_scale_interval_secs.max(10)));
 
     let mut migration_spawned = false;
     let mut consecutive_alerts = 0u32;
@@ -478,10 +509,10 @@ async fn run_daemon(
 
 /// Retourne `true` si la VM souffre (aucun store disponible ou cap atteint).
 async fn evict_batch(
-    region:  &Arc<MemoryRegion>,
+    region: &Arc<MemoryRegion>,
     cluster: &Arc<ClusterState>,
     metrics: &Arc<AgentMetrics>,
-    cfg:     &Config,
+    cfg: &Config,
 ) -> bool {
     let targets = cluster.select_eviction_targets().await;
     if targets.is_empty() {
@@ -499,9 +530,9 @@ async fn evict_batch(
                 let pct = s.disk_available_mib * 100 / s.disk_total_mib;
                 if pct < 5 {
                     warn!(
-                        store_idx      = snap.store_idx,
+                        store_idx = snap.store_idx,
                         disk_avail_mib = s.disk_available_mib,
-                        disk_pct       = pct,
+                        disk_pct = pct,
                         "store exclu de l'éviction : disque presque plein"
                     );
                 }
@@ -510,16 +541,20 @@ async fn evict_batch(
     }
 
     // Ne pas évincer vers des stores dont le disque est critique (< 5 %).
-    let targets: Vec<_> = targets.into_iter().filter(|(idx, _)| {
-        snapshots.iter()
-            .find(|n| n.store_idx == *idx)
-            .and_then(|n| n.last_status.as_ref())
-            .map(|s| {
-                s.disk_total_mib == 0 || // RAM pure (pas de disque à surveiller)
+    let targets: Vec<_> = targets
+        .into_iter()
+        .filter(|(idx, _)| {
+            snapshots
+                .iter()
+                .find(|n| n.store_idx == *idx)
+                .and_then(|n| n.last_status.as_ref())
+                .map(|s| {
+                    s.disk_total_mib == 0 || // RAM pure (pas de disque à surveiller)
                 s.disk_available_mib * 100 / s.disk_total_mib >= 5
-            })
-            .unwrap_or(true)
-    }).collect();
+                })
+                .unwrap_or(true)
+        })
+        .collect();
 
     let cold_pages = region.select_cold_pages(cfg.eviction_batch_size);
     if cold_pages.is_empty() {
@@ -527,11 +562,11 @@ async fn evict_batch(
         return false;
     }
 
-    let assignments  = assign_pages_to_stores(&cold_pages, &targets);
+    let assignments = assign_pages_to_stores(&cold_pages, &targets);
     let avail_before = local_available_mib();
-    let mut evicted  = 0usize;
-    let mut failed   = 0usize;
-    let mut cap_hit  = false;
+    let mut evicted = 0usize;
+    let mut failed = 0usize;
+    let mut cap_hit = false;
 
     // Stores encore opérationnels pour ce batch ; on les retire au fur et à mesure
     // qu'ils refusent une page (store plein ou inaccessible).
@@ -547,7 +582,8 @@ async fn evict_batch(
         // Ordre d'essai : store préféré d'abord, puis les autres disponibles.
         let store_order: Vec<usize> = std::iter::once(preferred_store)
             .chain(
-                available.iter()
+                available
+                    .iter()
                     .map(|(i, _)| *i)
                     .filter(|&i| i != preferred_store),
             )
@@ -556,10 +592,16 @@ async fn evict_batch(
         let mut placed = false;
         for store_idx in store_order {
             // Vérifier que ce store n'a pas été retiré par une itération précédente.
-            if !available.iter().any(|(i, _)| *i == store_idx) { continue; }
+            if !available.iter().any(|(i, _)| *i == store_idx) {
+                continue;
+            }
 
             match region.evict_page_to(page_id, store_idx) {
-                Ok(()) => { evicted += 1; placed = true; break; }
+                Ok(()) => {
+                    evicted += 1;
+                    placed = true;
+                    break;
+                }
                 Err(e) if e.to_string().contains("cap vm_requested") => {
                     cap_hit = true;
                     debug!(page_id, "cap vm_requested atteint — éviction stoppée");
@@ -576,7 +618,9 @@ async fn evict_batch(
                 }
             }
         }
-        if !placed { failed += 1; }
+        if !placed {
+            failed += 1;
+        }
     }
 
     let avail_after = local_available_mib();
@@ -585,8 +629,8 @@ async fn evict_batch(
         failed,
         cap_hit,
         avail_before_mib = avail_before,
-        avail_after_mib  = avail_after,
-        threshold_mib    = cfg.eviction_threshold_mib,
+        avail_after_mib = avail_after,
+        threshold_mib = cfg.eviction_threshold_mib,
         "éviction batch terminée"
     );
 
@@ -595,19 +639,23 @@ async fn evict_batch(
 
 /// Répartit les pages sur les stores (greedy, proportiellement à leur capacité).
 fn assign_pages_to_stores(pages: &[u64], targets: &[(usize, usize)]) -> Vec<(u64, usize)> {
-    if targets.is_empty() || pages.is_empty() { return Vec::new(); }
+    if targets.is_empty() || pages.is_empty() {
+        return Vec::new();
+    }
 
     // Capacité totale
     let total_cap: usize = targets.iter().map(|(_, c)| *c).sum();
-    let mut result       = Vec::with_capacity(pages.len());
-    let mut counts       = vec![0usize; targets.len()];
+    let mut result = Vec::with_capacity(pages.len());
+    let mut counts = vec![0usize; targets.len()];
 
     for (i, &page_id) in pages.iter().enumerate() {
         // Choisir le store avec la plus grande "dette" (capacité non encore utilisée)
         let idx = if total_cap == 0 {
             i % targets.len()
         } else {
-            targets.iter().enumerate()
+            targets
+                .iter()
+                .enumerate()
                 .max_by_key(|(j, (_, cap))| {
                     // Score : capacité restante proportionnelle
                     cap.saturating_sub(counts[*j])
@@ -623,13 +671,13 @@ fn assign_pages_to_stores(pages: &[u64], targets: &[(usize, usize)]) -> Vec<(u64
 }
 
 fn spawn_migration_daemon(
-    region:        &Arc<MemoryRegion>,
-    cluster:       &Arc<ClusterState>,
-    cfg:           &Config,
+    region: &Arc<MemoryRegion>,
+    cluster: &Arc<ClusterState>,
+    cfg: &Config,
     shutdown_flag: &Arc<AtomicBool>,
-    uffd_fd:       std::os::unix::io::RawFd,
-    cpu_pressure:  Arc<AtomicBool>,
-    needs_gpu:     bool,
+    uffd_fd: std::os::unix::io::RawFd,
+    cpu_pressure: Arc<AtomicBool>,
+    needs_gpu: bool,
 ) {
     let agent = Arc::new(MigrationAgent::new(
         cfg.vm_id,
@@ -652,10 +700,10 @@ fn spawn_migration_daemon(
 // ─── Mode demo ────────────────────────────────────────────────────────────────
 
 async fn run_demo(
-    region:  &Arc<MemoryRegion>,
-    cfg:     &Config,
+    region: &Arc<MemoryRegion>,
+    cfg: &Config,
     metrics: &Arc<AgentMetrics>,
-    _store:  &Arc<RemoteStorePool>,
+    _store: &Arc<RemoteStorePool>,
     uffd_fd: std::os::unix::io::RawFd,
 ) -> Result<()> {
     let demo_pages = region.num_pages.min(64);
@@ -675,54 +723,76 @@ async fn run_demo(
 
     // 2. Éviction des pages paires
     info!("étape 2/5 : éviction des pages paires");
-    let t0      = Instant::now();
+    let t0 = Instant::now();
     let mut evicted = 0u64;
     for page_id in (0..demo_pages as u64).step_by(2) {
         let store_idx = (page_id / 2) as usize % cfg.stores.len();
         region.evict_page_to(page_id, store_idx)?;
         evicted += 1;
     }
-    info!(evicted, elapsed_ms = t0.elapsed().as_millis(), "étape 2/5 : ok");
+    info!(
+        evicted,
+        elapsed_ms = t0.elapsed().as_millis(),
+        "étape 2/5 : ok"
+    );
 
     // 3. Lecture + vérification d'intégrité
     info!("étape 3/5 : lecture + vérification d'intégrité");
-    let t1     = Instant::now();
+    let t1 = Instant::now();
     let mut errors = 0u32;
     for page_id in 0..demo_pages as u64 {
-        let ptr    = unsafe { (region.base_ptr() as *const u8).add(page_id as usize * PAGE_SIZE) };
+        let ptr = unsafe { (region.base_ptr() as *const u8).add(page_id as usize * PAGE_SIZE) };
         let read_id = unsafe { u64::from_be_bytes(*(ptr as *const [u8; 8])) };
         if read_id != page_id {
-            error!(page_id, got = read_id, "ERREUR INTÉGRITÉ : page_id incorrect");
+            error!(
+                page_id,
+                got = read_id,
+                "ERREUR INTÉGRITÉ : page_id incorrect"
+            );
             errors += 1;
         }
         let ok = (8..24usize).all(|i| {
             let expected = ((page_id as u8).wrapping_add(i as u8)) & 0xFF;
-            let got      = unsafe { *ptr.add(i) };
+            let got = unsafe { *ptr.add(i) };
             got == expected
         });
-        if !ok { error!(page_id, "ERREUR INTÉGRITÉ : motif incorrect"); errors += 1; }
+        if !ok {
+            error!(page_id, "ERREUR INTÉGRITÉ : motif incorrect");
+            errors += 1;
+        }
     }
-    info!(pages = demo_pages, elapsed_ms = t1.elapsed().as_millis(), errors, "étape 3/5 : ok");
+    info!(
+        pages = demo_pages,
+        elapsed_ms = t1.elapsed().as_millis(),
+        errors,
+        "étape 3/5 : ok"
+    );
 
     // 4. Recall LIFO
     info!("étape 4/5 : recall LIFO des pages évinvées");
-    let t2       = Instant::now();
+    let t2 = Instant::now();
     let recalled = region.recall_n_pages(evicted as usize, uffd_fd)?;
-    info!(recalled, elapsed_ms = t2.elapsed().as_millis(), "étape 4/5 : ok");
+    info!(
+        recalled,
+        elapsed_ms = t2.elapsed().as_millis(),
+        "étape 4/5 : ok"
+    );
 
     // 5. Résultats
     let snap = metrics.snapshot();
     info!(
-        pages_evicted  = snap.pages_evicted,
+        pages_evicted = snap.pages_evicted,
         pages_recalled = snap.pages_recalled,
-        faults_caught  = snap.fault_count,
-        faults_served  = snap.fault_served,
-        fetch_zeros    = snap.fetch_zeros,
-        integrity_ok   = errors == 0,
+        faults_caught = snap.fault_count,
+        faults_served = snap.fault_served,
+        fetch_zeros = snap.fetch_zeros,
+        integrity_ok = errors == 0,
         "étape 5/5 : résultats"
     );
 
-    if errors > 0 { bail!("ÉCHEC : {errors} erreur(s) d'intégrité"); }
+    if errors > 0 {
+        bail!("ÉCHEC : {errors} erreur(s) d'intégrité");
+    }
     info!("SUCCÈS : toutes les pages lues avec intégrité correcte");
     Ok(())
 }
@@ -757,17 +827,22 @@ async fn read_vm_hostpci0(vm_id: u32) -> Option<String> {
         .ok()?;
 
     let config = String::from_utf8_lossy(&out.stdout);
-    config.lines()
+    config
+        .lines()
         .find(|l| l.starts_with("hostpci0:"))
         .and_then(|l| {
-            let val    = l["hostpci0:".len()..].trim();
+            let val = l["hostpci0:".len()..].trim();
             let pci_id = val.split(',').next()?.trim();
-            let full   = if pci_id.matches(':').count() == 1 {
+            let full = if pci_id.matches(':').count() == 1 {
                 format!("0000:{pci_id}")
             } else {
                 pci_id.to_string()
             };
-            if full.is_empty() { None } else { Some(full) }
+            if full.is_empty() {
+                None
+            } else {
+                Some(full)
+            }
         })
 }
 
@@ -790,11 +865,13 @@ async fn detect_vm_gpu_passthrough(vm_id: u32) -> bool {
     let config = String::from_utf8_lossy(&out.stdout);
 
     for line in config.lines() {
-        if !line.starts_with("hostpci") { continue; }
+        if !line.starts_with("hostpci") {
+            continue;
+        }
         // hostpci0: 0000:02:00.0,pcie=1,rombar=0
         let value = match line.splitn(2, ':').nth(1) {
             Some(v) => v.trim(),
-            None    => continue,
+            None => continue,
         };
         // Récupérer l'identifiant PCI (avant la première virgule)
         let pci_id = value.split(',').next().unwrap_or("").trim();
@@ -806,11 +883,8 @@ async fn detect_vm_gpu_passthrough(vm_id: u32) -> bool {
         };
         let class_path = format!("/sys/bus/pci/devices/{full_id}/class");
         if let Ok(class_hex) = std::fs::read_to_string(&class_path) {
-            let class = u32::from_str_radix(
-                class_hex.trim().trim_start_matches("0x"),
-                16,
-            )
-            .unwrap_or(0);
+            let class =
+                u32::from_str_radix(class_hex.trim().trim_start_matches("0x"), 16).unwrap_or(0);
             if (class >> 16) == 0x03 {
                 info!(vm_id, pci = %full_id, "GPU passthrough détecté via qm config");
                 return true;

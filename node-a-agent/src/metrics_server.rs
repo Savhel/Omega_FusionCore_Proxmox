@@ -18,9 +18,9 @@ use crate::metrics::AgentMetrics;
 
 pub async fn run(
     bind_addr: String,
-    metrics:   Arc<AgentMetrics>,
-    cluster:   Arc<ClusterState>,
-    region:    Arc<MemoryRegion>,
+    metrics: Arc<AgentMetrics>,
+    cluster: Arc<ClusterState>,
+    region: Arc<MemoryRegion>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(addr = %bind_addr, "serveur métriques démarré");
@@ -30,7 +30,7 @@ pub async fn run(
             Ok((mut stream, peer)) => {
                 let metrics = metrics.clone();
                 let cluster = cluster.clone();
-                let region  = region.clone();
+                let region = region.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 256];
                     let n = match stream.read(&mut buf).await {
@@ -64,12 +64,12 @@ pub async fn run(
 async fn build_metrics_json(
     metrics: &AgentMetrics,
     cluster: &ClusterState,
-    region:  &MemoryRegion,
+    region: &MemoryRegion,
 ) -> String {
     let snap = metrics.snapshot();
 
     // Snapshot cluster : capacités actuelles des stores + GPU + disque
-    let targets   = cluster.select_eviction_targets().await;
+    let targets = cluster.select_eviction_targets().await;
     let snapshots = cluster.snapshot().await;
     let stores_json: Vec<String> = snapshots
         .iter()
@@ -89,21 +89,21 @@ async fn build_metrics_json(
         .collect();
 
     let remote_count = region.remote_count();
-    let remote_cap   = region.remote_cap();
-    let vm_id        = region.vm_id;
+    let remote_cap = region.remote_cap();
+    let vm_id = region.vm_id;
 
     format!(
         r#"{{"vm_id":{vm_id},"fault_count":{fault_count},"fault_served":{fault_served},"fault_errors":{fault_errors},"pages_evicted":{pages_evicted},"pages_fetched":{pages_fetched},"pages_recalled":{pages_recalled},"fetch_zeros":{fetch_zeros},"local_present":{local_present},"remote_count":{remote_count},"remote_cap":{remote_cap},"eviction_alerts":{eviction_alerts},"migration_searches":{migration_searches},"stores":[{stores}]}}"#,
-        fault_count       = snap.fault_count,
-        fault_served      = snap.fault_served,
-        fault_errors      = snap.fault_errors,
-        pages_evicted     = snap.pages_evicted,
-        pages_fetched     = snap.pages_fetched,
-        pages_recalled    = snap.pages_recalled,
-        fetch_zeros       = snap.fetch_zeros,
-        local_present     = snap.local_present,
-        eviction_alerts   = snap.eviction_alerts,
+        fault_count = snap.fault_count,
+        fault_served = snap.fault_served,
+        fault_errors = snap.fault_errors,
+        pages_evicted = snap.pages_evicted,
+        pages_fetched = snap.pages_fetched,
+        pages_recalled = snap.pages_recalled,
+        fetch_zeros = snap.fetch_zeros,
+        local_present = snap.local_present,
+        eviction_alerts = snap.eviction_alerts,
         migration_searches = snap.migration_searches,
-        stores            = stores_json.join(","),
+        stores = stores_json.join(","),
     )
 }

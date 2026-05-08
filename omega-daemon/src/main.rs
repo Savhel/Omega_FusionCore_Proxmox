@@ -203,7 +203,8 @@ async fn main() -> Result<()> {
                         );
                         // Tentative hotplug immédiate si pression détectée
                         if ev.avg_usage_pct >= omega_daemon::cgroup_cpu_monitor::USAGE_THRESHOLD
-                            || ev.avg_throttle >= omega_daemon::cgroup_cpu_monitor::THROTTLE_THRESHOLD
+                            || ev.avg_throttle
+                                >= omega_daemon::cgroup_cpu_monitor::THROTTLE_THRESHOLD
                         {
                             apply_hotplug_if_possible(&state, &hotplug, &cpu_ctrl, ev.vm_id);
                         }
@@ -544,9 +545,15 @@ fn ensure_vm_registered(
     let (min_vcpus, current_vcpus, max_vcpus) =
         derive_runtime_vcpu_profile(conf_min_vcpus, conf_max_vcpus, online_vcpus, max_vcpus);
 
-    match state.vcpu_scheduler.admit_vm(vm_id, current_vcpus, max_vcpus) {
+    match state
+        .vcpu_scheduler
+        .admit_vm(vm_id, current_vcpus, max_vcpus)
+    {
         omega_daemon::vcpu_scheduler::VcpuDecision::Allocated { .. } => {
-            if let Err(reason) = state.vcpu_scheduler.update_profile(vm_id, min_vcpus, max_vcpus) {
+            if let Err(reason) = state
+                .vcpu_scheduler
+                .update_profile(vm_id, min_vcpus, max_vcpus)
+            {
                 warn!(
                     vm_id,
                     min_vcpus,

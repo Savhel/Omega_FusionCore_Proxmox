@@ -16,7 +16,9 @@ fn bench_mark_present(c: &mut Criterion) {
 
 fn bench_mark_accessed(c: &mut Criterion) {
     let ev = ClockEvictor::new(1024, 0);
-    for i in 0..1024u64 { ev.mark_present(i); }
+    for i in 0..1024u64 {
+        ev.mark_present(i);
+    }
 
     c.bench_function("clock/mark_accessed", |b| {
         let mut pid = 0u64;
@@ -79,7 +81,9 @@ fn bench_concurrent_mark_present(c: &mut Criterion) {
                     })
                 })
                 .collect();
-            for h in handles { h.join().unwrap(); }
+            for h in handles {
+                h.join().unwrap();
+            }
         });
     });
 }

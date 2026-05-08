@@ -38,7 +38,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::gpu_protocol::{AllocRequest, AllocResponse, GpuHeader, GpuMessage, MsgType};
+use crate::gpu_protocol::{AllocRequest, AllocResponse, GpuHeader, GpuMessage, MsgType, Priority};
 
 // ─── Budget VRAM ─────────────────────────────────────────────────────────────
 
@@ -186,10 +186,32 @@ pub struct GpuMuxState {
 #[derive(Debug, Default, Clone)]
 pub struct GpuMuxStats {
     pub total_commands: u64,
+    pub low_priority_commands: u64,
+    pub normal_priority_commands: u64,
+    pub high_priority_commands: u64,
+    pub realtime_priority_commands: u64,
     pub total_allocs: u64,
     pub total_frees: u64,
     pub rejected_oom: u64,
     pub avg_latency_us: f64,
+}
+
+fn record_command_stats(stats: &mut GpuMuxStats, priority: Priority, elapsed: Duration) {
+    stats.total_commands += 1;
+
+    match priority {
+        Priority::Low => stats.low_priority_commands += 1,
+        Priority::Normal => stats.normal_priority_commands += 1,
+        Priority::High => stats.high_priority_commands += 1,
+        Priority::RealTime => stats.realtime_priority_commands += 1,
+    }
+
+    let elapsed_us = elapsed.as_micros() as f64;
+    if stats.total_commands == 1 {
+        stats.avg_latency_us = elapsed_us;
+    } else {
+        stats.avg_latency_us = 0.95 * stats.avg_latency_us + 0.05 * elapsed_us;
+    }
 }
 
 /// Multiplexeur GPU — point d'entrée du démon.
@@ -463,14 +485,27 @@ impl GpuMultiplexer {
     /// Soumet un command stream virgl brut au backend GPU.
     ///
     /// `data` = octets virgl bruts (CS format, tels qu'émis par le guest via Mesa).
-    pub async fn submit_raw(&self, vm_id: u32, data: &[u8], priority: crate::gpu_protocol::Priority) -> Result<Vec<u8>, GpuError> {
+    pub async fn submit_raw(
+        &self,
+        vm_id: u32,
+        data: &[u8],
+        priority: Priority,
+    ) -> Result<Vec<u8>, GpuError> {
         // On passe par le backend DRM directement pour la voie virgl
+        let start = Instant::now();
         let result = self.backend.submit(data).await?;
+        let elapsed = start.elapsed();
         {
             let mut stats = self.state.stats.lock().await;
-            stats.total_commands += 1;
+            record_command_stats(&mut stats, priority, elapsed);
         }
-        debug!(vm_id, bytes = data.len(), "submit_raw ok");
+        debug!(
+            vm_id,
+            bytes = data.len(),
+            ?priority,
+            latency_us = elapsed.as_micros(),
+            "submit_raw ok"
+        );
         Ok(result)
     }
 
@@ -516,6 +551,13 @@ impl GpuMultiplexer {
         format!(
             "# HELP omega_gpu_commands_total Commandes GPU soumises\n\
              omega_gpu_commands_total{{node=\"{node}\"}} {cmds}\n\
+             # HELP omega_gpu_commands_by_priority_total Commandes GPU par priorité\n\
+             omega_gpu_commands_by_priority_total{{node=\"{node}\",priority=\"low\"}} {prio_low}\n\
+             omega_gpu_commands_by_priority_total{{node=\"{node}\",priority=\"normal\"}} {prio_normal}\n\
+             omega_gpu_commands_by_priority_total{{node=\"{node}\",priority=\"high\"}} {prio_high}\n\
+             omega_gpu_commands_by_priority_total{{node=\"{node}\",priority=\"realtime\"}} {prio_realtime}\n\
+             # HELP omega_gpu_command_latency_avg_us Latence moyenne de soumission GPU\n\
+             omega_gpu_command_latency_avg_us{{node=\"{node}\"}} {latency_avg}\n\
              # HELP omega_gpu_allocs_total Allocations VRAM\n\
              omega_gpu_allocs_total{{node=\"{node}\"}} {allocs}\n\
              # HELP omega_gpu_oom_total Allocations VRAM refusées (OOM)\n\
@@ -524,6 +566,11 @@ impl GpuMultiplexer {
              omega_gpu_vram_used_mib{{node=\"{node}\"}} {vram}\n",
             node = node_id,
             cmds = stats.total_commands,
+            prio_low = stats.low_priority_commands,
+            prio_normal = stats.normal_priority_commands,
+            prio_high = stats.high_priority_commands,
+            prio_realtime = stats.realtime_priority_commands,
+            latency_avg = stats.avg_latency_us,
             allocs = stats.total_allocs,
             oom = stats.rejected_oom,
             vram = total_vram_used,
@@ -552,9 +599,7 @@ async fn gpu_worker(
 
         {
             let mut stats = state.stats.lock().await;
-            stats.total_commands += 1;
-            // Moyenne mobile exponentielle (α = 0.05)
-            stats.avg_latency_us = 0.95 * stats.avg_latency_us + 0.05 * elapsed_us;
+            record_command_stats(&mut stats, entry.msg.header.priority, start.elapsed());
         }
 
         let response = match result {
@@ -746,6 +791,26 @@ mod tests {
         mux.set_vm_budget(1, 512).await;
         let metrics = mux.prometheus_metrics("node1").await;
         assert!(metrics.contains("omega_gpu_commands_total"));
+        assert!(metrics.contains("omega_gpu_commands_by_priority_total"));
+        assert!(metrics.contains("omega_gpu_command_latency_avg_us"));
         assert!(metrics.contains("omega_gpu_vram_used_mib"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_raw_records_priority_and_latency() {
+        let mux = make_mux(1024);
+
+        let result = mux
+            .submit_raw(9004, b"abcdef", Priority::High)
+            .await
+            .expect("submit_raw should succeed with mock backend");
+
+        assert_eq!(result, b"fedcba");
+
+        let stats = mux.state.stats.lock().await.clone();
+        assert_eq!(stats.total_commands, 1);
+        assert_eq!(stats.high_priority_commands, 1);
+        assert_eq!(stats.normal_priority_commands, 0);
+        assert!(stats.avg_latency_us >= 0.0);
     }
 }

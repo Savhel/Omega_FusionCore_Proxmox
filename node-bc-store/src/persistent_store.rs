@@ -229,7 +229,8 @@ impl PersistentPageStore {
                 let data = ivec.to_vec();
                 // Remettre en cache chaud avec timestamp courant
                 let arc_data: Arc<[u8]> = data.clone().into();
-                self.hot_cache.insert(key.clone(), (arc_data, Instant::now()));
+                self.hot_cache
+                    .insert(key.clone(), (arc_data, Instant::now()));
                 self.metrics.hit_count.fetch_add(1, Ordering::Relaxed);
                 debug!(
                     vm_id = key.vm_id,

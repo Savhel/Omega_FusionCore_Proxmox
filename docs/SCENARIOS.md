@@ -48,8 +48,9 @@ t=0s   hookscript pre-start :
          → node-a-agent démarre, enregistre la région userfaultfd
 
 t=1s   QEMU démarre via kvm-omega :
-         -object memory-backend-omega,id=ram0,size=32768M,...
-         QEMU mappe le memfd → voit 32 Go disponibles
+         -object memory-backend-file,id=ram0,size=32768M,mem-path=/proc/<agent>/fd/<fd>,share=on
+         -machine ...,memory-backend=ram0
+         QEMU mappe le memfd de l'agent → voit 32 Go disponibles
 
 t=5s   Guest boot (kernel + services) :
          ~800 Mo accédés → 800 Mo physiques alloués sur Nœud 1

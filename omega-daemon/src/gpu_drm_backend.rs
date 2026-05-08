@@ -423,38 +423,44 @@ impl DrmGpuBackend {
 
         #[repr(C)]
         struct AmdgpuCsChunkIb {
-            _pad:        u32,
-            flags:       u32,
-            va_start:    u64,
-            ib_bytes:    u32,
-            ip_type:     u16,
+            _pad: u32,
+            flags: u32,
+            va_start: u64,
+            ib_bytes: u32,
+            ip_type: u16,
             ip_instance: u16,
-            ring:        u32,
+            ring: u32,
         }
         #[repr(C)]
         struct AmdgpuCsChunk {
-            chunk_id:   u32,
-            length_dw:  u32,
+            chunk_id: u32,
+            length_dw: u32,
             chunk_data: u64, // pointeur vers AmdgpuCsChunkIb
         }
         #[repr(C)]
         struct AmdgpuCsIn {
-            ctx_id:       u32,
+            ctx_id: u32,
             bo_list_handle: u32,
-            num_chunks:   u32,
-            _pad:         u32,
-            chunks:       u64, // pointeur vers AmdgpuCsChunk[]
+            num_chunks: u32,
+            _pad: u32,
+            chunks: u64, // pointeur vers AmdgpuCsChunk[]
         }
         #[repr(C)]
-        struct AmdgpuCsOut { handle: u64 }
+        struct AmdgpuCsOut {
+            handle: u64,
+        }
         #[repr(C)]
-        struct AmdgpuCs { r#in: AmdgpuCsIn, out: AmdgpuCsOut }
+        struct AmdgpuCs {
+            r#in: AmdgpuCsIn,
+            out: AmdgpuCsOut,
+        }
 
         // DRM_IOWR(DRM_COMMAND_BASE + 0x06, struct drm_amdgpu_cs) = 0xC040_6446
         const DRM_IOCTL_AMDGPU_CS: libc::c_ulong = 0xC040_6446;
 
         // Alloue un GEM buffer pour l'IB
-        let gem_handle = self.gem_create_amdgpu(cmd.len() as u64, 4096)
+        let gem_handle = self
+            .gem_create_amdgpu(cmd.len() as u64, 4096)
             .map_err(|e| GpuError::SubmitFailed(e.to_string()))?;
         let raw_handle = (gem_handle >> 32) as u32;
 
@@ -466,9 +472,13 @@ impl DrmGpuBackend {
 
         // Construction du chunk IB
         let ib_chunk = AmdgpuCsChunkIb {
-            _pad: 0, flags: 0, va_start: 0,
+            _pad: 0,
+            flags: 0,
+            va_start: 0,
             ib_bytes: cmd.len() as u32,
-            ip_type: 1, ip_instance: 0, ring: 0,
+            ip_type: 1,
+            ip_instance: 0,
+            ring: 0,
         };
         let chunk = AmdgpuCsChunk {
             chunk_id: 1, // IB chunk
@@ -477,7 +487,10 @@ impl DrmGpuBackend {
         };
         let mut cs = AmdgpuCs {
             r#in: AmdgpuCsIn {
-                ctx_id: 0, bo_list_handle: 0, num_chunks: 1, _pad: 0,
+                ctx_id: 0,
+                bo_list_handle: 0,
+                num_chunks: 1,
+                _pad: 0,
                 chunks: &chunk as *const _ as u64,
             },
             out: AmdgpuCsOut { handle: 0 },
@@ -488,7 +501,8 @@ impl DrmGpuBackend {
 
         if ret != 0 {
             return Err(GpuError::SubmitFailed(format!(
-                "DRM_IOCTL_AMDGPU_CS: {}", std::io::Error::last_os_error()
+                "DRM_IOCTL_AMDGPU_CS: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
@@ -500,28 +514,28 @@ impl DrmGpuBackend {
     fn submit_i915(&self, cmd: &[u8]) -> Result<Vec<u8>, GpuError> {
         #[repr(C)]
         struct I915ExecObject2 {
-            handle:      u32,
+            handle: u32,
             relocation_count: u32,
-            relocs_ptr:  u64,
-            alignment:   u64,
-            offset:      u64,
-            flags:       u64,
-            rsvd1:       u64,
-            rsvd2:       u64,
+            relocs_ptr: u64,
+            alignment: u64,
+            offset: u64,
+            flags: u64,
+            rsvd1: u64,
+            rsvd2: u64,
         }
         #[repr(C)]
         struct I915ExecBuffer2 {
-            buffers_ptr:  u64,
+            buffers_ptr: u64,
             buffer_count: u32,
             batch_start_offset: u32,
-            batch_len:    u32,
-            dr1:          u32,
-            dr4:          u32,
+            batch_len: u32,
+            dr1: u32,
+            dr4: u32,
             num_cliprects: u32,
             cliprects_ptr: u64,
-            flags:        u64,
-            rsvd1:        u64,
-            rsvd2:        u64,
+            flags: u64,
+            rsvd1: u64,
+            rsvd2: u64,
         }
 
         // DRM_IOWR(DRM_COMMAND_BASE + 0x29, struct) = 0xC068_6469 (approx x86-64)
@@ -529,7 +543,8 @@ impl DrmGpuBackend {
         // I915_EXEC_DEFAULT = 0
         const I915_EXEC_DEFAULT: u64 = 0;
 
-        let gem_handle = self.gem_create_i915(cmd.len() as u64)
+        let gem_handle = self
+            .gem_create_i915(cmd.len() as u64)
             .map_err(|e| GpuError::SubmitFailed(e.to_string()))?;
         let raw_handle = (gem_handle >> 32) as u32;
 
@@ -539,27 +554,42 @@ impl DrmGpuBackend {
         }
 
         let obj = I915ExecObject2 {
-            handle: raw_handle, relocation_count: 0, relocs_ptr: 0,
-            alignment: 0, offset: 0, flags: 0, rsvd1: 0, rsvd2: 0,
+            handle: raw_handle,
+            relocation_count: 0,
+            relocs_ptr: 0,
+            alignment: 0,
+            offset: 0,
+            flags: 0,
+            rsvd1: 0,
+            rsvd2: 0,
         };
         let mut exec = I915ExecBuffer2 {
             buffers_ptr: &obj as *const _ as u64,
             buffer_count: 1,
             batch_start_offset: 0,
             batch_len: cmd.len() as u32,
-            dr1: 0, dr4: 0, num_cliprects: 0, cliprects_ptr: 0,
+            dr1: 0,
+            dr4: 0,
+            num_cliprects: 0,
+            cliprects_ptr: 0,
             flags: I915_EXEC_DEFAULT,
-            rsvd1: 0, rsvd2: 0,
+            rsvd1: 0,
+            rsvd2: 0,
         };
 
         let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &mut exec as *mut I915ExecBuffer2)
+            libc::ioctl(
+                self.fd,
+                DRM_IOCTL_I915_GEM_EXECBUFFER2,
+                &mut exec as *mut I915ExecBuffer2,
+            )
         };
         let _ = self.gem_free(gem_handle);
 
         if ret != 0 {
             return Err(GpuError::SubmitFailed(format!(
-                "DRM_IOCTL_I915_GEM_EXECBUFFER2: {}", std::io::Error::last_os_error()
+                "DRM_IOCTL_I915_GEM_EXECBUFFER2: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
@@ -571,15 +601,15 @@ impl DrmGpuBackend {
     fn submit_nouveau(&self, cmd: &[u8]) -> Result<Vec<u8>, GpuError> {
         #[repr(C)]
         struct NouveauGemPushbuf {
-            channel:   u32,
+            channel: u32,
             nr_buffers: u32,
-            buffers:   u64,
+            buffers: u64,
             nr_relocs: u32,
-            nr_push:   u32,
-            relocs:    u64,
-            push:      u64,
-            suffix0:   u32,
-            suffix1:   u32,
+            nr_push: u32,
+            relocs: u64,
+            push: u64,
+            suffix0: u32,
+            suffix1: u32,
             vram_available: u64,
             gart_available: u64,
         }
@@ -587,7 +617,8 @@ impl DrmGpuBackend {
         // DRM_IOWR(DRM_COMMAND_BASE + 0x08, struct) = 0xC050_6448
         const DRM_IOCTL_NOUVEAU_GEM_PUSHBUF: libc::c_ulong = 0xC050_6448;
 
-        let gem_handle = self.gem_create_i915(cmd.len() as u64)
+        let gem_handle = self
+            .gem_create_i915(cmd.len() as u64)
             .map_err(|e| GpuError::SubmitFailed(e.to_string()))?;
         let raw_handle = (gem_handle >> 32) as u32;
 
@@ -598,28 +629,46 @@ impl DrmGpuBackend {
 
         // Push buffer entry : { handle, offset, length, flags }
         #[repr(C)]
-        struct NouveauPush { bo_index: u32, offset: u32, length: u32, _pad: u32 }
+        struct NouveauPush {
+            bo_index: u32,
+            offset: u32,
+            length: u32,
+            _pad: u32,
+        }
         let push = NouveauPush {
-            bo_index: 0, offset: 0, length: cmd.len() as u32, _pad: 0,
+            bo_index: 0,
+            offset: 0,
+            length: cmd.len() as u32,
+            _pad: 0,
         };
 
         let mut pb = NouveauGemPushbuf {
-            channel: 0, nr_buffers: 0, buffers: 0,
-            nr_relocs: 0, nr_push: 1,
+            channel: 0,
+            nr_buffers: 0,
+            buffers: 0,
+            nr_relocs: 0,
+            nr_push: 1,
             relocs: 0,
             push: &push as *const _ as u64,
-            suffix0: 0, suffix1: 0,
-            vram_available: 0, gart_available: 0,
+            suffix0: 0,
+            suffix1: 0,
+            vram_available: 0,
+            gart_available: 0,
         };
 
         let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_NOUVEAU_GEM_PUSHBUF, &mut pb as *mut NouveauGemPushbuf)
+            libc::ioctl(
+                self.fd,
+                DRM_IOCTL_NOUVEAU_GEM_PUSHBUF,
+                &mut pb as *mut NouveauGemPushbuf,
+            )
         };
         let _ = self.gem_free(gem_handle);
 
         if ret != 0 {
             return Err(GpuError::SubmitFailed(format!(
-                "DRM_IOCTL_NOUVEAU_GEM_PUSHBUF: {}", std::io::Error::last_os_error()
+                "DRM_IOCTL_NOUVEAU_GEM_PUSHBUF: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
@@ -631,14 +680,14 @@ impl DrmGpuBackend {
     fn submit_virtgpu(&self, cmd: &[u8]) -> Result<Vec<u8>, GpuError> {
         #[repr(C)]
         struct VirtgpuExecbuffer {
-            flags:      u32,
-            size:       u32,
-            command:    u64, // pointeur vers les commandes virgl
+            flags: u32,
+            size: u32,
+            command: u64, // pointeur vers les commandes virgl
             bo_handles: u64,
             num_bo_handles: u32,
-            fence_fd:   i32,
-            ring_idx:   u32,
-            _pad:       u32,
+            fence_fd: i32,
+            ring_idx: u32,
+            _pad: u32,
         }
 
         // DRM_IOWR(DRM_COMMAND_BASE + 0x02, struct) = 0xC028_6442
@@ -647,27 +696,36 @@ impl DrmGpuBackend {
         const VIRTGPU_EXECBUF_FENCE_FD_OUT: u32 = 0x02;
 
         let mut exec = VirtgpuExecbuffer {
-            flags:          VIRTGPU_EXECBUF_FENCE_FD_OUT,
-            size:           cmd.len() as u32,
-            command:        cmd.as_ptr() as u64,
-            bo_handles:     0,
+            flags: VIRTGPU_EXECBUF_FENCE_FD_OUT,
+            size: cmd.len() as u32,
+            command: cmd.as_ptr() as u64,
+            bo_handles: 0,
             num_bo_handles: 0,
-            fence_fd:       -1,
-            ring_idx:       0,
-            _pad:           0,
+            fence_fd: -1,
+            ring_idx: 0,
+            _pad: 0,
         };
 
         let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut exec as *mut VirtgpuExecbuffer)
+            libc::ioctl(
+                self.fd,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut exec as *mut VirtgpuExecbuffer,
+            )
         };
 
         if ret != 0 {
             return Err(GpuError::SubmitFailed(format!(
-                "DRM_IOCTL_VIRTGPU_EXECBUFFER: {}", std::io::Error::last_os_error()
+                "DRM_IOCTL_VIRTGPU_EXECBUFFER: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
-        debug!(cmd_len = cmd.len(), fence_fd = exec.fence_fd, "virtgpu execbuffer soumis");
+        debug!(
+            cmd_len = cmd.len(),
+            fence_fd = exec.fence_fd,
+            "virtgpu execbuffer soumis"
+        );
         // Fermer le fence fd — on attend la complétion dans sync()
         if exec.fence_fd >= 0 {
             unsafe { libc::close(exec.fence_fd) };
@@ -682,7 +740,11 @@ impl DrmGpuBackend {
         //
         // Étape 1 : obtenir l'offset mmap via DRM_IOCTL_GEM_MMAP_OFFSET
         #[repr(C)]
-        struct DrmGemMmapOffset { handle: u32, _pad: u32, offset: u64 }
+        struct DrmGemMmapOffset {
+            handle: u32,
+            _pad: u32,
+            offset: u64,
+        }
 
         // DRM_IOWR(0x09+1 = 0x0A... en réalité 0x40 pour amdgpu) :
         // Pour amdgpu, l'offset mmap se fait via DRM_AMDGPU_GEM_MMAP = 0xC010_6441
@@ -690,9 +752,17 @@ impl DrmGpuBackend {
         // On utilise le generic DRM_IOCTL_GEM_MMAP_OFFSET (kernel >= 5.2) : 0xC018_640F
         const DRM_IOCTL_GEM_MMAP_OFFSET: libc::c_ulong = 0xC018_640F;
 
-        let mut mmap_req = DrmGemMmapOffset { handle, _pad: 0, offset: 0 };
+        let mut mmap_req = DrmGemMmapOffset {
+            handle,
+            _pad: 0,
+            offset: 0,
+        };
         let ret = unsafe {
-            libc::ioctl(self.fd, DRM_IOCTL_GEM_MMAP_OFFSET, &mut mmap_req as *mut DrmGemMmapOffset)
+            libc::ioctl(
+                self.fd,
+                DRM_IOCTL_GEM_MMAP_OFFSET,
+                &mut mmap_req as *mut DrmGemMmapOffset,
+            )
         };
 
         if ret != 0 {
@@ -752,7 +822,7 @@ impl GpuBackend for DrmGpuBackend {
 
         match &self.driver {
             DrmDriver::Amdgpu => self.submit_amdgpu(cmd),
-            DrmDriver::I915   => self.submit_i915(cmd),
+            DrmDriver::I915 => self.submit_i915(cmd),
             DrmDriver::Nouveau => self.submit_nouveau(cmd),
             DrmDriver::VirtioGpu => {
                 // virtio-gpu côté host : les commandes sont des virgl IB

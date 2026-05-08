@@ -160,7 +160,10 @@ impl NodeState {
                 })
                 .collect()
         };
-        let disk_stats: std::collections::HashMap<u32, (f64, f64, u32, bool, bool, Option<String>)> = self
+        let disk_stats: std::collections::HashMap<
+            u32,
+            (f64, f64, u32, bool, bool, Option<String>),
+        > = self
             .disk_io_scheduler
             .vm_snapshot()
             .into_iter()
@@ -191,11 +194,10 @@ impl NodeState {
                     disk_local_share_active,
                     disk_io_control_supported,
                     disk_io_control_reason,
-                ) =
-                    disk_stats
-                        .get(&vm.vmid)
-                        .cloned()
-                        .unwrap_or((0.0, 0.0, 100, false, true, None));
+                ) = disk_stats
+                    .get(&vm.vmid)
+                    .cloned()
+                    .unwrap_or((0.0, 0.0, 100, false, true, None));
                 let gpu_vram_budget_mib = self
                     .gpu_runtime
                     .as_ref()

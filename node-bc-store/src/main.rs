@@ -22,15 +22,19 @@ async fn main() -> Result<()> {
     // rustls 0.23 ne choisit pas de provider automatiquement — ring doit être installé explicitement.
     rustls::crypto::ring::default_provider()
         .install_default()
-        .unwrap_or(());  // idempotent : déjà installé dans les tests = OK
+        .unwrap_or(()); // idempotent : déjà installé dans les tests = OK
 
     let cfg = Config::parse();
 
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
     match cfg.log_format.as_str() {
-        "json" => fmt().json().with_env_filter(filter).with_current_span(false).init(),
-        _      => fmt().with_env_filter(filter).with_target(false).init(),
+        "json" => fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_current_span(false)
+            .init(),
+        _ => fmt().with_env_filter(filter).with_target(false).init(),
     }
 
     // Métriques partagées entre le serveur TCP et le serveur HTTP status.
@@ -38,20 +42,25 @@ async fn main() -> Result<()> {
 
     // Auto-connexion Ceph : active si librados détecté au build ET ceph.conf présent.
     let ceph_store: Option<Arc<CephStore>> = {
-        CephStore::try_auto_connect(&cfg.ceph_conf, &cfg.ceph_pool, &cfg.ceph_user, metrics.clone())
-            .map(Arc::new)
+        CephStore::try_auto_connect(
+            &cfg.ceph_conf,
+            &cfg.ceph_pool,
+            &cfg.ceph_user,
+            metrics.clone(),
+        )
+        .map(Arc::new)
     };
 
     // Serveur HTTP status cluster (non-bloquant)
-    let status_addr    = cfg.status_listen.clone();
-    let node_id        = cfg.node_id.clone();
-    let data_path      = cfg.store_data_path.clone();
-    let ceph_status    = ceph_store.clone();
+    let status_addr = cfg.status_listen.clone();
+    let node_id = cfg.node_id.clone();
+    let data_path = cfg.store_data_path.clone();
+    let ceph_status = ceph_store.clone();
     let status_metrics = metrics.clone();
     tokio::spawn(async move {
-        if let Err(e) = status_server::run(
-            status_addr, node_id, data_path, ceph_status, status_metrics,
-        ).await {
+        if let Err(e) =
+            status_server::run(status_addr, node_id, data_path, ceph_status, status_metrics).await
+        {
             tracing::error!(error = %e, "serveur status HTTP terminé avec erreur");
         }
     });
@@ -63,8 +72,8 @@ async fn main() -> Result<()> {
         // avec un store RAM de référence via le même Arc ; server::run reconstruit
         // son propre Arc donc on passe cfg et ceph_store clonés.
         // Pour éviter de dupliquer la construction, on crée un store dédié au cleaner.
-        use node_bc_store::store::PageStore;
         use node_bc_store::server::AnyStore;
+        use node_bc_store::store::PageStore;
         let m_clean = std::sync::Arc::new(StoreMetrics::default());
         let clean_store: std::sync::Arc<AnyStore> = if let Some(ref ceph) = ceph_store {
             std::sync::Arc::new(AnyStore::Ceph(ceph.clone()))
@@ -80,7 +89,7 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { cleaner.run(sd).await });
         tracing::info!(
             interval_s = cfg.orphan_check_interval_secs,
-            grace_s    = cfg.orphan_grace_secs,
+            grace_s = cfg.orphan_grace_secs,
             "démon nettoyage orphelins activé"
         );
     }

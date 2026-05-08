@@ -139,7 +139,8 @@ impl DiskIoScheduler {
     pub fn mark_io_control_unsupported(&self, vm_id: u32, reason: String) -> bool {
         let mut vms = self.vms.write().unwrap();
         let vm = vms.entry(vm_id).or_insert_with(|| VmDiskState::new(vm_id));
-        let changed = vm.io_control_supported || vm.io_control_reason.as_deref() != Some(reason.as_str());
+        let changed =
+            vm.io_control_supported || vm.io_control_reason.as_deref() != Some(reason.as_str());
         vm.io_control_supported = false;
         vm.io_control_reason = Some(reason);
         vm.local_share_active = false;

@@ -5,7 +5,12 @@
 
 source "$(dirname "$0")/lib.sh"
 
-header "Test 21 — TLS TOFU"
+VMID="${TEST_VMIDS_ARR[0]:-$TEST_VMID}"
+VM_RAM_MIB=$(vm_ram_mib "$VMID" 2>/dev/null || echo ""); VM_RAM_MIB="${VM_RAM_MIB:-512}"
+# TLS capture : taille réduite à 1/4 pour ne pas saturer le store pendant le pcap
+VM_RAM_PCAP=$(( VM_RAM_MIB / 4 )); (( VM_RAM_PCAP < 64 )) && VM_RAM_PCAP=64
+
+header "Test 21 — TLS TOFU (VM $VMID, ${VM_RAM_MIB} MiB)"
 
 require_omega_bins
 
@@ -24,8 +29,8 @@ _TMPFILES+=("$STORE_DATA_DIR_S0")
 STORE_TLS_ENABLED=true \
 STORE_TLS_DIR="$TLS_DIR_S0" \
 "$STORE_BIN" \
-    --listen "127.0.0.1:9100" \
-    --status-listen "127.0.0.1:9200" \
+    --listen "127.0.0.1:$STORE_PORT" \
+    --status-listen "127.0.0.1:$STATUS_PORT" \
     --node-id "tls-store-s0" \
     --store-data-path "$STORE_DATA_DIR_S0" \
     --tls-enabled \
@@ -42,12 +47,12 @@ if ! kill -0 "$STORE_PID" 2>/dev/null; then
     cat "$LOG_S0" 2>/dev/null || true
     fail "store TLS planté au démarrage"
 fi
-wait_port 127.0.0.1 9100 20
-wait_http "http://127.0.0.1:9200/status" 10
+wait_port 127.0.0.1 "$STORE_PORT" 20
+wait_http "http://127.0.0.1:$STATUS_PORT/status" 10
 info "store s0 TLS démarré"
 
 step "Récupération empreinte TLS du store s0"
-FINGERPRINT=$(curl -sf "http://127.0.0.1:9200/status" \
+FINGERPRINT=$(curl -sf "http://127.0.0.1:$STATUS_PORT/status" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tls_fingerprint',''))" 2>/dev/null || echo "")
 
 if [[ -z "$FINGERPRINT" ]]; then
@@ -71,11 +76,11 @@ tls_args=""
 [[ -n "$FINGERPRINT" ]] && tls_args="--tls-fingerprints $FINGERPRINT"
 
 "$AGENT_BIN" \
-    --stores "127.0.0.1:9100" \
-    --status-addrs "127.0.0.1:9200" \
-    --vm-id 21 \
-    --vm-requested-mib 32 \
-    --region-mib 32 \
+    --stores "127.0.0.1:$STORE_PORT" \
+    --status-addrs "127.0.0.1:$STATUS_PORT" \
+    --vm-id "$VMID" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     $tls_args \
     --mode demo >"$LOG_OK" 2>&1 || true
 
@@ -98,11 +103,11 @@ _TMPFILES+=("$LOG_REJECT")
 
 if [[ -n "$FINGERPRINT" ]]; then
     "$AGENT_BIN" \
-        --stores "127.0.0.1:9100" \
-        --status-addrs "127.0.0.1:9200" \
-        --vm-id 21 \
-        --vm-requested-mib 32 \
-        --region-mib 32 \
+        --stores "127.0.0.1:$STORE_PORT" \
+        --status-addrs "127.0.0.1:$STATUS_PORT" \
+        --vm-id "$VMID" \
+        --vm-requested-mib "$VM_RAM_MIB" \
+        --region-mib "$VM_RAM_MIB" \
         --tls-fingerprints "$FAKE_FP" \
         --mode demo >"$LOG_REJECT" 2>&1 || true
 
@@ -125,14 +130,14 @@ step "Vérification chiffrement du canal (tcpdump si disponible)"
 if command -v tcpdump &>/dev/null && [[ -n "$FINGERPRINT" ]]; then
     PCAP="/tmp/omega-tls-capture.pcap"
     _TMPFILES+=("$PCAP")
-    timeout 5 tcpdump -i lo -w "$PCAP" port 9100 &>/dev/null &
+    timeout 5 tcpdump -i lo -w "$PCAP" port "$STORE_PORT" &>/dev/null &
     TCPDUMP_PID=$!
     "$AGENT_BIN" \
-        --stores "127.0.0.1:9100" \
-        --status-addrs "127.0.0.1:9200" \
-        --vm-id 21 \
-        --vm-requested-mib 16 \
-        --region-mib 16 \
+        --stores "127.0.0.1:$STORE_PORT" \
+        --status-addrs "127.0.0.1:$STATUS_PORT" \
+        --vm-id "$VMID" \
+        --vm-requested-mib "$VM_RAM_PCAP" \
+        --region-mib "$VM_RAM_PCAP" \
         --tls-fingerprints "$FINGERPRINT" \
         --mode demo &>/dev/null || true
     sleep 1

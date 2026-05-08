@@ -40,11 +40,11 @@ pub const PAGE_SIZE: usize = 4096;
 
 /// Région mémoire anonyme mmap, enregistrée auprès d'userfaultfd.
 pub struct MemoryRegion {
-    pub base:               *mut u8,
-    pub size:               usize,
-    pub num_pages:          usize,
-    pub vm_id:              u32,
-    pub backend_kind:       MemoryBackendKind,
+    pub base: *mut u8,
+    pub size: usize,
+    pub num_pages: usize,
+    pub vm_id: u32,
+    pub backend_kind: MemoryBackendKind,
 
     /// Plafond absolu de pages pouvant être externalisées = vm_requested_mib * 1024 / 4.
     /// Évite de stocker sur les nœuds distants plus que ce que la VM a demandé.
@@ -68,10 +68,10 @@ pub struct MemoryRegion {
     /// Peut être désactivée à chaud (quand Ceph est détecté sur tous les stores).
     replication_enabled: Arc<AtomicBool>,
 
-    backend:      MemoryBackend,
-    store:        Arc<RemoteStorePool>,
-    cluster:      Arc<ClusterState>,
-    metrics:      Arc<AgentMetrics>,
+    backend: MemoryBackend,
+    store: Arc<RemoteStorePool>,
+    cluster: Arc<ClusterState>,
+    metrics: Arc<AgentMetrics>,
     tokio_handle: Handle,
 }
 
@@ -81,21 +81,25 @@ unsafe impl Sync for MemoryRegion {}
 
 impl MemoryRegion {
     pub fn allocate(
-        size_bytes:          usize,
-        vm_id:               u32,
-        vm_requested_mib:    u64,
-        store:               Arc<RemoteStorePool>,
-        metrics:             Arc<AgentMetrics>,
-        tokio_handle:        Handle,
-        backend_options:     MemoryBackendOptions,
-        cluster:             Arc<ClusterState>,
+        size_bytes: usize,
+        vm_id: u32,
+        vm_requested_mib: u64,
+        store: Arc<RemoteStorePool>,
+        metrics: Arc<AgentMetrics>,
+        tokio_handle: Handle,
+        backend_options: MemoryBackendOptions,
+        cluster: Arc<ClusterState>,
         replication_enabled: Arc<AtomicBool>,
     ) -> Result<Self> {
         assert!(size_bytes.is_multiple_of(PAGE_SIZE));
 
-        let backend  = MemoryBackend::allocate(&backend_options, size_bytes)?;
-        let base     = backend.map().with_context(|| {
-            format!("mappage backend {:?} ({} Mio)", backend.kind, size_bytes / 1024 / 1024)
+        let backend = MemoryBackend::allocate(&backend_options, size_bytes)?;
+        let base = backend.map().with_context(|| {
+            format!(
+                "mappage backend {:?} ({} Mio)",
+                backend.kind,
+                size_bytes / 1024 / 1024
+            )
         })?;
         let num_pages = size_bytes / PAGE_SIZE;
 
@@ -107,8 +111,8 @@ impl MemoryRegion {
             "région mémoire allouée"
         );
 
-        let vm_requested_pages = ((vm_requested_mib * 1024 * 1024) as usize / PAGE_SIZE)
-            .min(num_pages);
+        let vm_requested_pages =
+            ((vm_requested_mib * 1024 * 1024) as usize / PAGE_SIZE).min(num_pages);
 
         Ok(Self {
             base,
@@ -117,10 +121,10 @@ impl MemoryRegion {
             vm_id,
             backend_kind: backend.kind,
             vm_requested_pages,
-            page_locations:      std::sync::Mutex::new(HashMap::new()),
-            eviction_order:      std::sync::Mutex::new(VecDeque::new()),
-            evictor:             ClockEvictor::new(num_pages, 0),
-            eviction_frozen:     AtomicBool::new(false),
+            page_locations: std::sync::Mutex::new(HashMap::new()),
+            eviction_order: std::sync::Mutex::new(VecDeque::new()),
+            evictor: ClockEvictor::new(num_pages, 0),
+            eviction_frozen: AtomicBool::new(false),
             replication_enabled,
             backend,
             store,
@@ -137,7 +141,10 @@ impl MemoryRegion {
     /// Écrit `data` dans la page locale `page_id` (bypass uffd).
     pub fn write_page_local(&self, page_id: u64, data: &[u8; PAGE_SIZE]) -> Result<()> {
         if page_id >= self.num_pages as u64 {
-            bail!("page_id {page_id} hors limites (max {})", self.num_pages - 1);
+            bail!(
+                "page_id {page_id} hors limites (max {})",
+                self.num_pages - 1
+            );
         }
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), self.page_ptr(page_id), PAGE_SIZE);
@@ -181,7 +188,8 @@ impl MemoryRegion {
             if locs.len() >= self.vm_requested_pages {
                 bail!(
                     "cap vm_requested atteint : {} pages distantes (max {})",
-                    locs.len(), self.vm_requested_pages
+                    locs.len(),
+                    self.vm_requested_pages
                 );
             }
         }
@@ -206,8 +214,12 @@ impl MemoryRegion {
             let replica_idx = (store_idx + 1) % self.store.num_stores();
             let store2 = self.store.clone();
             if let Err(e) = tokio::task::block_in_place(|| {
-                self.tokio_handle
-                    .block_on(store2.put_page_to(vm_id, page_id, data.to_vec(), replica_idx))
+                self.tokio_handle.block_on(store2.put_page_to(
+                    vm_id,
+                    page_id,
+                    data.to_vec(),
+                    replica_idx,
+                ))
             }) {
                 warn!(page_id, replica_idx, error = %e, "réplication échouée — données sur primaire uniquement");
             }
@@ -215,13 +227,17 @@ impl MemoryRegion {
 
         // 3. Libération locale
         let ptr = self.page_ptr(page_id);
-        let ret = unsafe { libc::madvise(ptr as *mut libc::c_void, PAGE_SIZE, libc::MADV_DONTNEED) };
+        let ret =
+            unsafe { libc::madvise(ptr as *mut libc::c_void, PAGE_SIZE, libc::MADV_DONTNEED) };
         if ret != 0 {
             warn!(page_id, error = %std::io::Error::last_os_error(), "MADV_DONTNEED échoué");
         }
 
         // 4. Marquage
-        self.page_locations.lock().unwrap().insert(page_id, store_idx);
+        self.page_locations
+            .lock()
+            .unwrap()
+            .insert(page_id, store_idx);
         self.eviction_order.lock().unwrap().push_back(page_id);
         self.evictor.mark_remote(page_id);
         self.metrics.pages_evicted.fetch_add(1, Ordering::Relaxed);
@@ -242,9 +258,12 @@ impl MemoryRegion {
             Some(store_idx) => {
                 let vm_id = self.vm_id;
                 let store = self.store.clone();
-                let data  = self.tokio_handle
+                let data = self
+                    .tokio_handle
                     .block_on(store.get_page_from(vm_id, page_id, store_idx))
-                    .with_context(|| format!("fetch_page : GET page={page_id} store[{store_idx}]"))?;
+                    .with_context(|| {
+                        format!("fetch_page : GET page={page_id} store[{store_idx}]")
+                    })?;
 
                 match data {
                     Some(bytes) => {
@@ -253,7 +272,10 @@ impl MemoryRegion {
                         // Démarquer comme distant (la page revient via UFFDIO_COPY)
                         self.page_locations.lock().unwrap().remove(&page_id);
                         // Retirer de la pile LIFO (peut ne pas être en queue — O(n) acceptable)
-                        self.eviction_order.lock().unwrap().retain(|&p| p != page_id);
+                        self.eviction_order
+                            .lock()
+                            .unwrap()
+                            .retain(|&p| p != page_id);
                         self.evictor.mark_present(page_id);
                         self.metrics.pages_fetched.fetch_add(1, Ordering::Relaxed);
                         self.metrics.local_present.fetch_add(1, Ordering::Relaxed);
@@ -261,9 +283,15 @@ impl MemoryRegion {
                     }
                     None => {
                         // Store redémarré ou page perdue — retourner zéros
-                        warn!(page_id, store_idx, "page absente du store — zéros retournés");
+                        warn!(
+                            page_id,
+                            store_idx, "page absente du store — zéros retournés"
+                        );
                         self.page_locations.lock().unwrap().remove(&page_id);
-                        self.eviction_order.lock().unwrap().retain(|&p| p != page_id);
+                        self.eviction_order
+                            .lock()
+                            .unwrap()
+                            .retain(|&p| p != page_id);
                         self.metrics.fetch_zeros.fetch_add(1, Ordering::Relaxed);
                         Ok([0u8; PAGE_SIZE])
                     }
@@ -290,7 +318,9 @@ impl MemoryRegion {
     /// là où des données réelles existent sur les stores.
     pub fn recall_all_pages(&self, uffd_fd: RawFd) -> Result<usize> {
         let count = self.remote_count();
-        if count == 0 { return Ok(0); }
+        if count == 0 {
+            return Ok(0);
+        }
         info!(count, vm_id = self.vm_id, "recall complet avant migration");
         self.recall_n_pages(count, uffd_fd)
     }
@@ -304,17 +334,24 @@ impl MemoryRegion {
 
         if victims.len() < count {
             let remaining = count - victims.len();
-            let already   = victims.iter().copied().collect::<std::collections::HashSet<_>>();
-            let locs      = self.page_locations.lock().unwrap();
+            let already = victims
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let locs = self.page_locations.lock().unwrap();
             for page_id in 0..self.num_pages as u64 {
-                if victims.len() - (count - remaining) >= remaining { break; }
+                if victims.len() - (count - remaining) >= remaining {
+                    break;
+                }
                 if !self.evictor.meta.contains_key(&page_id)
                     && !already.contains(&page_id)
                     && !locs.contains_key(&page_id)
                 {
                     victims.push(page_id);
                 }
-                if victims.len() >= count { break; }
+                if victims.len() >= count {
+                    break;
+                }
             }
         }
 
@@ -332,7 +369,9 @@ impl MemoryRegion {
     /// # Safety
     /// `uffd_fd` doit être un fd userfaultfd valide couvrant cette région.
     pub fn recall_n_pages(&self, count: usize, uffd_fd: RawFd) -> Result<usize> {
-        if count == 0 { return Ok(0); }
+        if count == 0 {
+            return Ok(0);
+        }
 
         let mut recalled = 0;
 
@@ -340,12 +379,12 @@ impl MemoryRegion {
             // Pop LIFO (dernière évinvée en premier)
             let page_id = match self.eviction_order.lock().unwrap().pop_back() {
                 Some(p) => p,
-                None    => break,
+                None => break,
             };
 
             let store_idx = match self.page_locations.lock().unwrap().get(&page_id).copied() {
                 Some(idx) => idx,
-                None      => continue, // déjà rapatriée (race avec uffd handler)
+                None => continue, // déjà rapatriée (race avec uffd handler)
             };
 
             let vm_id = self.vm_id;
@@ -360,28 +399,45 @@ impl MemoryRegion {
                 Some(bytes) => bytes,
                 None => {
                     // Page absente du primaire — fallback sur replica si réplication activée
-                    if self.replication_enabled.load(Ordering::Relaxed) && self.store.num_stores() > 1 {
+                    if self.replication_enabled.load(Ordering::Relaxed)
+                        && self.store.num_stores() > 1
+                    {
                         let replica_idx = (store_idx + 1) % self.store.num_stores();
                         let store2 = self.store.clone();
                         match tokio::task::block_in_place(|| {
-                            self.tokio_handle
-                                .block_on(store2.get_page_from(vm_id, page_id, replica_idx))
+                            self.tokio_handle.block_on(store2.get_page_from(
+                                vm_id,
+                                page_id,
+                                replica_idx,
+                            ))
                         })
                         .ok()
                         .flatten()
                         {
                             Some(bytes) => {
-                                warn!(page_id, store_idx, replica_idx, "recall : fallback replica (primaire absent)");
+                                warn!(
+                                    page_id,
+                                    store_idx,
+                                    replica_idx,
+                                    "recall : fallback replica (primaire absent)"
+                                );
                                 bytes
                             }
                             None => {
-                                warn!(page_id, store_idx, "recall : page absente du store ET du replica — ignorée");
+                                warn!(
+                                    page_id,
+                                    store_idx,
+                                    "recall : page absente du store ET du replica — ignorée"
+                                );
                                 self.page_locations.lock().unwrap().remove(&page_id);
                                 continue;
                             }
                         }
                     } else {
-                        warn!(page_id, store_idx, "recall : page absente du store — ignorée");
+                        warn!(
+                            page_id,
+                            store_idx, "recall : page absente du store — ignorée"
+                        );
                         self.page_locations.lock().unwrap().remove(&page_id);
                         continue;
                     }
@@ -394,7 +450,9 @@ impl MemoryRegion {
             let page_addr = self.base as u64 + page_id * PAGE_SIZE as u64;
 
             // SAFETY: uffd_fd valide, page_addr dans la région enregistrée, arr valide.
-            unsafe { crate::uffd::recall_inject(uffd_fd, page_addr, &arr)?; }
+            unsafe {
+                crate::uffd::recall_inject(uffd_fd, page_addr, &arr)?;
+            }
 
             // Suppression du store primaire pour libérer sa RAM
             let _ = tokio::task::block_in_place(|| {
@@ -429,7 +487,9 @@ impl MemoryRegion {
         Ok(recalled)
     }
 
-    pub fn base_ptr(&self) -> *mut libc::c_void { self.base as *mut libc::c_void }
+    pub fn base_ptr(&self) -> *mut libc::c_void {
+        self.base as *mut libc::c_void
+    }
 
     pub fn backend_proc_fd_path(&self) -> Option<std::path::PathBuf> {
         self.backend.proc_fd_path()
@@ -443,7 +503,9 @@ impl MemoryRegion {
         self.page_locations.lock().unwrap().len()
     }
 
-    pub fn remote_cap(&self) -> usize { self.vm_requested_pages }
+    pub fn remote_cap(&self) -> usize {
+        self.vm_requested_pages
+    }
 
     pub fn is_remote(&self, page_id: u64) -> bool {
         self.page_locations.lock().unwrap().contains_key(&page_id)
@@ -454,22 +516,29 @@ impl MemoryRegion {
     /// À appeler avant l'arrêt de l'agent : la RAM étant volatile,
     /// les pages orphelines sur les stores n'ont plus aucun sens après extinction de la VM.
     pub fn purge_remote_pages(&self) {
-        let page_ids: Vec<(u64, usize)> = self.page_locations
+        let page_ids: Vec<(u64, usize)> = self
+            .page_locations
             .lock()
             .unwrap()
             .iter()
             .map(|(&pid, &sidx)| (pid, sidx))
             .collect();
 
-        if page_ids.is_empty() { return; }
+        if page_ids.is_empty() {
+            return;
+        }
 
-        info!(count = page_ids.len(), vm_id = self.vm_id, "purge des pages distantes");
+        info!(
+            count = page_ids.len(),
+            vm_id = self.vm_id,
+            "purge des pages distantes"
+        );
 
         let replication = self.replication_enabled.load(Ordering::Relaxed);
-        let num_stores  = self.store.num_stores();
-        let vm_id       = self.vm_id;
-        let store       = self.store.clone();
-        let cluster     = self.cluster.clone();
+        let num_stores = self.store.num_stores();
+        let vm_id = self.vm_id;
+        let store = self.store.clone();
+        let cluster = self.cluster.clone();
         self.tokio_handle.block_on(async move {
             for (page_id, store_idx) in page_ids {
                 let _ = store.delete_page_from(vm_id, page_id, store_idx).await;
@@ -486,7 +555,6 @@ impl MemoryRegion {
         info!(vm_id = self.vm_id, "purge terminée");
     }
 
-
     /// Active ou désactive la réplication write-through à chaud.
     ///
     /// Appelé automatiquement par le daemon quand tous les stores utilisent Ceph
@@ -498,11 +566,13 @@ impl MemoryRegion {
     /// Insère directement une page dans page_locations (tests uniquement).
     #[cfg(test)]
     pub fn test_insert_remote(&self, page_id: u64, store_idx: usize) {
-        self.page_locations.lock().unwrap().insert(page_id, store_idx);
+        self.page_locations
+            .lock()
+            .unwrap()
+            .insert(page_id, store_idx);
         self.eviction_order.lock().unwrap().push_back(page_id);
     }
 }
-
 
 impl Drop for MemoryRegion {
     fn drop(&mut self) {
@@ -559,7 +629,11 @@ mod tests {
         let handle = rt.handle().clone();
         Box::leak(Box::new(rt));
 
-        let store   = Arc::new(RemoteStorePool::new(vec!["127.0.0.1:9999".into()], 50, vec![]));
+        let store = Arc::new(RemoteStorePool::new(
+            vec!["127.0.0.1:9999".into()],
+            50,
+            vec![],
+        ));
         let metrics = Arc::new(AgentMetrics::default());
         let cluster = Arc::new(crate::cluster::ClusterState::new(
             vec!["127.0.0.1:9999".into()],
@@ -572,7 +646,10 @@ mod tests {
             store,
             metrics,
             handle,
-            MemoryBackendOptions { kind: MemoryBackendKind::Anonymous, memfd_name: String::new() },
+            MemoryBackendOptions {
+                kind: MemoryBackendKind::Anonymous,
+                memfd_name: String::new(),
+            },
             cluster,
             Arc::new(AtomicBool::new(false)),
         )
@@ -602,7 +679,7 @@ mod tests {
     fn test_cap_hit_when_full() {
         // Injecter directement 2 pages distantes dans une région de cap=2
         let region = make_test_region(4, 0); // cap=0
-        // cap=0, toute tentative est rejetée
+                                             // cap=0, toute tentative est rejetée
         assert_eq!(region.remote_cap(), 0);
         let err = region.evict_page_to(0, 0).unwrap_err();
         assert!(err.to_string().contains("cap vm_requested"));

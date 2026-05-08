@@ -23,6 +23,14 @@ fi
 : "${DEPLOY_DIR:=/opt/omega-remote-paging}"
 : "${STORE_PORT:=9100}"
 : "${OMEGA_INSTALL_VMIDS:=}"
+: "${SSH_KEY:=}"
+
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+SCP_OPTS=(-o StrictHostKeyChecking=accept-new)
+if [[ -n "$SSH_KEY" && -f "$SSH_KEY" ]]; then
+    SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new)
+    SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new)
+fi
 
 DAEMON_BIN="${ROOT_DIR}/target/release/omega-daemon"
 AGENT_BIN="${ROOT_DIR}/target/release/node-a-agent"
@@ -55,17 +63,17 @@ echo
 for node in "${NODES_ARR[@]}"; do
     info "── Nœud ${node} ──"
 
-    ssh "${DEPLOY_USER}@${node}" "mkdir -p ${DEPLOY_DIR}/bin ${DEPLOY_DIR}/logs"
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "mkdir -p ${DEPLOY_DIR}/bin ${DEPLOY_DIR}/logs"
 
     # Arrêter le daemon avant de remplacer les binaires (on ne peut pas écraser un exécutable en cours)
-    ssh "${DEPLOY_USER}@${node}" "systemctl stop omega-daemon 2>/dev/null || true"
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "systemctl stop omega-daemon 2>/dev/null || true"
 
-    scp "$DAEMON_BIN"    "${DEPLOY_USER}@${node}:${DEPLOY_DIR}/bin/omega-daemon"
-    scp "$AGENT_BIN"     "${DEPLOY_USER}@${node}:${DEPLOY_DIR}/bin/node-a-agent"
-    scp "$LAUNCHER_BIN"  "${DEPLOY_USER}@${node}:${DEPLOY_DIR}/bin/omega-qemu-launcher"
+    scp "${SCP_OPTS[@]}" "$DAEMON_BIN"    "${DEPLOY_USER}@${node}:${DEPLOY_DIR}/bin/omega-daemon"
+    scp "${SCP_OPTS[@]}" "$AGENT_BIN"     "${DEPLOY_USER}@${node}:${DEPLOY_DIR}/bin/node-a-agent"
+    scp "${SCP_OPTS[@]}" "$LAUNCHER_BIN"  "${DEPLOY_USER}@${node}:${DEPLOY_DIR}/bin/omega-qemu-launcher"
 
-    scp "${SCRIPT_DIR}/proxmox_hook.pl"          "${DEPLOY_USER}@${node}:/tmp/proxmox_hook.pl"
-    scp "${SCRIPT_DIR}/omega-proxmox-install.sh" "${DEPLOY_USER}@${node}:/tmp/omega-proxmox-install.sh"
+    scp "${SCP_OPTS[@]}" "${SCRIPT_DIR}/proxmox_hook.pl"          "${DEPLOY_USER}@${node}:/tmp/proxmox_hook.pl"
+    scp "${SCP_OPTS[@]}" "${SCRIPT_DIR}/omega-proxmox-install.sh" "${DEPLOY_USER}@${node}:/tmp/omega-proxmox-install.sh"
 
     # Stores distants = tous les autres nœuds
     node_stores=""
@@ -75,14 +83,14 @@ for node in "${NODES_ARR[@]}"; do
     done
 
     info "Activation userfaultfd sur ${node}..."
-    ssh "${DEPLOY_USER}@${node}" "
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
         sysctl -w vm.unprivileged_userfaultfd=1
         grep -q 'unprivileged_userfaultfd' /etc/sysctl.conf \
             || echo 'vm.unprivileged_userfaultfd=1' >> /etc/sysctl.conf
     "
 
     info "Création /etc/omega/cluster.env sur ${node}..."
-    ssh "${DEPLOY_USER}@${node}" "
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
         mkdir -p /etc/omega
         cat > /etc/omega/cluster.env <<'ENVEOF'
 OMEGA_NODES=${OMEGA_NODES}
@@ -92,7 +100,7 @@ ENVEOF
     "
 
     info "Installation wrapper QEMU sur ${node} (stores: ${node_stores})..."
-    ssh "${DEPLOY_USER}@${node}" "
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
         INSTALL_DIR='${DEPLOY_DIR}/bin' \
         LAUNCHER_SRC='${DEPLOY_DIR}/bin/omega-qemu-launcher' \
         AGENT_SRC='${DEPLOY_DIR}/bin/node-a-agent' \
@@ -104,7 +112,7 @@ ENVEOF
 
     # Démarrer omega-daemon sur tous les nœuds
     info "Démarrage omega-daemon sur ${node}..."
-    ssh "${DEPLOY_USER}@${node}" "
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
         systemctl daemon-reload
         systemctl enable omega-daemon.service
         systemctl restart omega-daemon.service

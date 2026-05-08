@@ -381,8 +381,8 @@ impl QmpVcpuClient {
             });
         };
 
-        let cpu_id = device_id_from_qom_path(&cpu.qom_path)
-            .unwrap_or_else(|| format!("cpu-{}", cpu.index));
+        let cpu_id =
+            device_id_from_qom_path(&cpu.qom_path).unwrap_or_else(|| format!("cpu-{}", cpu.index));
 
         let (mut stream, mut reader) = self.connect()?;
         self.handshake(&mut stream, &mut reader)?;

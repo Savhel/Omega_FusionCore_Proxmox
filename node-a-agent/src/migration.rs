@@ -38,35 +38,35 @@ use crate::cluster::{local_available_mib, ClusterState, NodeSnapshot, NodeStatus
 use crate::memory::{MemoryRegion, PAGE_SIZE};
 
 pub struct MigrationAgent {
-    vm_id:              u32,
-    current_node:       String,
-    cluster:            Arc<ClusterState>,
-    region:             Arc<MemoryRegion>,
-    check_interval:     Duration,
+    vm_id: u32,
+    current_node: String,
+    cluster: Arc<ClusterState>,
+    region: Arc<MemoryRegion>,
+    check_interval: Duration,
     compaction_enabled: bool,
-    vm_vcpus:           u32,
-    vm_requested_mib:   u64,
-    vm_needs_gpu:       bool,
-    uffd_fd:            RawFd,
+    vm_vcpus: u32,
+    vm_requested_mib: u64,
+    vm_needs_gpu: bool,
+    uffd_fd: RawFd,
     /// Levé par le scheduler vCPU quand le pool est saturé.
     /// Influence le niveau d'urgence de la recherche (interval réduit).
-    cpu_pressure:       Arc<AtomicBool>,
+    cpu_pressure: Arc<AtomicBool>,
 }
 
 impl MigrationAgent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        vm_id:               u32,
-        current_node:        String,
-        cluster:             Arc<ClusterState>,
-        region:              Arc<MemoryRegion>,
+        vm_id: u32,
+        current_node: String,
+        cluster: Arc<ClusterState>,
+        region: Arc<MemoryRegion>,
         check_interval_secs: u64,
-        compaction_enabled:  bool,
-        vm_vcpus:            u32,
-        vm_requested_mib:    u64,
-        vm_needs_gpu:        bool,
-        uffd_fd:             RawFd,
-        cpu_pressure:        Arc<AtomicBool>,
+        compaction_enabled: bool,
+        vm_vcpus: u32,
+        vm_requested_mib: u64,
+        vm_needs_gpu: bool,
+        uffd_fd: RawFd,
+        cpu_pressure: Arc<AtomicBool>,
     ) -> Self {
         Self {
             vm_id,
@@ -88,12 +88,17 @@ impl MigrationAgent {
         info!(vm_id = self.vm_id, node = %self.current_node, "démon migration démarré");
 
         loop {
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
 
             match self.search_and_migrate().await {
-                Ok(true)  => { info!(vm_id = self.vm_id, "migration déclenchée — démon arrêté"); break; }
+                Ok(true) => {
+                    info!(vm_id = self.vm_id, "migration déclenchée — démon arrêté");
+                    break;
+                }
                 Ok(false) => debug!(vm_id = self.vm_id, "pas de candidat — réessai planifié"),
-                Err(e)    => warn!(vm_id = self.vm_id, error = %e, "erreur recherche migration"),
+                Err(e) => warn!(vm_id = self.vm_id, error = %e, "erreur recherche migration"),
             }
 
             // Sous pression CPU, on relance plus vite (interval / 3).
@@ -109,24 +114,25 @@ impl MigrationAgent {
     }
 
     async fn search_and_migrate(&self) -> Result<bool> {
-        let local_avail     = local_available_mib();
+        let local_avail = local_available_mib();
         let local_vcpu_free = read_local_vcpu_free();
-        let remote_count    = self.region.remote_count();
-        let remote_mib      = (remote_count * PAGE_SIZE / 1024 / 1024) as u64;
-        let nodes           = self.cluster.snapshot().await;
+        let remote_count = self.region.remote_count();
+        let remote_mib = (remote_count * PAGE_SIZE / 1024 / 1024) as u64;
+        let nodes = self.cluster.snapshot().await;
 
         info!(
-            vm_id           = self.vm_id,
-            remote_pages    = remote_count,
+            vm_id = self.vm_id,
+            remote_pages = remote_count,
             remote_mib,
             local_avail_mib = local_avail,
             local_vcpu_free,
-            vm_needs_gpu    = self.vm_needs_gpu,
+            vm_needs_gpu = self.vm_needs_gpu,
             "recherche migration"
         );
 
         // Candidats : différents du nœud courant ET meilleurs sur au moins une dimension
-        let best = nodes.iter()
+        let best = nodes
+            .iter()
             .filter_map(|n| n.last_status.as_ref().map(|s| (n, s)))
             .filter(|(_, s)| s.node_id != self.current_node)
             .filter(|(_, s)| self.is_better_candidate(s, local_avail, local_vcpu_free))
@@ -158,14 +164,19 @@ impl MigrationAgent {
     ///
     /// - Veto absolu : GPU requis ET absent sur le cible → rejeté.
     /// - Sinon : meilleur sur RAM OU meilleur sur vCPU libres.
-    fn is_better_candidate(&self, target: &NodeStatus, local_avail: u64, local_vcpu_free: u32) -> bool {
+    fn is_better_candidate(
+        &self,
+        target: &NodeStatus,
+        local_avail: u64,
+        local_vcpu_free: u32,
+    ) -> bool {
         // Veto GPU
         if self.vm_needs_gpu && !target.has_gpu {
             debug!(node = %target.node_id, "rejeté : GPU requis mais absent");
             return false;
         }
 
-        let better_ram  = target.available_mib > local_avail;
+        let better_ram = target.available_mib > local_avail;
         let better_vcpu = if target.vcpu_total > 0 {
             target.vcpu_free > local_vcpu_free
         } else {
@@ -201,17 +212,20 @@ impl MigrationAgent {
         let remote_count = self.region.remote_count();
         if remote_count > 0 {
             info!(
-                vm_id        = self.vm_id,
-                remote_count,
-                "recall complet avant migration"
+                vm_id = self.vm_id,
+                remote_count, "recall complet avant migration"
             );
-            let region  = self.region.clone();
+            let region = self.region.clone();
             let uffd_fd = self.uffd_fd;
             match tokio::task::spawn_blocking(move || region.recall_all_pages(uffd_fd))
                 .await
                 .unwrap()
             {
-                Ok(n)  => info!(vm_id = self.vm_id, recalled = n, "recall pré-migration terminé"),
+                Ok(n) => info!(
+                    vm_id = self.vm_id,
+                    recalled = n,
+                    "recall pré-migration terminé"
+                ),
                 Err(e) => warn!(vm_id = self.vm_id, error = %e, "recall pré-migration partiel"),
             }
         }
@@ -219,14 +233,22 @@ impl MigrationAgent {
         // ── 3. Migration live ─────────────────────────────────────────────────
         // Le mmap est maintenant cohérent. QEMU transfère les pages réelles.
         // Le nouvel agent sur la destination démarre proprement avec page_locations vide.
-        info!(vm_id = self.vm_id, target = target_node, "lancement qm migrate --online");
+        info!(
+            vm_id = self.vm_id,
+            target = target_node,
+            "lancement qm migrate --online"
+        );
         let out = Command::new("qm")
             .args(["migrate", &self.vm_id.to_string(), target_node, "--online"])
             .output()
             .await?;
 
         if out.status.success() {
-            info!(vm_id = self.vm_id, target = target_node, "migration réussie");
+            info!(
+                vm_id = self.vm_id,
+                target = target_node,
+                "migration réussie"
+            );
             // Remettre cpu.weight au défaut : la VM redémarre sur le nœud cible
             // avec un scheduler propre, le boost n'a plus de raison d'être ici.
             crate::vcpu_scheduler::reset_cpu_weight(self.vm_id);
@@ -242,7 +264,7 @@ impl MigrationAgent {
     /// de façon à libérer assez de RAM sur T pour que notre VM puisse y migrer.
     async fn try_compaction(&self, nodes: &[NodeSnapshot]) -> Result<bool> {
         let vms = match list_cluster_vms().await {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(e) => {
                 warn!(error = %e, "impossible de lister les VMs cluster (pvesh)");
                 return Ok(false);
@@ -253,8 +275,12 @@ impl MigrationAgent {
 
         // Pour chaque nœud tiers T (différent du nœud courant)
         for target_node in nodes {
-            let Some(target_status) = &target_node.last_status else { continue };
-            if target_status.node_id == self.current_node { continue; }
+            let Some(target_status) = &target_node.last_status else {
+                continue;
+            };
+            if target_status.node_id == self.current_node {
+                continue;
+            }
 
             let already_free = target_status.available_mib;
             if already_free >= needed_mib {
@@ -266,7 +292,8 @@ impl MigrationAgent {
             let deficit = needed_mib.saturating_sub(already_free);
 
             // VMs qui tournent sur ce nœud T et pourraient être déplacées
-            let candidates: Vec<&VmInfo> = vms.iter()
+            let candidates: Vec<&VmInfo> = vms
+                .iter()
                 .filter(|v| v.status == "running" && v.node == target_status.node_id)
                 .collect();
 
@@ -313,25 +340,14 @@ impl MigrationAgent {
 /// Retourne Vec<(vm, destination_node_id)> ou None.
 fn find_migration_combo<'a>(
     candidates: &[&'a VmInfo],
-    deficit:    u64,
-    nodes:      &[NodeSnapshot],
-    all_vms:    &[VmInfo],
+    deficit: u64,
+    nodes: &[NodeSnapshot],
+    _all_vms: &[VmInfo],
 ) -> Option<Vec<(&'a VmInfo, String)>> {
-    // Calculer la RAM déjà occupée sur chaque nœud par ses VMs courantes
-    // pour estimer la capacité réelle disponible après placement
-    let node_used: std::collections::HashMap<&str, u64> = nodes.iter()
-        .filter_map(|n| n.last_status.as_ref().map(|s| {
-            let used: u64 = all_vms.iter()
-                .filter(|v| v.node == s.node_id && v.status == "running")
-                .map(|v| v.mem_mib)
-                .sum();
-            (s.node_id.as_str(), used)
-        }))
-        .collect();
-
     // Trouver les destinations possibles pour une VM de taille mem_mib
     let destinations = |mem_mib: u64| -> Vec<String> {
-        nodes.iter()
+        nodes
+            .iter()
             .filter_map(|n| n.last_status.as_ref())
             .filter(|s| s.available_mib >= mem_mib)
             .map(|s| s.node_id.clone())
@@ -353,7 +369,9 @@ fn find_migration_combo<'a>(
         for j in i + 1..candidates.len() {
             let vm_a = candidates[i];
             let vm_b = candidates[j];
-            if vm_a.mem_mib + vm_b.mem_mib < deficit { continue; }
+            if vm_a.mem_mib + vm_b.mem_mib < deficit {
+                continue;
+            }
 
             let dests_a = destinations(vm_a.mem_mib);
             let dests_b = destinations(vm_b.mem_mib);
@@ -371,7 +389,9 @@ fn find_migration_combo<'a>(
                 let vm_a = candidates[i];
                 let vm_b = candidates[j];
                 let vm_c = candidates[k];
-                if vm_a.mem_mib + vm_b.mem_mib + vm_c.mem_mib < deficit { continue; }
+                if vm_a.mem_mib + vm_b.mem_mib + vm_c.mem_mib < deficit {
+                    continue;
+                }
 
                 let da = destinations(vm_a.mem_mib);
                 let db = destinations(vm_b.mem_mib);
@@ -408,15 +428,22 @@ fn read_local_vcpu_free() -> u32 {
 
 #[derive(Debug)]
 pub struct VmInfo {
-    pub vm_id:   u32,
-    pub node:    String,
+    pub vm_id: u32,
+    pub node: String,
     pub mem_mib: u64,
-    pub status:  String,
+    pub status: String,
 }
 
 pub async fn list_cluster_vms() -> Result<Vec<VmInfo>> {
     let out = Command::new("pvesh")
-        .args(["get", "/cluster/resources", "--type", "vm", "--output-format", "json"])
+        .args([
+            "get",
+            "/cluster/resources",
+            "--type",
+            "vm",
+            "--output-format",
+            "json",
+        ])
         .output()
         .await?;
 
@@ -430,12 +457,27 @@ pub async fn list_cluster_vms() -> Result<Vec<VmInfo>> {
 
     if let Some(arr) = json.as_array() {
         for item in arr {
-            if item.get("type").and_then(|t| t.as_str()) != Some("qemu") { continue; }
-            let vm_id  = item.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let node   = item.get("node").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let mem    = item.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0);
-            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            vms.push(VmInfo { vm_id, node, mem_mib: mem / 1024 / 1024, status });
+            if item.get("type").and_then(|t| t.as_str()) != Some("qemu") {
+                continue;
+            }
+            let vm_id = item.get("vmid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let node = item
+                .get("node")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mem = item.get("maxmem").and_then(|v| v.as_u64()).unwrap_or(0);
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            vms.push(VmInfo {
+                vm_id,
+                node,
+                mem_mib: mem / 1024 / 1024,
+                status,
+            });
         }
     }
 
@@ -451,33 +493,38 @@ mod tests {
 
     fn make_node(node_id: &str, avail: u64) -> NodeSnapshot {
         NodeSnapshot {
-            store_idx:   0,
-            store_addr:  format!("10.0.0.1:9100"),
+            store_idx: 0,
+            store_addr: format!("10.0.0.1:9100"),
             status_addr: format!("10.0.0.1:9200"),
             last_status: Some(crate::cluster::NodeStatus {
-                node_id:            node_id.to_string(),
-                available_mib:      avail,
-                total_mib:          8192,
-                cpu_count:          4,
-                has_gpu:            false,
-                gpu_count:          0,
+                node_id: node_id.to_string(),
+                available_mib: avail,
+                total_mib: 8192,
+                cpu_count: 4,
+                has_gpu: false,
+                gpu_count: 0,
                 disk_available_mib: 0,
-                disk_total_mib:     0,
-                ceph_enabled:       false,
-                vcpu_total:         0,
-                vcpu_free:          0,
+                disk_total_mib: 0,
+                ceph_enabled: false,
+                vcpu_total: 0,
+                vcpu_free: 0,
             }),
         }
     }
 
     fn make_vm(vm_id: u32, node: &str, mem_mib: u64) -> VmInfo {
-        VmInfo { vm_id, node: node.to_string(), mem_mib, status: "running".to_string() }
+        VmInfo {
+            vm_id,
+            node: node.to_string(),
+            mem_mib,
+            status: "running".to_string(),
+        }
     }
 
     #[test]
     fn test_combo_single_vm_sufficient() {
         let nodes = vec![make_node("pve2", 2048)];
-        let vms   = vec![make_vm(100, "pve3", 1024)];
+        let vms = vec![make_vm(100, "pve3", 1024)];
         let candidates = vms.iter().collect::<Vec<_>>();
         let result = find_migration_combo(&candidates, 512, &nodes, &vms);
         assert!(result.is_some(), "une seule VM suffit");
@@ -487,10 +534,7 @@ mod tests {
     #[test]
     fn test_combo_two_vms_needed() {
         let nodes = vec![make_node("pve2", 2048)];
-        let vms   = vec![
-            make_vm(101, "pve3", 300),
-            make_vm(102, "pve3", 400),
-        ];
+        let vms = vec![make_vm(101, "pve3", 300), make_vm(102, "pve3", 400)];
         let candidates = vms.iter().collect::<Vec<_>>();
         // Aucune VM seule ne couvre 600 MiB, mais 300+400=700 ≥ 600
         let result = find_migration_combo(&candidates, 600, &nodes, &vms);
@@ -501,9 +545,12 @@ mod tests {
     #[test]
     fn test_combo_no_solution() {
         let nodes = vec![make_node("pve2", 100)]; // pve2 trop petit pour accueillir quoi que ce soit
-        let vms   = vec![make_vm(103, "pve3", 500)];
+        let vms = vec![make_vm(103, "pve3", 500)];
         let candidates = vms.iter().collect::<Vec<_>>();
         let result = find_migration_combo(&candidates, 600, &nodes, &vms);
-        assert!(result.is_none(), "pas de solution si aucun nœud peut accueillir");
+        assert!(
+            result.is_none(),
+            "pas de solution si aucun nœud peut accueillir"
+        );
     }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # omega-lab.sh — Lab interactif : configuration + installation + tests
 #
-# Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--auto]
+# Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--long] [--destructive] [--auto]
 #
 # Le script lit scripts/cluster.conf pour la configuration du cluster.
 # Si le fichier n'existe pas ou si les nœuds ne sont pas encore définis,
@@ -10,6 +10,8 @@
 # Options :
 #   --gpu    activer les tests GPU
 #   --ceph   activer les tests Ceph
+#   --long   active les tests longue durée
+#   --destructive active les tests qui modifient temporairement le réseau/services
 #   --auto   toutes les sections sans pause (mode CI)
 
 set -euo pipefail
@@ -19,12 +21,14 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONF_FILE="${SCRIPT_DIR}/cluster.conf"
 
 # ── Options CLI ───────────────────────────────────────────────────────────────
-DO_GPU=false; DO_CEPH=false; AUTO=false
+DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_DESTRUCTIVE=false; AUTO=false
 for arg in "$@"; do
     case "$arg" in
-        --gpu)  DO_GPU=true  ;;
-        --ceph) DO_CEPH=true ;;
-        --auto) AUTO=true    ;;
+        --gpu)         DO_GPU=true  ;;
+        --ceph)        DO_CEPH=true ;;
+        --long)        DO_LONG=true ;;
+        --destructive) DO_DESTRUCTIVE=true ;;
+        --auto)        AUTO=true    ;;
     esac
 done
 
@@ -143,7 +147,19 @@ _remote_env() {
 OMEGA_CONTROLLER='${CONTROLLER_NODE}' \
 OMEGA_TEST_VMID='${OMEGA_TEST_VMID}' \
 OMEGA_TEST_VMIDS='${OMEGA_TEST_VMIDS}' \
-OMEGA_BIN_DIR='/tmp/omega-tests-bins'"
+OMEGA_BIN_DIR='/tmp/omega-tests-bins' \
+OMEGA_REMOTE_BIN_DIR='/tmp/omega-tests-bins' \
+OMEGA_STORE_PORT='${STORE_PORT}' \
+OMEGA_STATUS_PORT='${STATUS_PORT}' \
+DEPLOY_USER='${DEPLOY_USER}' \
+VMID='${OMEGA_TEST_VMID}' \
+CLUSTER_MODE='1' \
+OMEGA_DESTRUCTIVE='$($DO_DESTRUCTIVE && echo 1 || echo 0)' \
+OMEGA_SOAK_SECS='${OMEGA_SOAK_SECS:-1800}'"
+}
+
+_quote_args() {
+    printf ' %q' "$@"
 }
 
 _run_isolated() {
@@ -153,8 +169,10 @@ _run_isolated() {
     local t0=$SECONDS rc=0
     ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "systemctl stop omega-daemon 2>/dev/null || true" || true
+    local args_str
+    args_str="$(_quote_args "$@")"
     ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
-        "$(_remote_env) bash '/tmp/omega-tests/$(basename "$script")' $*" || rc=$?
+        "$(_remote_env) bash '/tmp/omega-tests/$(basename "$script")'${args_str}" || rc=$?
     ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "systemctl start omega-daemon 2>/dev/null || true; sleep 2" || true
     _record "$num" "$name" "$rc" "$(( SECONDS - t0 ))"
@@ -177,8 +195,10 @@ _run_cluster() {
     _hdr "  Test ${num} — ${name}  [cluster]"
     _sep
     local t0=$SECONDS rc=0
+    local args_str
+    args_str="$(_quote_args "$@")"
     ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
-        "$(_remote_env) bash '/tmp/omega-tests/$(basename "$script")' $*" || rc=$?
+        "$(_remote_env) bash '/tmp/omega-tests/$(basename "$script")'${args_str}" || rc=$?
     _record "$num" "$name" "$rc" "$(( SECONDS - t0 ))"
 }
 
@@ -470,6 +490,7 @@ run_section_3() {
     _run_cluster "09" "Orphan cleaner"            "09-orphan-cleaner.sh"
     _run_cluster "19" "Compaction cluster"        "19-compaction.sh"           "${TEST_VMIDS_ARR[0]}"
     _run_cluster "22" "Balloon thin-provisioning" "22-balloon-thinprov.sh"     "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "23C" "Disk I/O scheduler cluster" "23-disk-io-scheduler.sh"  "${TEST_VMIDS_ARR[0]}"
 }
 
 run_section_4() {
@@ -482,7 +503,12 @@ run_section_4() {
     fi
     _sync
     _run_cluster "06" "GPU placement"  "06-gpu-placement.sh"  "${TEST_VMIDS_ARR[0]}"
-    _run_cluster "07" "GPU scheduler"  "07-gpu-scheduler.sh"  "${TEST_VMIDS_ARR[0]}" "${TEST_VMIDS_ARR[1]:-}"
+    if [[ -n "${TEST_VMIDS_ARR[1]:-}" ]]; then
+        _run_cluster "07" "GPU scheduler"  "07-gpu-scheduler.sh"  "${TEST_VMIDS_ARR[0]}" "${TEST_VMIDS_ARR[1]}"
+    else
+        _warn "Test 07 ignoré — OMEGA_TEST_VMIDS doit contenir au moins 2 VMs"
+        RESULTS["07"]="SKIP"; ((TOTAL_SKIP++)) || true
+    fi
 }
 
 run_section_5() {
@@ -501,6 +527,38 @@ run_section_5() {
     _run_cluster "M5" "Live migration pression"     "15-mixed-live-migration-pressure.sh" "${TEST_VMIDS_ARR[0]}"
     _run_cluster "M6" "Rafale démarrages"           "16-mixed-burst-starts.sh"          6
     _run_cluster "M7" "Drain nœud"                  "17-mixed-drain-node.sh"            "${CONTROLLER_NODE}"
+}
+
+run_section_6() {
+    _need_config || return
+    _hdr "══ Section 6 — Production physique (install, réseau, Ceph/GPU réel, panne, soak) ══"
+    _sync
+    _run_cluster "24" "Installation doctor"       "24-install-doctor.sh"
+    _run_cluster "25" "Réseau VM invitée"         "25-vm-network.sh"       "${TEST_VMIDS_ARR[0]}"
+    if $DO_CEPH; then
+        _run_cluster "26" "Ceph réel"             "26-ceph-real.sh"
+    else
+        _warn "Test 26 ignoré — relancer avec --ceph"
+        RESULTS["26"]="SKIP"; ((TOTAL_SKIP++)) || true
+    fi
+    if $DO_GPU; then
+        _run_cluster "27" "GPU réel / rendu"      "27-gpu-real-render.sh"  "${TEST_VMIDS_ARR[0]}"
+    else
+        _warn "Test 27 ignoré — relancer avec --gpu"
+        RESULTS["27"]="SKIP"; ((TOTAL_SKIP++)) || true
+    fi
+    if $DO_DESTRUCTIVE; then
+        _run_cluster "28" "Partition réseau"      "28-network-partition.sh" "${NODES_ARR[1]:-}"
+    else
+        _warn "Test 28 ignoré — relancer avec --destructive"
+        RESULTS["28"]="SKIP"; ((TOTAL_SKIP++)) || true
+    fi
+    if $DO_LONG; then
+        _run_cluster "29" "Soak long physique"    "29-long-run-soak.sh"    "${TEST_VMIDS_ARR[0]}" "${OMEGA_SOAK_SECS:-1800}"
+    else
+        _warn "Test 29 ignoré — relancer avec --long"
+        RESULTS["29"]="SKIP"; ((TOTAL_SKIP++)) || true
+    fi
 }
 
 # ── Pause inter-section ───────────────────────────────────────────────────────
@@ -528,7 +586,8 @@ run_all() {
     run_section_2; _pause_section "2 — Store avancé"    || return
     run_section_3; _pause_section "3 — Cluster"         || return
     run_section_4; _pause_section "4 — GPU"             || return
-    run_section_5
+    run_section_5; _pause_section "5 — Mixtes"          || return
+    run_section_6
     show_results
 }
 
@@ -549,11 +608,22 @@ run_one() {
         23) _run_local    "23" "Disk I/O scheduler"          "23-disk-io-scheduler.sh" ;;
         05) _run_cluster  "05" "vCPU élastique"             "05-vcpu-elastic.sh"          "${TEST_VMIDS_ARR[0]}" ;;
         06) _run_cluster  "06" "GPU placement"              "06-gpu-placement.sh"         "${TEST_VMIDS_ARR[0]}" ;;
-        07) _run_cluster  "07" "GPU scheduler"              "07-gpu-scheduler.sh"         "${TEST_VMIDS_ARR[0]}" "${TEST_VMIDS_ARR[1]:-}" ;;
+        07) if [[ -n "${TEST_VMIDS_ARR[1]:-}" ]]; then
+                _run_cluster  "07" "GPU scheduler"          "07-gpu-scheduler.sh"         "${TEST_VMIDS_ARR[0]}" "${TEST_VMIDS_ARR[1]}"
+            else
+                _warn "Test 07 ignoré — OMEGA_TEST_VMIDS doit contenir au moins 2 VMs"
+                RESULTS["07"]="SKIP"; ((TOTAL_SKIP++)) || true
+            fi ;;
         08) _run_cluster  "08" "Migration RAM"              "08-migration-ram.sh"         "${TEST_VMIDS_ARR[0]}" ;;
         09) _run_cluster  "09" "Orphan cleaner"             "09-orphan-cleaner.sh" ;;
         19) _run_cluster  "19" "Compaction cluster"         "19-compaction.sh"            "${TEST_VMIDS_ARR[0]}" ;;
         22) _run_cluster  "22" "Balloon thin-provisioning"  "22-balloon-thinprov.sh"      "${TEST_VMIDS_ARR[0]}" ;;
+        24) _run_cluster  "24" "Installation doctor"        "24-install-doctor.sh" ;;
+        25) _run_cluster  "25" "Réseau VM invitée"          "25-vm-network.sh"            "${TEST_VMIDS_ARR[0]}" ;;
+        26) _run_cluster  "26" "Ceph réel"                  "26-ceph-real.sh" ;;
+        27) _run_cluster  "27" "GPU réel / rendu"           "27-gpu-real-render.sh"       "${TEST_VMIDS_ARR[0]}" ;;
+        28) _run_cluster  "28" "Partition réseau"           "28-network-partition.sh"     "${NODES_ARR[1]:-}" ;;
+        29) _run_cluster  "29" "Soak long physique"         "29-long-run-soak.sh"         "${TEST_VMIDS_ARR[0]}" "${OMEGA_SOAK_SECS:-1800}" ;;
         M1) _run_cluster  "M1" "RAM + CPU simultanés"       "11-mixed-ram-cpu.sh"         "${TEST_VMIDS_ARR[0]}" ;;
         M2) _run_cluster  "M2" "CPU+RAM → migration"        "12-mixed-cpu-ram-migration.sh" "${TEST_VMIDS_ARR[0]}" ;;
         M3) _run_cluster  "M3" "GPU+CPU multi"              "13-mixed-gpu-cpu.sh"         "${TEST_VMIDS_ARR[0]}" ;;
@@ -581,6 +651,7 @@ show_menu() {
         echo -e "    Contrôleur        : ${CYAN}${CONTROLLER_NODE}${RESET}"
         echo -e "    VMs test          : ${CYAN}${OMEGA_TEST_VMIDS}${RESET}  ${DIM}(${#TEST_VMIDS_ARR[@]} VM(s))${RESET}"
         echo -e "    GPU               : $(${DO_GPU} && echo "${GREEN}activé${RESET}" || echo "${DIM}non (--gpu)${RESET}")"
+        echo -e "    Long/destructif   : $(${DO_LONG} && echo "${GREEN}long${RESET}" || echo "${DIM}long off${RESET}") / $(${DO_DESTRUCTIVE} && echo "${RED}destructif${RESET}" || echo "${DIM}destructif off${RESET}")"
     else
         echo -e "  ${RED}●${RESET} ${BOLD}Cluster non configuré${RESET} — entrez ${BOLD}[c]${RESET} pour définir les nœuds"
     fi
@@ -624,16 +695,19 @@ show_menu() {
     echo -e "   ${BOLD}[3]${RESET}  Section 3 — Cluster   : vCPU · migration · balloon · compaction"
     echo -e "   ${BOLD}[4]${RESET}  Section 4 — GPU       : placement · scheduler$(${DO_GPU} && echo '' || echo '  (--gpu requis)')"
     echo -e "   ${BOLD}[5]${RESET}  Section 5 — Mixtes    : stress · live migration · drain"
+    echo -e "   ${BOLD}[6]${RESET}  Section 6 — Physique  : install · réseau VM · Ceph/GPU réel · panne · soak"
     echo ""
 
     # ── Tests individuels ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Test individuel (entrer le numéro) ───────────────────────${RESET}"
     echo -e "   ${DIM}Isolés  :${RESET}  00  01  02  03  04  10  18  20  21  23"
-    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22"
+    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29"
     echo -e "   ${DIM}Mixtes  :${RESET}  M1  M2  M3  M4  M5  M6  M7"
     echo ""
 
     echo -e "   ${BOLD}[g]${RESET}  GPU tests : $(${DO_GPU} && echo "${GREEN}activé  ${RESET}→ [g] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [g] pour activer")"
+    echo -e "   ${BOLD}[l]${RESET}  Long tests : $(${DO_LONG} && echo "${GREEN}activé  ${RESET}→ [l] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [l] pour activer")"
+    echo -e "   ${BOLD}[x]${RESET}  Destructif : $(${DO_DESTRUCTIVE} && echo "${RED}activé  ${RESET}→ [x] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [x] pour activer")"
     echo -e "   ${BOLD}[r]${RESET}  Résumé détaillé des résultats       ${BOLD}[q]${RESET}  Quitter"
     echo ""
     _sep
@@ -658,8 +732,15 @@ main_loop() {
             3)   run_section_3 ;;
             4)   run_section_4 ;;
             5)   run_section_5 ;;
+            6)   run_section_6 ;;
             g|G) if $DO_GPU; then DO_GPU=false; _info "Tests GPU désactivés"
                  else DO_GPU=true; _info "Tests GPU activés"
+                 fi ;;
+            l|L) if $DO_LONG; then DO_LONG=false; _info "Tests longue durée désactivés"
+                 else DO_LONG=true; _info "Tests longue durée activés"
+                 fi ;;
+            x|X) if $DO_DESTRUCTIVE; then DO_DESTRUCTIVE=false; _info "Tests destructifs désactivés"
+                 else DO_DESTRUCTIVE=true; _warn "Tests destructifs activés"
                  fi ;;
             r|R) show_results ;;
             q|Q) echo "Au revoir."; exit 0 ;;

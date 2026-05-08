@@ -392,9 +392,9 @@ pub fn spawn_fault_handler_thread(
 pub unsafe fn recall_inject(fd: RawFd, dst_addr: u64, page_data: &[u8; 4096]) -> Result<()> {
     const UFFDIO_COPY_MODE_DONTWAKE: u64 = 1;
     let mut copy = UffdioCopy {
-        dst:  dst_addr,
-        src:  page_data.as_ptr() as u64,
-        len:  4096,
+        dst: dst_addr,
+        src: page_data.as_ptr() as u64,
+        len: 4096,
         mode: UFFDIO_COPY_MODE_DONTWAKE,
         copy: 0,
     };

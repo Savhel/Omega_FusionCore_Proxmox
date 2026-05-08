@@ -28,44 +28,47 @@ use crate::cluster::ClusterState;
 use crate::migration::{list_cluster_vms, VmInfo};
 
 pub struct ClusterCompactor {
-    cluster:      std::sync::Arc<ClusterState>,
+    cluster: std::sync::Arc<ClusterState>,
     current_node: String,
-    dry_run:      bool,
+    dry_run: bool,
 }
 
 impl ClusterCompactor {
-    pub fn new(
-        cluster:      std::sync::Arc<ClusterState>,
-        current_node: String,
-        dry_run:      bool,
-    ) -> Self {
-        Self { cluster, current_node, dry_run }
+    pub fn new(cluster: std::sync::Arc<ClusterState>, current_node: String, dry_run: bool) -> Self {
+        Self {
+            cluster,
+            current_node,
+            dry_run,
+        }
     }
 
     /// Lance une passe de compaction globale.
     /// Retourne le nombre de VMs déplacées.
     pub async fn compact(&self) -> Result<usize> {
         let nodes = self.cluster.snapshot().await;
-        let vms   = list_cluster_vms().await?;
+        let vms = list_cluster_vms().await?;
 
         if vms.is_empty() {
             return Ok(0);
         }
 
         // Calculer la charge par nœud : somme RAM des VMs
-        let mut node_loads: Vec<NodeLoad> = nodes.iter()
-            .filter_map(|n| n.last_status.as_ref().map(|s| {
-                let vm_ram: u64 = vms.iter()
-                    .filter(|v| v.node == s.node_id && v.status == "running")
-                    .map(|v| v.mem_mib)
-                    .sum();
-                NodeLoad {
-                    node_id:   s.node_id.clone(),
-                    avail_mib: s.available_mib,
-                    total_mib: s.total_mib,
-                    vm_ram,
-                }
-            }))
+        let mut node_loads: Vec<NodeLoad> = nodes
+            .iter()
+            .filter_map(|n| {
+                n.last_status.as_ref().map(|s| {
+                    let vm_ram: u64 = vms
+                        .iter()
+                        .filter(|v| v.node == s.node_id && v.status == "running")
+                        .map(|v| v.mem_mib)
+                        .sum();
+                    NodeLoad {
+                        node_id: s.node_id.clone(),
+                        avail_mib: s.available_mib,
+                        vm_ram,
+                    }
+                })
+            })
             .collect();
 
         // Trier par charge croissante (les nœuds les moins chargés en premier — plus faciles à vider)
@@ -78,7 +81,8 @@ impl ClusterCompactor {
                 continue; // On ne touche pas notre propre nœud
             }
 
-            let source_vms: Vec<&VmInfo> = vms.iter()
+            let source_vms: Vec<&VmInfo> = vms
+                .iter()
                 .filter(|v| v.node == source.node_id && v.status == "running")
                 .collect();
 
@@ -93,7 +97,9 @@ impl ClusterCompactor {
                 "compaction : tentative de vidage du nœud"
             );
 
-            let moved = self.try_drain_node(&source_vms, &node_loads, source).await?;
+            let moved = self
+                .try_drain_node(&source_vms, &node_loads, source)
+                .await?;
             total_moved += moved;
 
             if moved == source_vms.len() {
@@ -115,13 +121,14 @@ impl ClusterCompactor {
     /// Tente de migrer toutes les VMs d'un nœud source vers d'autres nœuds.
     async fn try_drain_node(
         &self,
-        source_vms:  &[&VmInfo],
-        node_loads:  &[NodeLoad],
+        source_vms: &[&VmInfo],
+        node_loads: &[NodeLoad],
         source_node: &NodeLoad,
     ) -> Result<usize> {
         // Simuler la disponibilité résiduelle de chaque nœud en tenant compte
         // des placements déjà décidés dans cette passe
-        let mut residual: std::collections::HashMap<String, u64> = node_loads.iter()
+        let mut residual: std::collections::HashMap<String, u64> = node_loads
+            .iter()
             .map(|n| (n.node_id.clone(), n.avail_mib))
             .collect();
 
@@ -134,17 +141,22 @@ impl ClusterCompactor {
         for vm in sorted_vms {
             // Trouver le nœud avec le moins de RAM libre qui peut encore accueillir cette VM
             // (Best Fit : minimise les "trous")
-            let dest = residual.iter()
+            let dest = residual
+                .iter()
                 .filter(|(nid, &avail)| {
                     *nid != &source_node.node_id
-                    && *nid != &self.current_node
-                    && avail >= vm.mem_mib
+                        && *nid != &self.current_node
+                        && avail >= vm.mem_mib
                 })
                 .min_by_key(|(_, &avail)| avail)
                 .map(|(nid, _)| nid.clone());
 
             let Some(dest_node) = dest else {
-                warn!(vm_id = vm.vm_id, mem_mib = vm.mem_mib, "compaction : aucun nœud pour cette VM");
+                warn!(
+                    vm_id = vm.vm_id,
+                    mem_mib = vm.mem_mib,
+                    "compaction : aucun nœud pour cette VM"
+                );
                 continue;
             };
 
@@ -181,10 +193,9 @@ impl ClusterCompactor {
 }
 
 struct NodeLoad {
-    node_id:   String,
+    node_id: String,
     avail_mib: u64,
-    total_mib: u64,
-    vm_ram:    u64,
+    vm_ram: u64,
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -194,11 +205,20 @@ mod tests {
     use super::*;
 
     fn nl(node_id: &str, avail: u64) -> NodeLoad {
-        NodeLoad { node_id: node_id.to_string(), avail_mib: avail, total_mib: 8192, vm_ram: 8192 - avail }
+        NodeLoad {
+            node_id: node_id.to_string(),
+            avail_mib: avail,
+            vm_ram: 8192 - avail,
+        }
     }
 
     fn vm(vm_id: u32, node: &str, mem: u64) -> VmInfo {
-        VmInfo { vm_id, node: node.to_string(), mem_mib: mem, status: "running".to_string() }
+        VmInfo {
+            vm_id,
+            node: node.to_string(),
+            mem_mib: mem,
+            status: "running".to_string(),
+        }
     }
 
     #[test]
@@ -206,8 +226,8 @@ mod tests {
         // pve2 a 2048 MiB libres, pve3 a 4096 MiB libres
         // On veut placer une VM de 1000 MiB → Best Fit choisit pve2 (moins de gaspillage)
         let node_loads = vec![nl("pve2", 2048), nl("pve3", 4096)];
-        let all_vms    = vec![vm(200, "pve3", 1000)];
-        let source     = nl("pve3", 0);
+        let all_vms = vec![vm(200, "pve3", 1000)];
+        let source = nl("pve3", 0);
 
         // La logique best-fit est dans try_drain_node → on teste via un compactor dry_run
         // sans pvesh, on teste juste que la structure est cohérente

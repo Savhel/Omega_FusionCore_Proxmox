@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # Test 22 — Balloon thin-provisioning : VM démarre avec min RAM, grandit selon la charge
 # Usage : ./22-balloon-thinprov.sh [vmid]
-# Prérequis : cluster Proxmox, VM démarrée avec driver virtio-balloon, stress-ng dans la VM
+# Prérequis : cluster Proxmox, VM démarrée avec driver virtio-balloon
 
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
-# La VM doit avoir été créée avec au moins 2048 MiB de RAM dans Proxmox
-VM_MAX_MIB="${BALLOON_MAX_MIB:-2048}"
-VM_INIT_MIB="${BALLOON_INIT_MIB:-512}"
-VM_STEP_MIB="${BALLOON_STEP_MIB:-256}"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+
+# Lire la RAM max réelle de la VM depuis Proxmox — tout est dérivé de cette valeur
+_vm_ram=$(qm config "$VMID" 2>/dev/null | awk '/^memory:/{print $2}' | head -1)
+VM_MAX_MIB="${BALLOON_MAX_MIB:-${_vm_ram:-1024}}"
+# Démarrer à 1/4 de la RAM max (min 64 MiB) pour laisser de la place au balloon
+_init=$(( VM_MAX_MIB / 4 )); (( _init < 64 )) && _init=64
+VM_INIT_MIB="${BALLOON_INIT_MIB:-$_init}"
+# Grandir par paliers de 1/8 de la RAM max (min 32 MiB)
+_step=$(( VM_MAX_MIB / 8 )); (( _step < 32 )) && _step=32
+VM_STEP_MIB="${BALLOON_STEP_MIB:-$_step}"
 
 header "Test 22 — Balloon thin-provisioning (VM $VMID)"
 
@@ -44,7 +51,7 @@ _TMPFILES+=("$LOG_AGENT")
     --vm-id "$VMID" \
     --vm-requested-mib "$VM_MAX_MIB" \
     --region-mib "$VM_MAX_MIB" \
-    --current-node "$(hostname)" \
+    --current-node "$(local_pve_node)" \
     --balloon-enabled \
     --balloon-initial-mib "$VM_INIT_MIB" \
     --balloon-step-mib "$VM_STEP_MIB" \

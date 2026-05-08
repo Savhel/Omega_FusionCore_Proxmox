@@ -3,6 +3,7 @@
  *
  * Intercepte mmap() et mmap64() dans QEMU pour :
  *   1. Détecter le mapping MAP_SHARED de /dev/shm/omega-vm-{vmid}
+ *      ou du memfd omega-vm-{vmid}-...
  *   2. Créer un userfaultfd enregistré sur la plage QEMU
  *   3. Envoyer le fd + (base, len) à node-a-agent via SCM_RIGHTS
  *
@@ -67,7 +68,7 @@ static pthread_mutex_t reg_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int  registered_fds[MAX_REG_FDS];
 static int  registered_fd_count = 0;
 
-static int fd_already_registered(int fd)
+static int fd_is_registered(int fd)
 {
     pthread_mutex_lock(&reg_mutex);
     for (int i = 0; i < registered_fd_count; i++) {
@@ -76,10 +77,16 @@ static int fd_already_registered(int fd)
             return 1;
         }
     }
+    pthread_mutex_unlock(&reg_mutex);
+    return 0;
+}
+
+static void fd_mark_registered(int fd)
+{
+    pthread_mutex_lock(&reg_mutex);
     if (registered_fd_count < MAX_REG_FDS)
         registered_fds[registered_fd_count++] = fd;
     pthread_mutex_unlock(&reg_mutex);
-    return 0;
 }
 
 /* ── initialisation ───────────────────────────────────────────────────────── */
@@ -165,7 +172,8 @@ static int send_uffd_to_agent(int uffd_fd, uint64_t base, uint64_t len, uint32_t
 /* ── logique d'interception commune ──────────────────────────────────────── */
 /*
  * Appelé après que real_mmap (ou real_mmap64) a retourné result.
- * Si le mapping cible /dev/shm/omega-vm-{vmid}, crée et envoie l'uffd.
+ * Si le mapping cible /dev/shm/omega-vm-{vmid} ou memfd omega-vm-{vmid}-...,
+ * crée et envoie l'uffd.
  * Doit être appelé hors in_bridge (le caller le gère).
  */
 static void omega_intercept(void *result, size_t len, int flags, int fd,
@@ -203,19 +211,28 @@ static void omega_intercept(void *result, size_t len, int flags, int fd,
     bridge_log("MAP_SHARED ≥1MiB [%s]: fd=%d path=%s len=%lu flags=0x%x",
                caller, fd, real_path, (unsigned long)len, flags);
 
-    const char *prefix    = "/dev/shm/omega-vm-";
-    size_t      prefixlen = strlen(prefix);
-    if (strncmp(real_path, prefix, prefixlen) != 0)
-        return;
+    const char *vmid_start = NULL;
+    const char *prefix_shm = "/dev/shm/omega-vm-";
+    const char *prefix_memfd = "/memfd:omega-vm-";
+    size_t prefix_shm_len = strlen(prefix_shm);
+    size_t prefix_memfd_len = strlen(prefix_memfd);
 
-    if (fd_already_registered(fd)) {
+    if (strncmp(real_path, prefix_shm, prefix_shm_len) == 0) {
+        vmid_start = real_path + prefix_shm_len;
+    } else if (strncmp(real_path, prefix_memfd, prefix_memfd_len) == 0) {
+        vmid_start = real_path + prefix_memfd_len;
+    } else {
+        return;
+    }
+
+    if (fd_is_registered(fd)) {
         bridge_log("fd=%d déjà enregistré — ignoré", fd);
         return;
     }
 
     char *endptr;
-    unsigned long vmid = strtoul(real_path + prefixlen, &endptr, 10);
-    if (endptr == real_path + prefixlen || *endptr != '\0') {
+    unsigned long vmid = strtoul(vmid_start, &endptr, 10);
+    if (endptr == vmid_start || (*endptr != '\0' && *endptr != '-' && *endptr != ' ')) {
         bridge_log("vmid non parseable depuis '%s'", real_path);
         return;
     }
@@ -261,6 +278,8 @@ static void omega_intercept(void *result, size_t len, int flags, int fd,
         close(uffd_fd);
         return;
     }
+
+    fd_mark_registered(fd);
 
     /* Garder uffd_fd ouvert dans QEMU : le kernel continue à livrer les fautes */
 }

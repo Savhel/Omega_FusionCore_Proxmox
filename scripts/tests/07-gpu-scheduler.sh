@@ -9,8 +9,11 @@ VMID1="${1:-${TEST_VMIDS_ARR[0]:-$TEST_VMID}}"
 VMID2="${2:-${TEST_VMIDS_ARR[1]:-}}"
 [[ -n "$VMID1" ]] || fail "VMID1 non défini — vérifier OMEGA_TEST_VMIDS dans cluster.conf"
 [[ -n "$VMID2" ]] || fail "VMID2 non défini — ce test requiert 2 VMIDs dans OMEGA_TEST_VMIDS"
-qm status "$VMID1" | grep -q "running" || fail "VM $VMID1 non démarrée (qm start $VMID1)"
-qm status "$VMID2" | grep -q "running" || fail "VM $VMID2 non démarrée (qm start $VMID2)"
+require_two_vms_running "$VMID1" "$VMID2"
+VMID1="${SELECTED_VMIDS[0]}"
+VMID2="${SELECTED_VMIDS[1]}"
+VM1_RAM=$(vm_ram_mib "$VMID1"); VM1_RAM="${VM1_RAM:-1024}"
+VM2_RAM=$(vm_ram_mib "$VMID2"); VM2_RAM="${VM2_RAM:-1024}"
 
 header "Test 7 — GPU scheduler round-robin (VM $VMID1 + VM $VMID2)"
 
@@ -26,10 +29,10 @@ step "Démarrage agent 1 (VM $VMID1)"
 LOG1="/tmp/omega-agent-gpu1.log"
 _TMPFILES+=("$LOG1")
 "$AGENT_BIN" \
-    --stores "${PVE2}:9100,${PVE3}:9100" \
+    --stores "$STORES_CSV" \
     --vm-id "$VMID1" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
+    --vm-requested-mib "$VM1_RAM" \
+    --region-mib "$VM1_RAM" \
     --gpu-quantum-secs 15 \
     --mode daemon >"$LOG1" 2>&1 &
 _PIDS+=($!)
@@ -39,10 +42,10 @@ step "Démarrage agent 2 (VM $VMID2)"
 LOG2="/tmp/omega-agent-gpu2.log"
 _TMPFILES+=("$LOG2")
 "$AGENT_BIN" \
-    --stores "${PVE2}:9100,${PVE3}:9100" \
+    --stores "$STORES_CSV" \
     --vm-id "$VMID2" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
+    --vm-requested-mib "$VM2_RAM" \
+    --region-mib "$VM2_RAM" \
     --gpu-quantum-secs 15 \
     --mode daemon >"$LOG2" 2>&1 &
 _PIDS+=($!)
@@ -77,9 +80,17 @@ else
 fi
 
 step "Logs GPU (agent 1)"
-grep -i "gpu\|flock\|leader\|device_del\|device_add" "$LOG1" | head -15
+grep -i "gpu\|flock\|leader\|device_del\|device_add\|qmp\|erreur\|error\|warn" "$LOG1" | head -15 || true
 step "Logs GPU (agent 2)"
-grep -i "gpu\|flock\|leader\|device_del\|device_add" "$LOG2" | head -15
+grep -i "gpu\|flock\|leader\|device_del\|device_add\|qmp\|erreur\|error\|warn" "$LOG2" | head -15 || true
 
-[[ $((assigns1 + assigns2)) -gt 0 ]] || warn "aucune assignation GPU loggée — vérifier QMP socket"
+if [[ $((assigns1 + assigns2)) -eq 0 ]]; then
+    warn "aucune assignation GPU loggée — environnement probablement non applicable"
+    warn "à vérifier sur le nœud GPU : QMP socket, hostpci, et présence d'un GPU libre"
+    for vmid in "$VMID1" "$VMID2"; do
+        info "diagnostic VM $vmid"
+        qm config "$vmid" | grep -E "^hostpci|^args|^name|^machine" || true
+        qm monitor "$vmid" <<<"info status" 2>/dev/null | head -5 || warn "QMP monitor inaccessible pour VM $vmid"
+    done
+fi
 pass "GPU scheduler testé — voir logs pour la rotation"

@@ -33,11 +33,11 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 use crate::gpu_multiplexer::GpuMultiplexer;
-use crate::gpu_protocol::{GpuMessage, MsgType, Priority, HEADER_SIZE};
+use crate::gpu_protocol::Priority;
 
 // ─── Constantes protocole OMVG ────────────────────────────────────────────────
 
-const OMVG_MAGIC: u32       = 0x4F4D5647;
+const OMVG_MAGIC: u32 = 0x4F4D5647;
 const OMVG_HEADER_SIZE: usize = 14;
 const OMVG_MAX_PAYLOAD: usize = 64 * 1024 * 1024; // 64 Mio
 
@@ -46,15 +46,15 @@ const OMVG_FLAG_WANT_REPLY: u8 = 0x01;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OmvgCmd {
-    CtxCreate    = 0x01,
-    CtxDestroy   = 0x02,
-    Submit       = 0x03,
-    ResCreate    = 0x04,
-    ResUnref     = 0x05,
-    ResTransfer  = 0x06,
-    Flush        = 0x07,
-    ResultOk     = 0x80,
-    ResultError  = 0xFF,
+    CtxCreate = 0x01,
+    CtxDestroy = 0x02,
+    Submit = 0x03,
+    ResCreate = 0x04,
+    ResUnref = 0x05,
+    ResTransfer = 0x06,
+    Flush = 0x07,
+    ResultOk = 0x80,
+    ResultError = 0xFF,
 }
 
 impl TryFrom<u8> for OmvgCmd {
@@ -70,7 +70,7 @@ impl TryFrom<u8> for OmvgCmd {
             0x07 => Ok(Self::Flush),
             0x80 => Ok(Self::ResultOk),
             0xFF => Ok(Self::ResultError),
-            _    => Err(()),
+            _ => Err(()),
         }
     }
 }
@@ -78,21 +78,24 @@ impl TryFrom<u8> for OmvgCmd {
 // ─── Trame OMVG ───────────────────────────────────────────────────────────────
 
 struct OmvgFrame {
-    vm_id:   u32,
-    cmd:     OmvgCmd,
-    flags:   u8,
+    vm_id: u32,
+    cmd: OmvgCmd,
+    flags: u8,
     payload: Vec<u8>,
 }
 
 async fn read_frame(stream: &mut UnixStream) -> Result<OmvgFrame> {
     let mut hdr = [0u8; OMVG_HEADER_SIZE];
-    stream.read_exact(&mut hdr).await.context("lecture header OMVG")?;
+    stream
+        .read_exact(&mut hdr)
+        .await
+        .context("lecture header OMVG")?;
 
-    let magic   = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
-    let vm_id   = u32::from_be_bytes(hdr[4..8].try_into().unwrap());
+    let magic = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
+    let vm_id = u32::from_be_bytes(hdr[4..8].try_into().unwrap());
     let cmd_raw = hdr[8];
-    let flags   = hdr[9];
-    let plen    = u32::from_be_bytes(hdr[10..14].try_into().unwrap()) as usize;
+    let flags = hdr[9];
+    let plen = u32::from_be_bytes(hdr[10..14].try_into().unwrap()) as usize;
 
     if magic != OMVG_MAGIC {
         bail!("magic OMVG incorrect : 0x{magic:08x}");
@@ -106,25 +109,43 @@ async fn read_frame(stream: &mut UnixStream) -> Result<OmvgFrame> {
 
     let mut payload = vec![0u8; plen];
     if plen > 0 {
-        stream.read_exact(&mut payload).await.context("lecture payload OMVG")?;
+        stream
+            .read_exact(&mut payload)
+            .await
+            .context("lecture payload OMVG")?;
     }
 
-    Ok(OmvgFrame { vm_id, cmd, flags, payload })
+    Ok(OmvgFrame {
+        vm_id,
+        cmd,
+        flags,
+        payload,
+    })
 }
 
-async fn write_reply(stream: &mut UnixStream, vm_id: u32, cmd: OmvgCmd,
-                     payload: &[u8]) -> Result<()> {
+async fn write_reply(
+    stream: &mut UnixStream,
+    vm_id: u32,
+    cmd: OmvgCmd,
+    payload: &[u8],
+) -> Result<()> {
     let plen = payload.len() as u32;
     let mut hdr = [0u8; OMVG_HEADER_SIZE];
     hdr[0..4].copy_from_slice(&OMVG_MAGIC.to_be_bytes());
     hdr[4..8].copy_from_slice(&vm_id.to_be_bytes());
-    hdr[8]  = cmd as u8;
-    hdr[9]  = 0; // flags réponse
+    hdr[8] = cmd as u8;
+    hdr[9] = 0; // flags réponse
     hdr[10..14].copy_from_slice(&plen.to_be_bytes());
 
-    stream.write_all(&hdr).await.context("écriture header réponse OMVG")?;
+    stream
+        .write_all(&hdr)
+        .await
+        .context("écriture header réponse OMVG")?;
     if !payload.is_empty() {
-        stream.write_all(payload).await.context("écriture payload réponse OMVG")?;
+        stream
+            .write_all(payload)
+            .await
+            .context("écriture payload réponse OMVG")?;
     }
     stream.flush().await.context("flush réponse OMVG")?;
     Ok(())
@@ -133,7 +154,7 @@ async fn write_reply(stream: &mut UnixStream, vm_id: u32, cmd: OmvgCmd,
 // ─── Contexte par VM ─────────────────────────────────────────────────────────
 
 struct VmGpuContext {
-    vm_id:      u32,
+    vm_id: u32,
     multiplexer: Arc<GpuMultiplexer>,
 }
 
@@ -166,7 +187,11 @@ impl VmGpuContext {
                     &frame.payload
                 };
 
-                match self.multiplexer.submit_raw(self.vm_id, cmd_data, Priority::Normal).await {
+                match self
+                    .multiplexer
+                    .submit_raw(self.vm_id, cmd_data, Priority::Normal)
+                    .await
+                {
                     Ok(result) => {
                         debug!(vm_id = self.vm_id, bytes = cmd_data.len(), "OMVG SUBMIT ok");
                         (OmvgCmd::ResultOk, result)
@@ -179,7 +204,11 @@ impl VmGpuContext {
             }
 
             OmvgCmd::ResCreate => {
-                match self.multiplexer.resource_create(self.vm_id, &frame.payload).await {
+                match self
+                    .multiplexer
+                    .resource_create(self.vm_id, &frame.payload)
+                    .await
+                {
                     Ok(_) => (OmvgCmd::ResultOk, vec![]),
                     Err(e) => {
                         warn!(vm_id = self.vm_id, error = %e, "OMVG RES_CREATE erreur");
@@ -197,7 +226,11 @@ impl VmGpuContext {
             }
 
             OmvgCmd::ResTransfer => {
-                match self.multiplexer.resource_transfer(self.vm_id, &frame.payload).await {
+                match self
+                    .multiplexer
+                    .resource_transfer(self.vm_id, &frame.payload)
+                    .await
+                {
                     Ok(_) => (OmvgCmd::ResultOk, vec![]),
                     Err(e) => {
                         warn!(vm_id = self.vm_id, error = %e, "OMVG RES_TRANSFER erreur");
@@ -207,7 +240,11 @@ impl VmGpuContext {
             }
 
             OmvgCmd::Flush => {
-                match self.multiplexer.flush_resource(self.vm_id, &frame.payload).await {
+                match self
+                    .multiplexer
+                    .flush_resource(self.vm_id, &frame.payload)
+                    .await
+                {
                     Ok(_) => (OmvgCmd::ResultOk, vec![]),
                     Err(e) => {
                         warn!(vm_id = self.vm_id, error = %e, "OMVG FLUSH erreur");
@@ -218,7 +255,10 @@ impl VmGpuContext {
 
             // Réponses envoyées par le daemon — ne devraient pas arriver côté serveur
             OmvgCmd::ResultOk | OmvgCmd::ResultError => {
-                warn!(vm_id = self.vm_id, "trame de réponse reçue côté daemon — ignorée");
+                warn!(
+                    vm_id = self.vm_id,
+                    "trame de réponse reçue côté daemon — ignorée"
+                );
                 (OmvgCmd::ResultError, b"protocole invalide".to_vec())
             }
         }
@@ -231,7 +271,10 @@ async fn handle_connection(mut stream: UnixStream, multiplexer: Arc<GpuMultiplex
     // Le premier message doit être CTX_CREATE avec le vm_id
     let first = match read_frame(&mut stream).await {
         Ok(f) => f,
-        Err(e) => { error!("OMVG première trame illisible : {e}"); return; }
+        Err(e) => {
+            error!("OMVG première trame illisible : {e}");
+            return;
+        }
     };
 
     if first.cmd != OmvgCmd::CtxCreate {
@@ -280,10 +323,7 @@ async fn handle_connection(mut stream: UnixStream, multiplexer: Arc<GpuMultiplex
 ///
 /// Doit être appelé depuis `omega-daemon` au démarrage, après avoir construit
 /// le `GpuMultiplexer`. Tourne indéfiniment en acceptant les connexions QEMU.
-pub async fn run_virgl_bridge(
-    socket_path: &Path,
-    multiplexer: Arc<GpuMultiplexer>,
-) -> Result<()> {
+pub async fn run_virgl_bridge(socket_path: &Path, multiplexer: Arc<GpuMultiplexer>) -> Result<()> {
     // Supprimer le socket existant (redémarrage daemon)
     if socket_path.exists() {
         std::fs::remove_file(socket_path)
@@ -302,8 +342,7 @@ pub async fn run_virgl_bridge(
     info!(path = %socket_path.display(), "OMVG : bridge virgl démarré");
 
     loop {
-        let (stream, _addr) = listener.accept().await
-            .context("accept OMVG socket")?;
+        let (stream, _addr) = listener.accept().await.context("accept OMVG socket")?;
         let mux = multiplexer.clone();
         tokio::spawn(async move {
             handle_connection(stream, mux).await;
@@ -345,7 +384,7 @@ mod tests {
     async fn test_frame_roundtrip_in_memory() {
         // Simule une trame CTX_CREATE et vérifie la désérialisation
         let vm_id: u32 = 9004;
-        let cmd  = OmvgCmd::CtxCreate as u8;
+        let cmd = OmvgCmd::CtxCreate as u8;
         let payload = vm_id.to_be_bytes();
 
         let mut buf = Vec::new();
@@ -357,7 +396,7 @@ mod tests {
         buf.extend_from_slice(&payload);
 
         // Vérification manuelle du parsing
-        let magic   = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let magic = u32::from_be_bytes(buf[0..4].try_into().unwrap());
         let got_vmid = u32::from_be_bytes(buf[4..8].try_into().unwrap());
         let got_cmd = buf[8];
         let got_plen = u32::from_be_bytes(buf[10..14].try_into().unwrap()) as usize;

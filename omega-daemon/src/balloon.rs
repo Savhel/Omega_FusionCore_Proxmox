@@ -433,12 +433,7 @@ impl BalloonManager {
     /// Évalue et applique une action balloon pour une VM.
     ///
     /// Retourne le nouveau `actual` en MiB si une commande QMP a été envoyée.
-    pub fn reconcile_vm(
-        &self,
-        vmid: u32,
-        stats: &BalloonStats,
-        max_mem_mib: u64,
-    ) -> Option<u64> {
+    pub fn reconcile_vm(&self, vmid: u32, stats: &BalloonStats, max_mem_mib: u64) -> Option<u64> {
         if stats.actual_bytes == 0 || max_mem_mib == 0 {
             return None;
         }
@@ -449,8 +444,7 @@ impl BalloonManager {
         // Seuil minimal de changement : 64 MiB (évite les micro-ajustements)
         let min_delta = 64 * 1024 * 1024_u64;
 
-        let available_pct =
-            stats.available_bytes as f64 / stats.actual_bytes as f64 * 100.0;
+        let available_pct = stats.available_bytes as f64 / stats.actual_bytes as f64 * 100.0;
 
         let client = QmpClient::for_vm(vmid, &self.qmp_dir);
 
@@ -459,7 +453,8 @@ impl BalloonManager {
         {
             // Guest a de la RAM inutilisée → gonfler le balloon pour en récupérer la moitié
             let reclaimable = stats.available_bytes / 2;
-            let new_target = stats.actual_bytes
+            let new_target = stats
+                .actual_bytes
                 .saturating_sub(reclaimable)
                 .max(floor_bytes);
 
@@ -542,9 +537,7 @@ impl BalloonManager {
                 let client = QmpClient::for_vm(vmid, &self.qmp_dir);
                 match client.query_stats() {
                     Ok(Some(stats)) => {
-                        if let Some(new_actual_mib) =
-                            self.reconcile_vm(vmid, &stats, max_mem_mib)
-                        {
+                        if let Some(new_actual_mib) = self.reconcile_vm(vmid, &stats, max_mem_mib) {
                             last_adjust.insert(vmid, Instant::now());
                             on_adjust(vmid, new_actual_mib);
                         }

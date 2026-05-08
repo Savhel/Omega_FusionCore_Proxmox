@@ -5,12 +5,15 @@
 
 source "$(dirname "$0")/lib.sh"
 
-header "Test 20 — Prefetch stride"
+VMID="${TEST_VMIDS_ARR[0]:-$TEST_VMID}"
+VM_RAM_MIB=$(vm_ram_mib "$VMID" 2>/dev/null || echo ""); VM_RAM_MIB="${VM_RAM_MIB:-512}"
+
+header "Test 20 — Prefetch stride (VM $VMID, ${VM_RAM_MIB} MiB)"
 
 require_omega_bins
 
 step "Démarrage store pour les pages préfetchées"
-start_store "pf0" 9100 9200
+start_store "pf0" "$STORE_PORT" "$STATUS_PORT"
 
 step "Agent demo avec prefetch activé"
 LOG_AGENT="/tmp/omega-agent-prefetch.log"
@@ -18,11 +21,11 @@ _TMPFILES+=("$LOG_AGENT")
 
 # Le mode demo exécute un accès séquentiel qui devrait déclencher le prefetch
 "$AGENT_BIN" \
-    --stores "127.0.0.1:9100" \
-    --status-addrs "127.0.0.1:9200" \
-    --vm-id 20 \
-    --vm-requested-mib 64 \
-    --region-mib 64 \
+    --stores "127.0.0.1:$STORE_PORT" \
+    --status-addrs "127.0.0.1:$STATUS_PORT" \
+    --vm-id "$VMID" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     --prefetch-enabled \
     --prefetch-lookahead 3 \
     --mode demo >"$LOG_AGENT" 2>&1 || true

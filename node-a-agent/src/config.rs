@@ -13,12 +13,11 @@ use clap::Parser;
 )]
 pub struct Config {
     // ─── Stores TCP ──────────────────────────────────────────────────────────
-
     /// Adresses TCP des stores distants (parallel à --status-addrs), format "ip:port".
     #[arg(
         long,
         default_value = "127.0.0.1:9100,127.0.0.1:9101",
-        env           = "AGENT_STORES",
+        env = "AGENT_STORES",
         value_delimiter = ','
     )]
     pub stores: Vec<String>,
@@ -28,13 +27,12 @@ pub struct Config {
     #[arg(
         long,
         default_value = "",
-        env           = "AGENT_STATUS_ADDRS",
+        env = "AGENT_STATUS_ADDRS",
         value_delimiter = ','
     )]
     pub status_addrs: Vec<String>,
 
     // ─── VM ──────────────────────────────────────────────────────────────────
-
     /// Identifiant VM (vmid Proxmox)
     #[arg(long, default_value_t = 1, env = "AGENT_VM_ID")]
     pub vm_id: u32,
@@ -50,7 +48,6 @@ pub struct Config {
     pub region_mib: usize,
 
     // ─── Backend mémoire ─────────────────────────────────────────────────────
-
     /// Backend mémoire local : `anonymous` ou `memfd`.
     #[arg(long, default_value = "anonymous", env = "AGENT_BACKEND")]
     pub backend: String,
@@ -68,7 +65,6 @@ pub struct Config {
     pub export_metadata: Option<PathBuf>,
 
     // ─── Éviction ────────────────────────────────────────────────────────────
-
     /// Seuil de RAM disponible sur ce nœud (en Mio) sous lequel l'éviction se déclenche.
     /// 0 = désactivé.
     #[arg(long, default_value_t = 512, env = "AGENT_EVICTION_THRESHOLD_MIB")]
@@ -83,7 +79,6 @@ pub struct Config {
     pub eviction_interval_secs: u64,
 
     // ─── Rappel (recall LIFO) ─────────────────────────────────────────────────
-
     /// Seuil de RAM disponible (en Mio) au-dessus duquel le rappel de pages se déclenche.
     /// Le recall commence quand le nœud a de nouveau de la place.
     #[arg(long, default_value_t = 1024, env = "AGENT_RECALL_THRESHOLD_MIB")]
@@ -98,7 +93,6 @@ pub struct Config {
     pub recall_interval_secs: u64,
 
     // ─── Migration ───────────────────────────────────────────────────────────
-
     /// Activer la recherche de migration dès qu'une VM commence à souffrir.
     #[arg(long, default_value_t = false, env = "AGENT_MIGRATION_ENABLED")]
     pub migration_enabled: bool,
@@ -157,13 +151,11 @@ pub struct Config {
     pub recall_priority: u32,
 
     // ─── Cluster status refresh ───────────────────────────────────────────────
-
     /// Intervalle en secondes entre deux rafraîchissements du statut cluster.
     #[arg(long, default_value_t = 15, env = "AGENT_CLUSTER_REFRESH_SECS")]
     pub cluster_refresh_secs: u64,
 
     // ─── Logs ────────────────────────────────────────────────────────────────
-
     /// Format de log : "text" ou "json"
     #[arg(long, default_value = "text", env = "AGENT_LOG_FORMAT")]
     pub log_format: String,
@@ -181,7 +173,6 @@ pub struct Config {
     pub mode: String,
 
     // ─── GPU ─────────────────────────────────────────────────────────────────
-
     /// La VM nécessite un accès GPU.
     /// Si true, le démon de placement GPU cherche un nœud avec GPU et migre si besoin.
     #[arg(long, default_value_t = false, env = "AGENT_GPU_REQUIRED")]
@@ -197,14 +188,12 @@ pub struct Config {
     pub gpu_quantum_secs: u64,
 
     // ─── Réplication ─────────────────────────────────────────────────────────
-
     /// Activer la réplication write-through des pages vers le store suivant.
     /// En cas de panne du store primaire, le recall bascule automatiquement sur le replica.
     #[arg(long, default_value_t = false, env = "AGENT_REPLICATION_ENABLED")]
     pub replication_enabled: bool,
 
     // ─── TLS ─────────────────────────────────────────────────────────────────
-
     /// Empreintes SHA-256 (hex) des stores de confiance, séparées par des virgules.
     /// Si vide, TLS est désactivé (canal en clair). Exemple :
     ///   AGENT_TLS_FINGERPRINTS=ab12cd34ef56...,ff00aa11bb22...
@@ -212,7 +201,6 @@ pub struct Config {
     pub tls_fingerprints: String,
 
     // ─── Balloon thin-provisioning ───────────────────────────────────────────
-
     /// Activer le balloon QEMU pour le thin-provisioning mémoire guest.
     /// La VM démarre avec balloon_initial_mib visible, grandit jusqu'à region_mib.
     #[arg(long, default_value_t = false, env = "AGENT_BALLOON_ENABLED")]
@@ -240,7 +228,6 @@ pub struct Config {
     pub balloon_shrink_faults_per_sec: u64,
 
     // ─── Préfetch séquentiel ──────────────────────────────────────────────────
-
     /// Activer le moteur de préfetch séquentiel (détection stride + GET_PAGE anticipé).
     #[arg(long, default_value_t = false, env = "AGENT_PREFETCH_ENABLED")]
     pub prefetch_enabled: bool,
@@ -255,7 +242,6 @@ pub struct Config {
     pub prefetch_max_cached: usize,
 
     // ─── Scheduler I/O disque ─────────────────────────────────────────────────
-
     /// Activer le scheduler de priorité I/O disque (cgroups v2 io.weight + PSI).
     #[arg(long, default_value_t = false, env = "AGENT_DISK_SCHEDULER_ENABLED")]
     pub disk_scheduler_enabled: bool,
@@ -275,9 +261,7 @@ pub struct Config {
     pub disk_interval_secs: u64,
 
     // ─── Métriques ────────────────────────────────────────────────────────────
-
     /// Adresse d'écoute du serveur HTTP de métriques.
     #[arg(long, default_value = "0.0.0.0:9300", env = "AGENT_METRICS_LISTEN")]
     pub metrics_listen: String,
-
 }

@@ -216,18 +216,18 @@ sub phase_post_stop {
         return;
     }
 
-    # 1. Arrêter l'agent omega-qemu-launcher (SIGTERM + attente)
-    my ($rc_stop, $out_stop) = run_launcher(
-        'stop',
+    # 1. Arrêter l'agent et nettoyer l'état local via le launcher.
+    my ($rc_cleanup, $out_cleanup) = run_launcher(
+        'cleanup',
         '--vm-id',        $vmid,
         '--run-dir',      $OMEGA_RUN_DIR,
         '--timeout-secs', $OMEGA_AGENT_STOP_TIMEOUT,
     );
 
-    if ($rc_stop == 0) {
-        log_msg("INFO", "agent memfd arrêté pour vmid=$vmid");
+    if ($rc_cleanup == 0) {
+        log_msg("INFO", "agent memfd et état local nettoyés pour vmid=$vmid");
     } else {
-        log_msg("WARN", "arrêt agent memfd échoué ou agent déjà mort (rc=$rc_stop) : $out_stop");
+        log_msg("WARN", "cleanup agent/état échoué (rc=$rc_cleanup) : $out_cleanup");
     }
 
     # 2. Nettoyer les pages distantes sur les stores B/C
@@ -238,12 +238,7 @@ sub phase_post_stop {
         log_msg("WARN", "nettoyage pages échoué (daemon peut-être arrêté) : $out_del");
     }
 
-    # 3. Supprimer le répertoire d'état local
-    my $vm_dir = "${OMEGA_RUN_DIR}/vm-${vmid}";
-    if (-d $vm_dir) {
-        system("rm -rf '$vm_dir'");
-        log_msg("INFO", "répertoire d'état supprimé : $vm_dir");
-    }
+    # Le répertoire d'état local est nettoyé par `omega-qemu-launcher cleanup`.
 }
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────

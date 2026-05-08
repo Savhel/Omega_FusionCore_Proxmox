@@ -36,8 +36,8 @@ use tracing::{debug, info, warn};
 // ── Constantes ────────────────────────────────────────────────────────────────
 
 const IO_WEIGHT_DEFAULT: u32 = 100;
-const IO_WEIGHT_ACTIVE:  u32 = 200;
-const IO_WEIGHT_IDLE:    u32 = 50;
+const IO_WEIGHT_ACTIVE: u32 = 200;
+const IO_WEIGHT_IDLE: u32 = 50;
 
 /// PSI `some avg10` au-delà duquel on considère qu'il y a contention (%).
 const DEFAULT_PSI_THRESHOLD: f32 = 10.0;
@@ -48,36 +48,47 @@ const DEFAULT_ACTIVE_BYTES_THRESHOLD: u64 = 1024 * 1024; // 1 MiB / intervalle
 // ── Structures ────────────────────────────────────────────────────────────────
 
 pub struct DiskScheduler {
-    vm_ids:                Vec<u32>,
-    interval:              Duration,
-    psi_threshold:         f32,
+    vm_ids: Vec<u32>,
+    interval: Duration,
+    psi_threshold: f32,
     active_bytes_threshold: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IoClass { Active, Idle }
+enum IoClass {
+    Active,
+    Idle,
+}
 
 // ── Implémentation principale ─────────────────────────────────────────────────
 
 impl DiskScheduler {
     pub fn new(
-        vm_ids:                Vec<u32>,
-        interval_secs:         u64,
-        psi_threshold:         f32,
+        vm_ids: Vec<u32>,
+        interval_secs: u64,
+        psi_threshold: f32,
         active_bytes_threshold: u64,
     ) -> Self {
         Self {
             vm_ids,
-            interval:              Duration::from_secs(interval_secs.max(1)),
-            psi_threshold:         if psi_threshold <= 0.0 { DEFAULT_PSI_THRESHOLD } else { psi_threshold },
-            active_bytes_threshold: if active_bytes_threshold == 0 { DEFAULT_ACTIVE_BYTES_THRESHOLD } else { active_bytes_threshold },
+            interval: Duration::from_secs(interval_secs.max(1)),
+            psi_threshold: if psi_threshold <= 0.0 {
+                DEFAULT_PSI_THRESHOLD
+            } else {
+                psi_threshold
+            },
+            active_bytes_threshold: if active_bytes_threshold == 0 {
+                DEFAULT_ACTIVE_BYTES_THRESHOLD
+            } else {
+                active_bytes_threshold
+            },
         }
     }
 
     pub async fn run(self: Arc<Self>, shutdown: Arc<AtomicBool>) {
         info!(
-            vms          = self.vm_ids.len(),
-            interval_s   = self.interval.as_secs(),
+            vms = self.vm_ids.len(),
+            interval_s = self.interval.as_secs(),
             psi_threshold = self.psi_threshold,
             "disk scheduler démarré"
         );
@@ -88,9 +99,13 @@ impl DiskScheduler {
         let mut current_class: HashMap<u32, IoClass> = HashMap::new();
 
         loop {
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             sleep(self.interval).await;
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
 
             let psi = read_io_psi_some_avg10();
             debug!(psi_some_avg10 = psi, "PSI I/O lu");
@@ -132,7 +147,7 @@ impl DiskScheduler {
                 if current_class.get(&vmid) != Some(&class) {
                     let weight = match class {
                         IoClass::Active => IO_WEIGHT_ACTIVE,
-                        IoClass::Idle   => IO_WEIGHT_IDLE,
+                        IoClass::Idle => IO_WEIGHT_IDLE,
                     };
                     if set_io_weight(vmid, weight) {
                         info!(
@@ -161,10 +176,14 @@ impl DiskScheduler {
 fn cgroup_io_path(vmid: u32, file: &str) -> Option<String> {
     // Proxmox 8+ : qemu.slice/{vmid}.scope/
     let p1 = format!("/sys/fs/cgroup/qemu.slice/{vmid}.scope/{file}");
-    if std::path::Path::new(&p1).exists() { return Some(p1); }
+    if std::path::Path::new(&p1).exists() {
+        return Some(p1);
+    }
     // Proxmox antérieur : machine.slice/qemu-{vmid}.scope/
     let p2 = format!("/sys/fs/cgroup/machine.slice/qemu-{vmid}.scope/{file}");
-    if std::path::Path::new(&p2).exists() { return Some(p2); }
+    if std::path::Path::new(&p2).exists() {
+        return Some(p2);
+    }
     None
 }
 
@@ -196,7 +215,8 @@ fn read_io_bytes(vmid: u32) -> Option<u64> {
     for line in content.lines() {
         // Chaque ligne : "MAJ:MIN rbytes=X wbytes=Y ..."
         for token in line.split_whitespace() {
-            if let Some(val) = token.strip_prefix("rbytes=")
+            if let Some(val) = token
+                .strip_prefix("rbytes=")
                 .or_else(|| token.strip_prefix("wbytes="))
             {
                 total += val.parse::<u64>().unwrap_or(0);
@@ -213,7 +233,7 @@ fn read_io_bytes(vmid: u32) -> Option<u64> {
 /// Retourne 0.0 si le fichier n'existe pas (kernel < 4.20 ou PSI désactivé).
 fn read_io_psi_some_avg10() -> f32 {
     let content = match std::fs::read_to_string("/proc/pressure/io") {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(_) => return 0.0,
     };
     // Première ligne = "some ..."
@@ -252,7 +272,11 @@ mod tests {
     fn test_delta_classifies_active() {
         let delta = 2 * 1024 * 1024u64; // 2 MiB > 1 MiB threshold
         let threshold = DEFAULT_ACTIVE_BYTES_THRESHOLD;
-        let class = if delta >= threshold { IoClass::Active } else { IoClass::Idle };
+        let class = if delta >= threshold {
+            IoClass::Active
+        } else {
+            IoClass::Idle
+        };
         assert_eq!(class, IoClass::Active);
     }
 
@@ -260,7 +284,11 @@ mod tests {
     fn test_delta_classifies_idle() {
         let delta = 512u64; // 512 octets < 1 MiB threshold
         let threshold = DEFAULT_ACTIVE_BYTES_THRESHOLD;
-        let class = if delta >= threshold { IoClass::Active } else { IoClass::Idle };
+        let class = if delta >= threshold {
+            IoClass::Active
+        } else {
+            IoClass::Idle
+        };
         assert_eq!(class, IoClass::Idle);
     }
 
@@ -268,7 +296,8 @@ mod tests {
     fn test_psi_parse_format() {
         // Simuler le parsing sans lire /proc
         let line = "some avg10=15.23 avg60=8.10 avg300=2.41 total=123456";
-        let val: f32 = line.split_whitespace()
+        let val: f32 = line
+            .split_whitespace()
             .find_map(|t| t.strip_prefix("avg10=").and_then(|v| v.parse().ok()))
             .unwrap_or(0.0);
         assert!((val - 15.23).abs() < 0.01);
@@ -280,7 +309,8 @@ mod tests {
         let mut total: u64 = 0;
         for line in content.lines() {
             for token in line.split_whitespace() {
-                if let Some(val) = token.strip_prefix("rbytes=")
+                if let Some(val) = token
+                    .strip_prefix("rbytes=")
                     .or_else(|| token.strip_prefix("wbytes="))
                 {
                     total += val.parse::<u64>().unwrap_or(0);
@@ -310,9 +340,9 @@ mod tests {
     #[test]
     fn test_io_weight_values_in_valid_range() {
         // cgroup v2 io.weight : plage valide 1–10000
-        assert!(IO_WEIGHT_IDLE    >= 1 && IO_WEIGHT_IDLE    <= 10000);
+        assert!(IO_WEIGHT_IDLE >= 1 && IO_WEIGHT_IDLE <= 10000);
         assert!(IO_WEIGHT_DEFAULT >= 1 && IO_WEIGHT_DEFAULT <= 10000);
-        assert!(IO_WEIGHT_ACTIVE  >= 1 && IO_WEIGHT_ACTIVE  <= 10000);
+        assert!(IO_WEIGHT_ACTIVE >= 1 && IO_WEIGHT_ACTIVE <= 10000);
     }
 
     #[test]

@@ -25,17 +25,17 @@ use crate::hardware;
 use crate::metrics::StoreMetrics;
 
 pub async fn run(
-    bind_addr:  String,
-    node_id:    String,
-    data_path:  String,
+    bind_addr: String,
+    node_id: String,
+    data_path: String,
     ceph_store: Option<Arc<CephStore>>,
-    metrics:    Arc<StoreMetrics>,
+    metrics: Arc<StoreMetrics>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(addr = %bind_addr, node = %node_id, "serveur HTTP status démarré");
 
-    let gpu_info  = hardware::detect_gpus();
-    let has_gpu   = gpu_info.present;
+    let gpu_info = hardware::detect_gpus();
+    let has_gpu = gpu_info.present;
     let gpu_count = gpu_info.count;
     if has_gpu {
         info!(gpu_count, summary = %gpu_info.summary, "GPU(s) détecté(s) sur ce nœud");
@@ -46,10 +46,10 @@ pub async fn run(
     loop {
         match listener.accept().await {
             Ok((mut stream, peer)) => {
-                let node_id    = node_id.clone();
-                let data_path  = data_path.clone();
-                let ceph       = ceph_store.clone();
-                let m          = metrics.clone();
+                let node_id = node_id.clone();
+                let data_path = data_path.clone();
+                let ceph = ceph_store.clone();
+                let m = metrics.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 512];
                     let n = match stream.read(&mut buf).await {
@@ -67,7 +67,12 @@ pub async fn run(
 
                     let page_count = m.pages_stored.load(Ordering::Relaxed);
                     let body = build_status_json(
-                        &node_id, has_gpu, gpu_count, &data_path, ceph.as_deref(), ceph_enabled,
+                        &node_id,
+                        has_gpu,
+                        gpu_count,
+                        &data_path,
+                        ceph.as_deref(),
+                        ceph_enabled,
                         page_count,
                     );
                     let resp = format!(
@@ -84,16 +89,16 @@ pub async fn run(
 }
 
 fn build_status_json(
-    node_id:      &str,
-    has_gpu:      bool,
-    gpu_count:    u32,
-    data_path:    &str,
-    ceph:         Option<&CephStore>,
+    node_id: &str,
+    has_gpu: bool,
+    gpu_count: u32,
+    data_path: &str,
+    ceph: Option<&CephStore>,
     ceph_enabled: bool,
-    page_count:   u64,
+    page_count: u64,
 ) -> String {
     let (avail_mib, total_mib) = read_mem_info_mib().unwrap_or((0, 0));
-    let cpu_count               = read_cpu_count();
+    let cpu_count = read_cpu_count();
 
     // Espace disque : pool Ceph (partagé cluster) ou disque local (par nœud)
     let (disk_avail_mib, disk_tot_mib) = if let Some(cs) = ceph {
@@ -112,7 +117,7 @@ fn build_status_json(
 }
 
 const VCPU_OVERCOMMIT_RATIO: u32 = 3;
-const VCPU_POOL_PATH: &str       = "/run/omega-vcpu-pool.json";
+const VCPU_POOL_PATH: &str = "/run/omega-vcpu-pool.json";
 
 fn read_vcpu_pool_info(cpu_count: u32) -> (u32, u32) {
     let total = cpu_count * VCPU_OVERCOMMIT_RATIO;
@@ -122,7 +127,9 @@ fn read_vcpu_pool_info(cpu_count: u32) -> (u32, u32) {
         .as_deref()
         .and_then(|s| {
             let v: serde_json::Value = serde_json::from_str(s).ok()?;
-            let assigned: u32 = v["vms"].as_object()?.values()
+            let assigned: u32 = v["vms"]
+                .as_object()?
+                .values()
                 .filter_map(|e| e["current_vcpus"].as_u64())
                 .map(|n| n as u32)
                 .sum();
@@ -143,7 +150,9 @@ fn read_mem_info_mib() -> Option<(u64, u64)> {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             total_kb = rest.split_whitespace().next()?.parse::<u64>().ok();
         }
-        if avail_kb.is_some() && total_kb.is_some() { break; }
+        if avail_kb.is_some() && total_kb.is_some() {
+            break;
+        }
     }
     Some((avail_kb? / 1024, total_kb? / 1024))
 }

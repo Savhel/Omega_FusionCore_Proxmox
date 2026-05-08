@@ -61,9 +61,9 @@ pub struct NodeVCpuPool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmCpuEntry {
-    pub current_vcpus:     u32,
-    pub requested_vcpus:   u32,
-    pub utilization_pct:   f32,
+    pub current_vcpus: u32,
+    pub requested_vcpus: u32,
+    pub utilization_pct: f32,
     pub last_updated_secs: u64,
 }
 
@@ -86,38 +86,38 @@ impl NodeVCpuPool {
 // ─── VCpuScheduler ────────────────────────────────────────────────────────────
 
 pub struct VCpuScheduler {
-    vm_id:              u32,
-    requested_vcpus:    u32,
-    initial_vcpus:      u32,
-    current_vcpus:      Arc<AtomicU32>,
+    vm_id: u32,
+    requested_vcpus: u32,
+    initial_vcpus: u32,
+    current_vcpus: Arc<AtomicU32>,
     high_threshold_pct: u32,
-    low_threshold_pct:  u32,
-    scale_interval:     Duration,
-    overcommit_ratio:   u32,
+    low_threshold_pct: u32,
+    scale_interval: Duration,
+    overcommit_ratio: u32,
     /// Levé quand le pool est saturé — le démon migration réagit.
-    pub cpu_pressure:   Arc<AtomicBool>,
+    pub cpu_pressure: Arc<AtomicBool>,
 }
 
 impl VCpuScheduler {
     pub fn new(
-        vm_id:               u32,
-        requested_vcpus:     u32,
-        initial_vcpus:       u32,
-        high_threshold_pct:  u32,
-        low_threshold_pct:   u32,
+        vm_id: u32,
+        requested_vcpus: u32,
+        initial_vcpus: u32,
+        high_threshold_pct: u32,
+        low_threshold_pct: u32,
         scale_interval_secs: u64,
-        overcommit_ratio:    u32,
+        overcommit_ratio: u32,
     ) -> Self {
         Self {
             vm_id,
             requested_vcpus,
             initial_vcpus,
-            current_vcpus:      Arc::new(AtomicU32::new(initial_vcpus)),
+            current_vcpus: Arc::new(AtomicU32::new(initial_vcpus)),
             high_threshold_pct,
             low_threshold_pct,
-            scale_interval:     Duration::from_secs(scale_interval_secs.max(1)),
+            scale_interval: Duration::from_secs(scale_interval_secs.max(1)),
             overcommit_ratio,
-            cpu_pressure:       Arc::new(AtomicBool::new(false)),
+            cpu_pressure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -126,59 +126,65 @@ impl VCpuScheduler {
     }
 
     pub async fn run(self: Arc<Self>, shutdown: Arc<AtomicBool>) {
-        let physical    = read_physical_cores();
+        let physical = read_physical_cores();
         let total_vcpus = physical * self.overcommit_ratio;
 
         // Configure la VM pour le hotplug au premier démarrage
-        if let Err(e) = configure_vm_for_hotplug(
-            self.vm_id, self.requested_vcpus, self.initial_vcpus,
-        ).await {
+        if let Err(e) =
+            configure_vm_for_hotplug(self.vm_id, self.requested_vcpus, self.initial_vcpus).await
+        {
             warn!(vm_id = self.vm_id, error = %e, "configuration hotplug vCPU échouée");
         }
 
         // Enregistrer dans le pool partagé
         let init = self.initial_vcpus;
-        let req  = self.requested_vcpus;
+        let req = self.requested_vcpus;
         let vmid = self.vm_id;
         if let Err(e) = tokio::task::spawn_blocking(move || {
             with_pool(|p| {
                 p.total_vcpus = p.total_vcpus.max(total_vcpus);
-                p.vms.insert(vmid, VmCpuEntry {
-                    current_vcpus:     init,
-                    requested_vcpus:   req,
-                    utilization_pct:   0.0,
-                    last_updated_secs: unix_now(),
-                });
+                p.vms.insert(
+                    vmid,
+                    VmCpuEntry {
+                        current_vcpus: init,
+                        requested_vcpus: req,
+                        utilization_pct: 0.0,
+                        last_updated_secs: unix_now(),
+                    },
+                );
             })
-        }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("{e}"))) {
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")))
+        {
             warn!(vm_id = self.vm_id, error = %e, "enregistrement pool vCPU échoué");
         }
 
         info!(
-            vm_id            = self.vm_id,
-            initial_vcpus    = init,
-            requested_vcpus  = req,
-            physical_cores   = physical,
+            vm_id = self.vm_id,
+            initial_vcpus = init,
+            requested_vcpus = req,
+            physical_cores = physical,
             total_pool_vcpus = total_vcpus,
             "scheduler vCPU élastique démarré"
         );
 
         let mut last_usage_usec = 0u64;
-        let mut last_ts         = Instant::now();
+        let mut last_ts = Instant::now();
 
         loop {
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             sleep(self.scale_interval).await;
 
             let current = self.current_vcpus.load(Ordering::Relaxed);
-            let util    = measure_utilization(
-                self.vm_id, current,
-                &mut last_usage_usec, &mut last_ts,
-            ).await;
+            let util =
+                measure_utilization(self.vm_id, current, &mut last_usage_usec, &mut last_ts).await;
 
             debug!(
-                vm_id         = self.vm_id,
-                util_pct      = util,
+                vm_id = self.vm_id,
+                util_pct = util,
                 current_vcpus = current,
                 "vCPU utilisation"
             );
@@ -188,11 +194,12 @@ impl VCpuScheduler {
             let _ = tokio::task::spawn_blocking(move || {
                 with_pool(|p| {
                     if let Some(e) = p.vms.get_mut(&vmid) {
-                        e.utilization_pct   = util;
+                        e.utilization_pct = util;
                         e.last_updated_secs = unix_now();
                     }
                 })
-            }).await;
+            })
+            .await;
 
             if util > self.high_threshold_pct as f32 && current < self.requested_vcpus {
                 self.try_scale_up(current).await;
@@ -204,8 +211,11 @@ impl VCpuScheduler {
         // Désenregistrer du pool
         let vmid = self.vm_id;
         let _ = tokio::task::spawn_blocking(move || {
-            with_pool(|p| { p.vms.remove(&vmid); })
-        }).await;
+            with_pool(|p| {
+                p.vms.remove(&vmid);
+            })
+        })
+        .await;
 
         info!(vm_id = self.vm_id, "scheduler vCPU arrêté");
     }
@@ -213,12 +223,16 @@ impl VCpuScheduler {
     // ── Scale-up ──────────────────────────────────────────────────────────────
 
     async fn try_scale_up(&self, current: u32) {
-        let vm_id     = self.vm_id;
+        let vm_id = self.vm_id;
         let new_count = (current + 1).min(self.requested_vcpus);
-        let pressure  = self.cpu_pressure.clone();
+        let pressure = self.cpu_pressure.clone();
 
         #[derive(Debug)]
-        enum Decision { FreeSlot, Overcommit, Saturated }
+        enum Decision {
+            FreeSlot,
+            Overcommit,
+            Saturated,
+        }
 
         let decision = tokio::task::spawn_blocking(move || -> Result<Decision> {
             let _lock = acquire_pool_lock()?;
@@ -226,7 +240,7 @@ impl VCpuScheduler {
 
             let d = if pool.free_vcpus() > 0 {
                 if let Some(e) = pool.vms.get_mut(&vm_id) {
-                    e.current_vcpus     = new_count;
+                    e.current_vcpus = new_count;
                     e.last_updated_secs = unix_now();
                 }
                 write_pool_file(&pool)?;
@@ -235,7 +249,7 @@ impl VCpuScheduler {
                 // Partage d'un cœur physique — migration recommandée en parallèle
                 pressure.store(true, Ordering::Relaxed);
                 if let Some(e) = pool.vms.get_mut(&vm_id) {
-                    e.current_vcpus     = new_count;
+                    e.current_vcpus = new_count;
                     e.last_updated_secs = unix_now();
                 }
                 write_pool_file(&pool)?;
@@ -246,7 +260,10 @@ impl VCpuScheduler {
                 Decision::Saturated
             };
             Ok(d)
-        }).await.ok().and_then(|r| r.ok());
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok());
 
         match decision {
             Some(Decision::FreeSlot) => {
@@ -259,9 +276,9 @@ impl VCpuScheduler {
                 // depuis les slots qu'elle a déjà, pendant que la migration se prépare.
                 boost_cpu_weight(self.vm_id, CPU_WEIGHT_OVERCOMMIT);
                 info!(
-                    vm_id        = self.vm_id,
+                    vm_id = self.vm_id,
                     new_count,
-                    cpu_weight   = CPU_WEIGHT_OVERCOMMIT,
+                    cpu_weight = CPU_WEIGHT_OVERCOMMIT,
                     "overcommit vCPU : boost cpu.weight + migration recommandée"
                 );
                 self.apply_vcpu_change(current, new_count, true).await;
@@ -272,10 +289,10 @@ impl VCpuScheduler {
                 // et on attend que la migration libère de la place sur un autre nœud.
                 boost_cpu_weight(self.vm_id, CPU_WEIGHT_SATURATED);
                 warn!(
-                    vm_id       = self.vm_id,
-                    current     = current,
-                    requested   = self.requested_vcpus,
-                    cpu_weight  = CPU_WEIGHT_SATURATED,
+                    vm_id = self.vm_id,
+                    current = current,
+                    requested = self.requested_vcpus,
+                    cpu_weight = CPU_WEIGHT_SATURATED,
                     "pool vCPU saturé (3× atteint) — boost cpu.weight en attente de migration"
                 );
             }
@@ -288,9 +305,9 @@ impl VCpuScheduler {
             Ok(()) => {
                 self.current_vcpus.store(new_count, Ordering::Relaxed);
                 info!(
-                    vm_id        = self.vm_id,
-                    from         = old_count,
-                    to           = new_count,
+                    vm_id = self.vm_id,
+                    from = old_count,
+                    to = new_count,
                     overcommitted,
                     "vCPUs ajustés"
                 );
@@ -302,11 +319,12 @@ impl VCpuScheduler {
                     let _lock = acquire_pool_lock()?;
                     let mut pool = read_pool_file();
                     if let Some(e) = pool.vms.get_mut(&vmid) {
-                        e.current_vcpus     = old_count;
+                        e.current_vcpus = old_count;
                         e.last_updated_secs = unix_now();
                     }
                     write_pool_file(&pool)
-                }).await;
+                })
+                .await;
             }
         }
     }
@@ -315,24 +333,29 @@ impl VCpuScheduler {
 
     async fn scale_down(&self, current: u32) {
         let new_count = current.saturating_sub(1).max(MIN_VCPUS);
-        if new_count == current { return; }
+        if new_count == current {
+            return;
+        }
 
         let vmid = self.vm_id;
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let _lock = acquire_pool_lock()?;
             let mut pool = read_pool_file();
             if let Some(e) = pool.vms.get_mut(&vmid) {
-                e.current_vcpus     = new_count;
+                e.current_vcpus = new_count;
                 e.last_updated_secs = unix_now();
             }
             write_pool_file(&pool)
-        }).await;
+        })
+        .await;
 
         match set_vm_vcpus(self.vm_id, new_count).await {
             Ok(()) => {
                 self.current_vcpus.store(new_count, Ordering::Relaxed);
                 info!(
-                    vm_id = self.vm_id, from = current, to = new_count,
+                    vm_id = self.vm_id,
+                    from = current,
+                    to = new_count,
                     "vCPUs réduits (sous-utilisation)"
                 );
                 // Remettre le weight au défaut : la VM n'est plus sous pression
@@ -348,7 +371,8 @@ impl VCpuScheduler {
                         }
                         let _ = vmid;
                     })
-                }).await;
+                })
+                .await;
             }
             Err(e) => warn!(vm_id = self.vm_id, error = %e, "qm set --vcpus scale-down échoué"),
         }
@@ -372,11 +396,15 @@ where
 
 fn acquire_pool_lock() -> Result<std::fs::File> {
     let f = std::fs::OpenOptions::new()
-        .create(true).write(true)
+        .create(true)
+        .write(true)
         .open(POOL_LOCK_PATH)?;
     let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
     if rc != 0 {
-        bail!("flock pool vCPU : errno {}", std::io::Error::last_os_error());
+        bail!(
+            "flock pool vCPU : errno {}",
+            std::io::Error::last_os_error()
+        );
     }
     Ok(f)
 }
@@ -395,7 +423,9 @@ fn write_pool_file(pool: &NodeVCpuPool) -> Result<()> {
 }
 
 // Expose pour status_server du store
-pub fn read_pool_file_public() -> NodeVCpuPool { read_pool_file() }
+pub fn read_pool_file_public() -> NodeVCpuPool {
+    read_pool_file()
+}
 
 // ─── Détection de demande (cgroup v2 + fallback PID) ─────────────────────────
 
@@ -421,18 +451,23 @@ async fn read_usage_usec(vmid: u32) -> Option<u64> {
     // Tentative cgroup v2 (essaie qemu.slice puis machine.slice)
     if let Some(path) = cgroup_stat_path(vmid) {
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            let v = content.lines()
+            let v = content
+                .lines()
                 .find(|l| l.starts_with("usage_usec"))
                 .and_then(|l| l.split_whitespace().nth(1))
                 .and_then(|v| v.parse().ok());
-            if v.is_some() { return v; }
+            if v.is_some() {
+                return v;
+            }
         }
     }
 
     // Fallback : /proc/<pid>/stat (utime + stime en jiffies → µs)
     let pid_str = tokio::fs::read_to_string(qemu_pid_path(vmid)).await.ok()?;
     let pid: u64 = pid_str.trim().parse().ok()?;
-    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await.ok()?;
+    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .ok()?;
     let fields: Vec<&str> = stat.split_whitespace().collect();
     let utime: u64 = fields.get(13)?.parse().ok()?;
     let stime: u64 = fields.get(14)?.parse().ok()?;
@@ -441,18 +476,22 @@ async fn read_usage_usec(vmid: u32) -> Option<u64> {
 }
 
 pub async fn measure_utilization(
-    vmid:        u32,
+    vmid: u32,
     current_vcpus: u32,
-    last_usage:  &mut u64,
-    last_ts:     &mut Instant,
+    last_usage: &mut u64,
+    last_ts: &mut Instant,
 ) -> f32 {
-    let Some(usage) = read_usage_usec(vmid).await else { return 0.0 };
-    let now       = Instant::now();
-    let delta_us  = usage.saturating_sub(*last_usage);
-    let elapsed   = now.duration_since(*last_ts).as_micros() as u64;
-    *last_usage   = usage;
-    *last_ts      = now;
-    if elapsed == 0 || current_vcpus == 0 { return 0.0; }
+    let Some(usage) = read_usage_usec(vmid).await else {
+        return 0.0;
+    };
+    let now = Instant::now();
+    let delta_us = usage.saturating_sub(*last_usage);
+    let elapsed = now.duration_since(*last_ts).as_micros() as u64;
+    *last_usage = usage;
+    *last_ts = now;
+    if elapsed == 0 || current_vcpus == 0 {
+        return 0.0;
+    }
     (delta_us as f32 / (elapsed * current_vcpus as u64) as f32 * 100.0).clamp(0.0, 100.0)
 }
 
@@ -463,10 +502,14 @@ pub async fn measure_utilization(
 pub async fn configure_vm_for_hotplug(vmid: u32, max_vcpus: u32, initial: u32) -> Result<()> {
     let out = tokio::process::Command::new("qm")
         .args([
-            "set", &vmid.to_string(),
-            "--cores",   &max_vcpus.to_string(),
-            "--vcpus",   &initial.to_string(),
-            "--hotplug", "cpu",
+            "set",
+            &vmid.to_string(),
+            "--cores",
+            &max_vcpus.to_string(),
+            "--vcpus",
+            &initial.to_string(),
+            "--hotplug",
+            "cpu",
         ])
         .output()
         .await?;
@@ -503,16 +546,20 @@ async fn set_vm_vcpus(vmid: u32, count: u32) -> Result<()> {
 // On ne descend jamais en dessous de CPU_WEIGHT_DEFAULT pour ne pas bloquer
 // d'autres VMs.
 
-const CPU_WEIGHT_DEFAULT:     u32 = 100;
-const CPU_WEIGHT_OVERCOMMIT:  u32 = 200;
-const CPU_WEIGHT_SATURATED:   u32 = 400;
+const CPU_WEIGHT_DEFAULT: u32 = 100;
+const CPU_WEIGHT_OVERCOMMIT: u32 = 200;
+const CPU_WEIGHT_SATURATED: u32 = 400;
 
 /// Retourne le chemin cgroup cpu.weight pour une VM, ou None si introuvable.
 fn cgroup_cpu_weight_path(vmid: u32) -> Option<String> {
     let p1 = format!("/sys/fs/cgroup/qemu.slice/{vmid}.scope/cpu.weight");
-    if std::path::Path::new(&p1).exists() { return Some(p1); }
+    if std::path::Path::new(&p1).exists() {
+        return Some(p1);
+    }
     let p2 = format!("/sys/fs/cgroup/machine.slice/qemu-{vmid}.scope/cpu.weight");
-    if std::path::Path::new(&p2).exists() { return Some(p2); }
+    if std::path::Path::new(&p2).exists() {
+        return Some(p2);
+    }
     None
 }
 
@@ -559,14 +606,20 @@ mod tests {
     use super::*;
 
     fn make_pool(total: u32, vms: &[(u32, u32)]) -> NodeVCpuPool {
-        let mut pool = NodeVCpuPool { total_vcpus: total, ..Default::default() };
+        let mut pool = NodeVCpuPool {
+            total_vcpus: total,
+            ..Default::default()
+        };
         for &(vmid, current) in vms {
-            pool.vms.insert(vmid, VmCpuEntry {
-                current_vcpus:     current,
-                requested_vcpus:   8,
-                utilization_pct:   0.0,
-                last_updated_secs: 0,
-            });
+            pool.vms.insert(
+                vmid,
+                VmCpuEntry {
+                    current_vcpus: current,
+                    requested_vcpus: 8,
+                    utilization_pct: 0.0,
+                    last_updated_secs: 0,
+                },
+            );
         }
         pool
     }
@@ -631,12 +684,12 @@ mod tests {
     fn test_utilization_zero_when_no_vcpus() {
         // current_vcpus = 0 → évite la division par zéro
         let mut usage = 1000u64;
-        let mut ts    = Instant::now();
+        let mut ts = Instant::now();
         // Simule la fonction sans appel système
         let current_vcpus = 0u32;
         let elapsed = 1_000_000u64;
-        let delta   = 500_000u64;
-        let result  = if elapsed == 0 || current_vcpus == 0 {
+        let delta = 500_000u64;
+        let result = if elapsed == 0 || current_vcpus == 0 {
             0.0f32
         } else {
             (delta as f32 / (elapsed * current_vcpus as u64) as f32 * 100.0).clamp(0.0, 100.0)
@@ -650,15 +703,15 @@ mod tests {
     fn test_utilization_100_pct_when_fully_loaded() {
         let current_vcpus = 2u32;
         let elapsed = 1_000_000u64; // 1 s en µs
-        let delta   = 2_000_000u64; // 2 cœurs × 1 s → 100 %
-        let result  = (delta as f32 / (elapsed * current_vcpus as u64) as f32 * 100.0)
-            .clamp(0.0, 100.0);
+        let delta = 2_000_000u64; // 2 cœurs × 1 s → 100 %
+        let result =
+            (delta as f32 / (elapsed * current_vcpus as u64) as f32 * 100.0).clamp(0.0, 100.0);
         assert_eq!(result, 100.0);
     }
 
     #[test]
     fn test_scale_up_increases_by_one() {
-        let current   = 2u32;
+        let current = 2u32;
         let requested = 8u32;
         let new_count = (current + 1).min(requested);
         assert_eq!(new_count, 3);
@@ -666,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_scale_up_clamps_at_requested() {
-        let current   = 8u32;
+        let current = 8u32;
         let requested = 8u32;
         let new_count = (current + 1).min(requested);
         assert_eq!(new_count, 8); // pas de dépassement
@@ -674,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_scale_down_clamps_at_min() {
-        let current   = 1u32;
+        let current = 1u32;
         let new_count = current.saturating_sub(1).max(MIN_VCPUS);
         assert_eq!(new_count, 1); // ne descend pas en dessous de 1
     }

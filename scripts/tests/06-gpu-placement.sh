@@ -6,7 +6,9 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
 
 header "Test 6 — GPU placement (VM $VMID)"
 
@@ -17,7 +19,7 @@ require_bin pvesh
 step "Détection GPU sur les nœuds du cluster"
 gpu_found=false
 for node in "${OMEGA_NODES_ARR[@]}"; do
-    if ssh -o ConnectTimeout=3 "root@${node}" \
+    if ssh_run "$node" \
         "ls /sys/bus/pci/devices/*/class 2>/dev/null | xargs grep -l '^0x03' 2>/dev/null | head -1" \
         2>/dev/null | grep -q .; then
         info "GPU détecté sur $node"
@@ -42,9 +44,9 @@ _TMPFILES+=("$LOG_AGENT")
     --stores "$STORES_CSV" \
     --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
-    --current-node "$(hostname)" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
+    --current-node "$(local_pve_node)" \
     --gpu-required \
     --gpu-placement-interval-secs 10 \
     --mode daemon >"$LOG_AGENT" 2>&1 &

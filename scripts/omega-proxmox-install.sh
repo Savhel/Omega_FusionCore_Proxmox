@@ -125,6 +125,24 @@ fi
 
 success "Wrapper écrit dans ${WRAPPER_PATH}"
 
+step "Diagnostic Omega QEMU local"
+
+DOCTOR_BRIDGE_ARG=()
+if [[ -f "$BRIDGE_LIB" ]]; then
+    DOCTOR_BRIDGE_ARG=(--bridge-lib "$BRIDGE_LIB")
+fi
+
+if "${INSTALL_DIR}/omega-qemu-launcher" doctor \
+    --qemu-bin  "$OMEGA_REAL_KVM" \
+    --agent-bin "$OMEGA_AGENT_BIN" \
+    --run-dir   "$OMEGA_RUN_DIR" \
+    "${DOCTOR_BRIDGE_ARG[@]}"
+then
+    success "Diagnostic omega-qemu-launcher OK"
+else
+    warn "Diagnostic omega-qemu-launcher en échec — vérifier userfaultfd, bridge et chemins binaires"
+fi
+
 # Créer le symlink /usr/bin/kvm → wrapper
 if [[ -e "$OMEGA_REAL_KVM" && ! -L "/usr/bin/kvm" ]]; then
     ln -sf "$WRAPPER_PATH" /usr/bin/kvm

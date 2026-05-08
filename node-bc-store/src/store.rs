@@ -54,7 +54,8 @@ impl PageStore {
         }
 
         let existed = self.pages.contains_key(&key);
-        self.pages.insert(key, (data.into_boxed_slice(), Instant::now()));
+        self.pages
+            .insert(key, (data.into_boxed_slice(), Instant::now()));
 
         if existed {
             // Mise à jour : ne compte pas comme une nouvelle page
@@ -153,8 +154,12 @@ impl PageStore {
             self.pages.remove(key);
         }
         if count > 0 {
-            self.metrics.pages_stored.fetch_sub(count as u64, std::sync::atomic::Ordering::Relaxed);
-            self.metrics.delete_count.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .pages_stored
+                .fetch_sub(count as u64, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .delete_count
+                .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
         }
         count
     }
@@ -170,7 +175,8 @@ impl PageStore {
 
     /// Éviction LRU vraie : retire les `count` pages les moins récemment accédées.
     pub fn evict_lru(&self, count: usize) -> usize {
-        let mut entries: Vec<(PageKey, Instant)> = self.pages
+        let mut entries: Vec<(PageKey, Instant)> = self
+            .pages
             .iter()
             .map(|e| (e.key().clone(), e.value().1))
             .collect();

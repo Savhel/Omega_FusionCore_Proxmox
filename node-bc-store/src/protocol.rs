@@ -56,18 +56,18 @@ const COMPRESS_MIN_LEN: usize = 64;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
-    Ping         = 0x01,
-    PutPage      = 0x10,
-    GetPage      = 0x11,
-    DeletePage   = 0x12,
-    BatchPutPage = 0x13,   // ← nouveau : PUT en lot
+    Ping = 0x01,
+    PutPage = 0x10,
+    GetPage = 0x11,
+    DeletePage = 0x12,
+    BatchPutPage = 0x13, // ← nouveau : PUT en lot
     StatsRequest = 0x20,
 
-    Pong          = 0x02,
-    Ok            = 0x80,
-    NotFound      = 0x81,
-    Error         = 0x82,
-    BatchPutOk    = 0x83,  // ← nouveau : réponse au batch PUT
+    Pong = 0x02,
+    Ok = 0x80,
+    NotFound = 0x81,
+    Error = 0x82,
+    BatchPutOk = 0x83, // ← nouveau : réponse au batch PUT
     StatsResponse = 0x21,
 }
 
@@ -100,31 +100,55 @@ impl TryFrom<u8> for Opcode {
 
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub opcode:  Opcode,
-    pub flags:   u8,
-    pub vm_id:   u32,
+    pub opcode: Opcode,
+    pub flags: u8,
+    pub vm_id: u32,
     pub page_id: u64,
     pub payload: Vec<u8>,
 }
 
 impl Message {
     pub fn new(opcode: Opcode, vm_id: u32, page_id: u64, payload: Vec<u8>) -> Self {
-        Self { opcode, flags: 0, vm_id, page_id, payload }
+        Self {
+            opcode,
+            flags: 0,
+            vm_id,
+            page_id,
+            payload,
+        }
     }
 
-    pub fn ping()    -> Self { Self::new(Opcode::Ping,  0, 0, vec![]) }
-    pub fn pong()    -> Self { Self::new(Opcode::Pong,  0, 0, vec![]) }
-    pub fn ok(vm_id: u32, page_id: u64) -> Self { Self::new(Opcode::Ok, vm_id, page_id, vec![]) }
-    pub fn not_found(vm_id: u32, page_id: u64) -> Self { Self::new(Opcode::NotFound, vm_id, page_id, vec![]) }
-    pub fn error_msg(detail: &str) -> Self { Self::new(Opcode::Error, 0, 0, detail.as_bytes().to_vec()) }
+    pub fn ping() -> Self {
+        Self::new(Opcode::Ping, 0, 0, vec![])
+    }
+    pub fn pong() -> Self {
+        Self::new(Opcode::Pong, 0, 0, vec![])
+    }
+    pub fn ok(vm_id: u32, page_id: u64) -> Self {
+        Self::new(Opcode::Ok, vm_id, page_id, vec![])
+    }
+    pub fn not_found(vm_id: u32, page_id: u64) -> Self {
+        Self::new(Opcode::NotFound, vm_id, page_id, vec![])
+    }
+    pub fn error_msg(detail: &str) -> Self {
+        Self::new(Opcode::Error, 0, 0, detail.as_bytes().to_vec())
+    }
     pub fn put_page(vm_id: u32, page_id: u64, data: Vec<u8>) -> Self {
         assert_eq!(data.len(), PAGE_SIZE);
         Self::new(Opcode::PutPage, vm_id, page_id, data)
     }
-    pub fn get_page(vm_id: u32, page_id: u64) -> Self { Self::new(Opcode::GetPage, vm_id, page_id, vec![]) }
-    pub fn delete_page(vm_id: u32, page_id: u64) -> Self { Self::new(Opcode::DeletePage, vm_id, page_id, vec![]) }
-    pub fn stats_request() -> Self { Self::new(Opcode::StatsRequest, 0, 0, vec![]) }
-    pub fn stats_response(json: String) -> Self { Self::new(Opcode::StatsResponse, 0, 0, json.into_bytes()) }
+    pub fn get_page(vm_id: u32, page_id: u64) -> Self {
+        Self::new(Opcode::GetPage, vm_id, page_id, vec![])
+    }
+    pub fn delete_page(vm_id: u32, page_id: u64) -> Self {
+        Self::new(Opcode::DeletePage, vm_id, page_id, vec![])
+    }
+    pub fn stats_request() -> Self {
+        Self::new(Opcode::StatsRequest, 0, 0, vec![])
+    }
+    pub fn stats_response(json: String) -> Self {
+        Self::new(Opcode::StatsResponse, 0, 0, json.into_bytes())
+    }
 
     // ── Compression LZ4 ───────────────────────────────────────────────────
 
@@ -141,9 +165,9 @@ impl Message {
             return None;
         }
         Some(Self {
-            opcode:  self.opcode,
-            flags:   self.flags | FLAG_COMPRESSED,
-            vm_id:   self.vm_id,
+            opcode: self.opcode,
+            flags: self.flags | FLAG_COMPRESSED,
+            vm_id: self.vm_id,
             page_id: self.page_id,
             payload: compressed,
         })
@@ -164,14 +188,18 @@ impl Message {
             ));
         }
 
-        let opcode      = Opcode::try_from(header[2])?;
-        let flags       = header[3];
-        let vm_id       = u32::from_be_bytes(header[4..8].try_into().unwrap());
-        let page_id     = u64::from_be_bytes(header[8..16].try_into().unwrap());
+        let opcode = Opcode::try_from(header[2])?;
+        let flags = header[3];
+        let vm_id = u32::from_be_bytes(header[4..8].try_into().unwrap());
+        let page_id = u64::from_be_bytes(header[8..16].try_into().unwrap());
         let payload_len = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
 
         // Vérification de taille — batch PUT a un plafond plus élevé
-        let max = if matches!(opcode, Opcode::BatchPutPage) { MAX_BATCH_PAYLOAD } else { MAX_PAYLOAD };
+        let max = if matches!(opcode, Opcode::BatchPutPage) {
+            MAX_BATCH_PAYLOAD
+        } else {
+            MAX_PAYLOAD
+        };
         if payload_len > max {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -187,14 +215,23 @@ impl Message {
         // Décompression transparente — le flag est effacé après décompression
         let (payload, flags) = if flags & FLAG_COMPRESSED != 0 && !raw.is_empty() {
             let data = lz4_flex::decompress_size_prepended(&raw).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 décompression : {e}"))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("LZ4 décompression : {e}"),
+                )
             })?;
             (data, flags & !FLAG_COMPRESSED)
         } else {
             (raw, flags)
         };
 
-        Ok(Self { opcode, flags, vm_id, page_id, payload })
+        Ok(Self {
+            opcode,
+            flags,
+            vm_id,
+            page_id,
+            payload,
+        })
     }
 
     /// Écrit un message sur un stream. Ne compresse pas — utilisez `try_compress()` avant.
@@ -226,22 +263,29 @@ pub struct BatchPutRequest {
 
 /// Réponse du store à un BATCH_PUT_PAGE.
 pub struct BatchPutResponse {
-    pub vm_id:  u32,
+    pub vm_id: u32,
     pub stored: u32, // pages effectivement stockées
     pub failed: u32, // pages refusées (taille incorrecte, store plein...)
 }
 
 impl BatchPutRequest {
     pub fn new(vm_id: u32) -> Self {
-        Self { vm_id, pages: Vec::new() }
+        Self {
+            vm_id,
+            pages: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, page_id: u64, data: Vec<u8>) {
         self.pages.push((page_id, data));
     }
 
-    pub fn len(&self) -> usize { self.pages.len() }
-    pub fn is_empty(&self) -> bool { self.pages.is_empty() }
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
 
     /// Sérialise et envoie la requête batch.
     pub async fn write_to<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> io::Result<()> {
@@ -286,11 +330,18 @@ impl BatchPutResponse {
                 // page_id = stored count, flags = 0
                 let stored = (msg.page_id & 0xFFFF_FFFF) as u32;
                 let failed = ((msg.page_id >> 32) & 0xFFFF_FFFF) as u32;
-                Ok(Self { vm_id: msg.vm_id, stored, failed })
+                Ok(Self {
+                    vm_id: msg.vm_id,
+                    stored,
+                    failed,
+                })
             }
             Opcode::Error => {
                 let detail = String::from_utf8_lossy(&msg.payload).to_string();
-                Err(io::Error::new(io::ErrorKind::Other, format!("BATCH_PUT erreur store : {detail}")))
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("BATCH_PUT erreur store : {detail}"),
+                ))
             }
             op => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -331,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn test_put_page_roundtrip() {
         let data = vec![0xABu8; PAGE_SIZE];
-        let got  = roundtrip(Message::put_page(42, 1234, data.clone())).await;
+        let got = roundtrip(Message::put_page(42, 1234, data.clone())).await;
         assert_eq!(got.opcode as u8, Opcode::PutPage as u8);
         assert_eq!(got.vm_id, 42);
         assert_eq!(got.page_id, 1234);
@@ -341,11 +392,26 @@ mod tests {
     #[tokio::test]
     async fn test_bad_magic() {
         let buf = vec![
-            0xDEu8, 0xAD,
-            Opcode::Ping as u8, 0,
-            0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0,
+            0xDEu8,
+            0xAD,
+            Opcode::Ping as u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         ];
         let mut reader = BufReader::new(buf.as_slice());
         assert!(Message::read_from(&mut reader).await.is_err());
@@ -354,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_compression_zero_page() {
         let data = vec![0u8; PAGE_SIZE]; // page zéro — très compressible
-        let msg  = Message::put_page(1, 0, data.clone());
+        let msg = Message::put_page(1, 0, data.clone());
         let compressed = msg.try_compress().expect("page zéro doit se comprimer");
         assert!(compressed.flags & FLAG_COMPRESSED != 0);
         assert!(compressed.payload.len() < PAGE_SIZE);
@@ -364,8 +430,15 @@ mod tests {
         compressed.write_to(&mut buf).await.unwrap();
         let mut reader = BufReader::new(buf.as_slice());
         let decoded = Message::read_from(&mut reader).await.unwrap();
-        assert_eq!(decoded.payload, data, "décompression doit restaurer les données");
-        assert_eq!(decoded.flags & FLAG_COMPRESSED, 0, "flag effacé après décompression transparente");
+        assert_eq!(
+            decoded.payload, data,
+            "décompression doit restaurer les données"
+        );
+        assert_eq!(
+            decoded.flags & FLAG_COMPRESSED,
+            0,
+            "flag effacé après décompression transparente"
+        );
     }
 
     #[tokio::test]

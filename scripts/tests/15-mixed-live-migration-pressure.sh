@@ -7,7 +7,9 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
 
 header "Test M5 — Migration live sous pression mémoire (VM $VMID)"
 print_cluster_config
@@ -35,8 +37,8 @@ _TMPFILES+=("$LOG_PHASE1")
     --stores "$STORES_CSV" \
     --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     --current-node "$node_init" \
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 64 \

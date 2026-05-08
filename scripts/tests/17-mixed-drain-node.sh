@@ -11,7 +11,7 @@ VMS_TO_DRAIN=("${@}")
 
 # pvesh retourne le nom d'hôte Proxmox (ex: "pve"), pas l'IP.
 # On résout DRAIN_NODE (IP ou nom) en nom d'hôte Proxmox via ssh.
-DRAIN_NODE_PVE=$(ssh -o ConnectTimeout=3 "root@${DRAIN_NODE}" "hostname" 2>/dev/null || echo "$DRAIN_NODE")
+DRAIN_NODE_PVE=$(ssh_run "$DRAIN_NODE" "hostname" 2>/dev/null || echo "$DRAIN_NODE")
 
 # Si pas de VMs passées en argument, détecter automatiquement les VMs du nœud
 if [[ ${#VMS_TO_DRAIN[@]} -eq 0 ]]; then
@@ -80,12 +80,13 @@ for vmid in "${VMS_TO_DRAIN[@]}"; do
     LOG="/tmp/omega-m7-vm${vmid}.log"
     _TMPFILES+=("$LOG")
     LOGS+=("$LOG")
+    _ram=$(vm_ram_mib "$vmid"); _ram="${_ram:-1024}"
     "$AGENT_BIN" \
         --stores "$STORES_CSV" \
         --status-addrs "$STATUS_CSV" \
         --vm-id "$vmid" \
-        --vm-requested-mib 2048 \
-        --region-mib 2048 \
+        --vm-requested-mib "$_ram" \
+        --region-mib "$_ram" \
         --current-node "$DRAIN_NODE" \
         --eviction-threshold-mib 999999 \
         --eviction-batch-size 64 \
@@ -130,20 +131,20 @@ for vmid in "${VMS_TO_DRAIN[@]}"; do
     target_pve=$(_ip_to_pve_node "$target")
     ((target_idx++)) || true
     # Éjecter les CD-ROMs — qm commands must run on the source node (DRAIN_NODE)
-    ssh -o ConnectTimeout=5 "root@${DRAIN_NODE}" \
+    ssh_run "$DRAIN_NODE" \
         "qm config $vmid 2>/dev/null | grep 'media=cdrom' | cut -d: -f1 | while read drv; do
              qm set $vmid \"--\${drv}\" none 2>/dev/null || true
          done" 2>/dev/null || true
     info "Migration VM $vmid → $target (pvesh: $target_pve, live)..."
     t_vm=$SECONDS
-    if ssh -o ConnectTimeout=5 "root@${DRAIN_NODE}" \
+    if ssh_run "$DRAIN_NODE" \
         "qm migrate $vmid $target_pve --online" 2>&1 | tee "/tmp/omega-m7-migrate-${vmid}.log"; then
         migrated+=("$vmid")
         info "VM $vmid migrée vers $target en $(elapsed $t_vm)s"
     else
         failed_migration+=("$vmid")
         warn "Migration VM $vmid échouée — tentative offline..."
-        ssh -o ConnectTimeout=5 "root@${DRAIN_NODE}" \
+        ssh_run "$DRAIN_NODE" \
             "qm migrate $vmid $target_pve" 2>&1 || warn "Migration offline VM $vmid aussi échouée"
     fi
 done

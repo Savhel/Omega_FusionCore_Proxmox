@@ -20,8 +20,8 @@
 //! - GET : ok si au moins un des deux stores retourne la page.
 //! - DELETE : opération sur primaire + réplica (erreur réplica non fatale).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use tracing::{debug, warn};
@@ -32,19 +32,19 @@ use node_bc_store::protocol::PAGE_SIZE;
 /// Métriques de réplication.
 #[derive(Default, Debug)]
 pub struct ReplicationMetrics {
-    pub primary_puts:  AtomicU64,
-    pub replica_puts:  AtomicU64,
-    pub primary_gets:  AtomicU64,
-    pub replica_gets:  AtomicU64,
+    pub primary_puts: AtomicU64,
+    pub replica_puts: AtomicU64,
+    pub primary_gets: AtomicU64,
+    pub replica_gets: AtomicU64,
     pub primary_fails: AtomicU64,
     pub replica_fails: AtomicU64,
 }
 
 /// Client avec réplication.
 pub struct ReplicatedStoreClient {
-    pool:    Arc<RemoteStorePool>,
+    pool: Arc<RemoteStorePool>,
     metrics: Arc<ReplicationMetrics>,
-    factor:  usize,
+    factor: usize,
 }
 
 impl ReplicatedStoreClient {
@@ -78,14 +78,18 @@ impl ReplicatedStoreClient {
             );
 
             match &primary_result {
-                Ok(_)  => { self.metrics.primary_puts.fetch_add(1, Ordering::Relaxed); }
+                Ok(_) => {
+                    self.metrics.primary_puts.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(e) => {
                     self.metrics.primary_fails.fetch_add(1, Ordering::Relaxed);
                     warn!(vm_id, page_id, error = %e, "PUT primaire échoué");
                 }
             }
             match &replica_result {
-                Ok(_)  => { self.metrics.replica_puts.fetch_add(1, Ordering::Relaxed); }
+                Ok(_) => {
+                    self.metrics.replica_puts.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(e) => {
                     self.metrics.replica_fails.fetch_add(1, Ordering::Relaxed);
                     warn!(vm_id, page_id, error = %e, "PUT réplica échoué (non fatal)");
@@ -102,8 +106,14 @@ impl ReplicatedStoreClient {
         // Pas de réplication (factor == 1 ou un seul store)
         let result = self.pool.put_page(vm_id, page_id, data).await;
         match &result {
-            Ok(_)  => { self.metrics.primary_puts.fetch_add(1, Ordering::Relaxed); debug!(vm_id, page_id, "PUT primaire ok"); }
-            Err(e) => { self.metrics.primary_fails.fetch_add(1, Ordering::Relaxed); warn!(vm_id, page_id, error = %e, "PUT primaire échoué"); }
+            Ok(_) => {
+                self.metrics.primary_puts.fetch_add(1, Ordering::Relaxed);
+                debug!(vm_id, page_id, "PUT primaire ok");
+            }
+            Err(e) => {
+                self.metrics.primary_fails.fetch_add(1, Ordering::Relaxed);
+                warn!(vm_id, page_id, error = %e, "PUT primaire échoué");
+            }
         }
         result
     }
@@ -114,7 +124,7 @@ impl ReplicatedStoreClient {
 
         match self.pool.get_page(vm_id, page_id).await {
             Ok(Some(data)) => return Ok(Some(data)),
-            Ok(None)       => {}
+            Ok(None) => {}
             Err(e) => {
                 warn!(vm_id, page_id, error = %e, "GET primaire échoué — tentative réplica");
                 self.metrics.primary_fails.fetch_add(1, Ordering::Relaxed);
@@ -125,11 +135,16 @@ impl ReplicatedStoreClient {
             self.metrics.replica_gets.fetch_add(1, Ordering::Relaxed);
             match self.pool.get_page_replica(vm_id, page_id).await {
                 Ok(Some(data)) => {
-                    warn!(vm_id, page_id, "GET servi depuis le réplica — store primaire dégradé ?");
+                    warn!(
+                        vm_id,
+                        page_id, "GET servi depuis le réplica — store primaire dégradé ?"
+                    );
                     return Ok(Some(data));
                 }
                 Ok(None) => {}
-                Err(e)   => { warn!(vm_id, page_id, error = %e, "GET réplica aussi échoué"); }
+                Err(e) => {
+                    warn!(vm_id, page_id, error = %e, "GET réplica aussi échoué");
+                }
             }
         }
 

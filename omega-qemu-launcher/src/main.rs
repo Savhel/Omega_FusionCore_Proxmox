@@ -39,6 +39,10 @@ enum Commands {
     WriteWrapper(WriteWrapperArgs),
     /// Écrit un wrapper shell destiné à remplacer le binaire QEMU appelé par Proxmox.
     WriteProxmoxWrapper(WriteProxmoxWrapperArgs),
+    /// Vérifie les prérequis locaux pour lancer QEMU via Omega.
+    Doctor(DoctorArgs),
+    /// Arrête l'agent et nettoie l'état runtime d'une VM.
+    Cleanup(CleanupArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -54,7 +58,11 @@ struct PrepareArgs {
     #[arg(long)]
     region_mib: Option<usize>,
 
-    #[arg(long, default_value = "127.0.0.1:9100,127.0.0.1:9101", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "127.0.0.1:9100,127.0.0.1:9101",
+        value_delimiter = ','
+    )]
     stores: Vec<String>,
 
     #[arg(long)]
@@ -134,7 +142,12 @@ struct ExecProxmoxArgs {
     #[arg(long)]
     size_mib: Option<usize>,
 
-    #[arg(long, default_value = "127.0.0.1:9100,127.0.0.1:9101", value_delimiter = ',', env = "OMEGA_STORES")]
+    #[arg(
+        long,
+        default_value = "127.0.0.1:9100,127.0.0.1:9101",
+        value_delimiter = ',',
+        env = "OMEGA_STORES"
+    )]
     stores: Vec<String>,
 
     #[arg(long, env = "OMEGA_AGENT_BIN")]
@@ -160,6 +173,10 @@ struct ExecProxmoxArgs {
 
     #[arg(long, env = "OMEGA_MEMFD_NAME")]
     memfd_name: Option<String>,
+
+    /// Chemin vers omega-uffd-bridge.so. Injecté uniquement dans le vrai QEMU.
+    #[arg(long, env = "OMEGA_BRIDGE_LIB")]
+    bridge_lib: Option<PathBuf>,
 
     #[arg(long, env = "OMEGA_REAL_QEMU_BIN")]
     qemu_bin: PathBuf,
@@ -196,7 +213,11 @@ struct QemuLaunchState {
 
 #[derive(Parser, Debug, Clone)]
 struct WriteProxmoxWrapperArgs {
-    #[arg(long, default_value = "127.0.0.1:9100,127.0.0.1:9101", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "127.0.0.1:9100,127.0.0.1:9101",
+        value_delimiter = ','
+    )]
     stores: Vec<String>,
 
     #[arg(long)]
@@ -232,6 +253,34 @@ struct WriteProxmoxWrapperArgs {
 
     #[arg(long)]
     output: PathBuf,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct DoctorArgs {
+    #[arg(long, env = "OMEGA_REAL_QEMU_BIN")]
+    qemu_bin: Option<PathBuf>,
+
+    #[arg(long, env = "OMEGA_AGENT_BIN")]
+    agent_bin: Option<PathBuf>,
+
+    #[arg(long, env = "OMEGA_BRIDGE_LIB")]
+    bridge_lib: Option<PathBuf>,
+
+    #[arg(long, default_value = "/var/lib/omega-qemu", env = "OMEGA_RUN_DIR")]
+    run_dir: PathBuf,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct CleanupArgs {
+    #[command(flatten)]
+    state: StateSelector,
+
+    #[arg(long, default_value_t = 10)]
+    timeout_secs: u64,
+
+    /// Conserve agent.log pour diagnostic.
+    #[arg(long)]
+    keep_log: bool,
 }
 
 fn main() -> Result<()> {
@@ -276,6 +325,17 @@ fn main() -> Result<()> {
             let path = write_proxmox_wrapper(args)?;
             println!("{}", path.display());
         }
+        Commands::Doctor(args) => {
+            let report = doctor(args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.ok {
+                std::process::exit(2);
+            }
+        }
+        Commands::Cleanup(args) => {
+            let report = cleanup(args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
     }
     Ok(())
 }
@@ -287,9 +347,10 @@ fn prepare(args: PrepareArgs) -> Result<QemuLaunchState> {
         .unwrap_or_else(|| default_state_path(&args.run_dir, args.vm_id));
     if state_path.exists() {
         let existing = load_state_from_path(&state_path)?;
-        if pid_is_running(existing.agent_pid) {
+        if state_is_usable(&existing) {
             return Ok(existing);
         }
+        let _ = stop_agent(&existing, Duration::from_secs(3));
     }
 
     let metadata_path = args
@@ -369,11 +430,7 @@ fn prepare(args: PrepareArgs) -> Result<QemuLaunchState> {
         );
     }
 
-    let qemu_args = build_qemu_args(
-        &args.object_id,
-        args.size_mib,
-        &metadata,
-    )?;
+    let qemu_args = build_qemu_args(&args.object_id, args.size_mib, &metadata)?;
 
     let state = QemuLaunchState {
         vm_id: args.vm_id,
@@ -437,27 +494,25 @@ fn exec_proxmox_incoming(args: ExecProxmoxArgs, vm_id: u32, size_mib: usize) -> 
     // omega (il est injecté à l'exécution, pas dans la config). On distingue tout
     // de même les deux cas pour le patching de mem-path.
     let has_omega_object = args.qemu_args.windows(2).any(|w| {
-        w[0] == "-object"
-            && w[1].contains("memory-backend-file")
-            && w[1].contains("mem-path=")
+        w[0] == "-object" && w[1].contains("memory-backend-file") && w[1].contains("mem-path=")
     });
 
     let prepare_args = PrepareArgs {
         vm_id,
         size_mib,
         region_mib: Some(size_mib),
-        stores: args.stores,
-        agent_bin: args.agent_bin,
-        run_dir: args.run_dir,
+        stores: args.stores.clone(),
+        agent_bin: args.agent_bin.clone(),
+        run_dir: args.run_dir.clone(),
         metadata_path: None,
         state_path: None,
         log_path: None,
         object_id: args.object_id.clone(),
         start_timeout_secs: args.start_timeout_secs,
-        log_format: args.log_format,
-        log_level: args.log_level,
+        log_format: args.log_format.clone(),
+        log_level: args.log_level.clone(),
         store_timeout_ms: args.store_timeout_ms,
-        memfd_name: args.memfd_name,
+        memfd_name: args.memfd_name.clone(),
     };
     let state = prepare(prepare_args)?;
 
@@ -467,7 +522,12 @@ fn exec_proxmox_incoming(args: ExecProxmoxArgs, vm_id: u32, size_mib: usize) -> 
         patch_migration_mem_path(&args.qemu_args, &state.object_id, &state.metadata)?
     } else {
         // Cas normal de migration Proxmox : injecter l'objet omega + patcher -machine.
-        inject_omega_qemu_args(&args.qemu_args, &state.object_id, state.size_mib, &state.metadata)?
+        inject_omega_qemu_args(
+            &args.qemu_args,
+            &state.object_id,
+            state.size_mib,
+            &state.metadata,
+        )?
     };
 
     // exec() : QEMU remplace ce processus → sd_notify depuis le bon PID.
@@ -481,6 +541,10 @@ fn exec_proxmox_incoming(args: ExecProxmoxArgs, vm_id: u32, size_mib: usize) -> 
         .env("OMEGA_QEMU_AGENT_PID", state.agent_pid.to_string())
         .env("OMEGA_QEMU_VM_ID", state.vm_id.to_string())
         .env("OMEGA_QEMU_SIZE_MIB", state.size_mib.to_string());
+    if let Some(bridge_lib) = &args.bridge_lib {
+        cmd.env("LD_PRELOAD", bridge_lib);
+        cmd.env("OMEGA_BRIDGE_LIB", bridge_lib);
+    }
     let err = cmd.exec();
     Err(anyhow::anyhow!(
         "exec QEMU migration ({}): {}",
@@ -575,14 +639,6 @@ fn exec_bypass(qemu_bin: &Path, qemu_args: &[String]) -> Result<i32> {
     ))
 }
 
-fn exec_bypass_logged(qemu_bin: &Path, qemu_args: &[String], vm_id: u32) -> Result<i32> {
-    let _ = std::fs::write(
-        format!("/tmp/omega-qemu-{vm_id}-bypass.log"),
-        format!("exec_bypass_logged: {}\n", qemu_args.join(" ")),
-    );
-    exec_bypass(qemu_bin, qemu_args)
-}
-
 fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
     let is_incoming = args.qemu_args.iter().any(|a| a == "-incoming");
 
@@ -622,23 +678,27 @@ fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
         vm_id,
         size_mib,
         region_mib: Some(size_mib),
-        stores: args.stores,
-        agent_bin: args.agent_bin,
-        run_dir: args.run_dir,
+        stores: args.stores.clone(),
+        agent_bin: args.agent_bin.clone(),
+        run_dir: args.run_dir.clone(),
         metadata_path: None,
         state_path: None,
         log_path: None,
-        object_id: args.object_id,
+        object_id: args.object_id.clone(),
         start_timeout_secs: args.start_timeout_secs,
-        log_format: args.log_format,
-        log_level: args.log_level,
+        log_format: args.log_format.clone(),
+        log_level: args.log_level.clone(),
         store_timeout_ms: args.store_timeout_ms,
-        memfd_name: args.memfd_name,
+        memfd_name: args.memfd_name.clone(),
     };
 
     let state = prepare(prepare_args)?;
-    let final_qemu_args =
-        inject_omega_qemu_args(&args.qemu_args, &state.object_id, state.size_mib, &state.metadata)?;
+    let final_qemu_args = inject_omega_qemu_args(
+        &args.qemu_args,
+        &state.object_id,
+        state.size_mib,
+        &state.metadata,
+    )?;
 
     // exec() remplace ce processus par QEMU.
     // argv[0] = "/usr/bin/kvm" : convention QEMU "appelé sous le nom kvm → activer KVM",
@@ -655,6 +715,10 @@ fn exec_proxmox(args: ExecProxmoxArgs) -> Result<i32> {
         .env("OMEGA_QEMU_AGENT_PID", state.agent_pid.to_string())
         .env("OMEGA_QEMU_VM_ID", state.vm_id.to_string())
         .env("OMEGA_QEMU_SIZE_MIB", state.size_mib.to_string());
+    if let Some(bridge_lib) = &args.bridge_lib {
+        cmd.env("LD_PRELOAD", bridge_lib);
+        cmd.env("OMEGA_BRIDGE_LIB", bridge_lib);
+    }
     let err = cmd.exec();
     Err(anyhow::anyhow!(
         "exec QEMU ({}): {}",
@@ -713,14 +777,35 @@ fn write_proxmox_wrapper(args: WriteProxmoxWrapperArgs) -> Result<PathBuf> {
     let mut lines = vec![
         "#!/usr/bin/env bash".to_string(),
         "set -euo pipefail".to_string(),
-        format!("export OMEGA_STORES='{}'", shell_escape_str(&args.stores.join(","))),
-        format!("export OMEGA_RUN_DIR='{}'", shell_escape_path(&args.run_dir)),
-        format!("export OMEGA_OBJECT_ID='{}'", shell_escape_str(&args.object_id)),
-        format!("export OMEGA_START_TIMEOUT_SECS='{}'", args.start_timeout_secs),
-        format!("export OMEGA_LOG_FORMAT='{}'", shell_escape_str(&args.log_format)),
-        format!("export OMEGA_LOG_LEVEL='{}'", shell_escape_str(&args.log_level)),
+        format!(
+            "export OMEGA_STORES='{}'",
+            shell_escape_str(&args.stores.join(","))
+        ),
+        format!(
+            "export OMEGA_RUN_DIR='{}'",
+            shell_escape_path(&args.run_dir)
+        ),
+        format!(
+            "export OMEGA_OBJECT_ID='{}'",
+            shell_escape_str(&args.object_id)
+        ),
+        format!(
+            "export OMEGA_START_TIMEOUT_SECS='{}'",
+            args.start_timeout_secs
+        ),
+        format!(
+            "export OMEGA_LOG_FORMAT='{}'",
+            shell_escape_str(&args.log_format)
+        ),
+        format!(
+            "export OMEGA_LOG_LEVEL='{}'",
+            shell_escape_str(&args.log_level)
+        ),
         format!("export OMEGA_STORE_TIMEOUT_MS='{}'", args.store_timeout_ms),
-        format!("export OMEGA_REAL_QEMU_BIN='{}'", shell_escape_path(&args.qemu_bin)),
+        format!(
+            "export OMEGA_REAL_QEMU_BIN='{}'",
+            shell_escape_path(&args.qemu_bin)
+        ),
     ];
     if let Some(agent_bin) = args.agent_bin {
         lines.push(format!(
@@ -736,7 +821,7 @@ fn write_proxmox_wrapper(args: WriteProxmoxWrapperArgs) -> Result<PathBuf> {
     }
     if let Some(bridge_lib) = args.bridge_lib {
         lines.push(format!(
-            "export LD_PRELOAD='{}'",
+            "export OMEGA_BRIDGE_LIB='{}'",
             shell_escape_path(&bridge_lib)
         ));
     }
@@ -759,6 +844,71 @@ fn write_proxmox_wrapper(args: WriteProxmoxWrapperArgs) -> Result<PathBuf> {
     fs::set_permissions(&args.output, perms)
         .with_context(|| format!("chmod +x {}", args.output.display()))?;
     Ok(args.output)
+}
+
+fn doctor(args: DoctorArgs) -> Result<DoctorReport> {
+    let mut checks = Vec::new();
+
+    checks.push(check_path("run_dir_parent", args.run_dir.parent(), true));
+    checks.push(check_userfaultfd());
+
+    if let Some(qemu_bin) = args.qemu_bin {
+        checks.push(check_file("qemu_bin", &qemu_bin, true));
+    }
+    if let Some(agent_bin) = args.agent_bin {
+        checks.push(check_file("agent_bin", &agent_bin, true));
+    } else {
+        checks.push(check_agent_resolvable());
+    }
+    if let Some(bridge_lib) = args.bridge_lib {
+        checks.push(check_file("bridge_lib", &bridge_lib, false));
+    }
+
+    let ok = checks.iter().all(|check| check.ok);
+    Ok(DoctorReport { ok, checks })
+}
+
+fn cleanup(args: CleanupArgs) -> Result<CleanupReport> {
+    let state_path = args
+        .state
+        .state_path
+        .clone()
+        .unwrap_or_else(|| default_state_path(&args.state.run_dir, args.state.vm_id));
+    let vm_dir = default_vm_dir(&args.state.run_dir, args.state.vm_id);
+    let mut stopped_agent = false;
+    let mut removed = Vec::new();
+
+    if state_path.exists() {
+        if let Ok(state) = load_state_from_path(&state_path) {
+            stop_agent(&state, Duration::from_secs(args.timeout_secs)).ok();
+            stopped_agent = true;
+        }
+    }
+
+    let paths = [
+        default_metadata_path(&args.state.run_dir, args.state.vm_id),
+        default_state_path(&args.state.run_dir, args.state.vm_id),
+        vm_dir.join("uffd.sock"),
+    ];
+    for path in paths {
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| format!("suppression {}", path.display()))?;
+            removed.push(path);
+        }
+    }
+
+    let log_path = default_log_path(&args.state.run_dir, args.state.vm_id);
+    if !args.keep_log && log_path.exists() {
+        fs::remove_file(&log_path)
+            .with_context(|| format!("suppression {}", log_path.display()))?;
+        removed.push(log_path);
+    }
+
+    Ok(CleanupReport {
+        vm_id: args.state.vm_id,
+        stopped_agent,
+        removed,
+    })
 }
 
 fn resolve_agent_bin(agent_bin: Option<PathBuf>) -> Result<PathBuf> {
@@ -829,8 +979,14 @@ fn build_qemu_args(
     ])
 }
 
-fn build_omega_object_arg(object_id: &str, size_mib: usize, metadata: &MemoryBackendMetadata) -> Result<String> {
-    let proc_fd_path = metadata.proc_fd_path.as_deref()
+fn build_omega_object_arg(
+    object_id: &str,
+    size_mib: usize,
+    metadata: &MemoryBackendMetadata,
+) -> Result<String> {
+    let proc_fd_path = metadata
+        .proc_fd_path
+        .as_deref()
         .context("proc_fd_path absent des métadonnées — le backend memfd est requis")?;
     Ok(format!(
         "memory-backend-file,id={object_id},size={}M,mem-path={proc_fd_path},share=on",
@@ -854,7 +1010,8 @@ fn inject_omega_qemu_args(
         let current = &qemu_args[idx];
         if current == "-object" {
             if let Some(next) = qemu_args.get(idx + 1) {
-                if next.contains("memory-backend-file") && next.contains(&format!("id={object_id}")) {
+                if next.contains("memory-backend-file") && next.contains(&format!("id={object_id}"))
+                {
                     saw_object = true;
                 }
                 out.push(current.clone());
@@ -1013,6 +1170,16 @@ fn pid_is_running(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+fn state_is_usable(state: &QemuLaunchState) -> bool {
+    if !pid_is_running(state.agent_pid) {
+        return false;
+    }
+    match state.metadata.proc_fd_path.as_deref() {
+        Some(path) => Path::new(path).exists(),
+        None => false,
+    }
+}
+
 fn stop_agent(state: &QemuLaunchState, timeout: Duration) -> Result<()> {
     if !pid_is_running(state.agent_pid) {
         return Ok(());
@@ -1032,7 +1199,10 @@ fn stop_agent(state: &QemuLaunchState, timeout: Duration) -> Result<()> {
         thread::sleep(Duration::from_millis(200));
     }
 
-    bail!("l'agent {} ne s'est pas arrêté dans le délai", state.agent_pid);
+    bail!(
+        "l'agent {} ne s'est pas arrêté dans le délai",
+        state.agent_pid
+    );
 }
 
 fn shell_escape_str(value: &str) -> String {
@@ -1065,6 +1235,127 @@ impl StatusOutput {
             log_path: state.log_path.clone(),
             qemu_args: state.qemu_args.clone(),
         }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    ok: bool,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    ok: bool,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupReport {
+    vm_id: u32,
+    stopped_agent: bool,
+    removed: Vec<PathBuf>,
+}
+
+fn check_file(name: &'static str, path: &Path, executable: bool) -> DoctorCheck {
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => DoctorCheck {
+            name,
+            ok: false,
+            detail: format!("{} existe mais n'est pas un fichier", path.display()),
+        },
+        Ok(meta) if executable && (meta.permissions().mode() & 0o111 == 0) => DoctorCheck {
+            name,
+            ok: false,
+            detail: format!("{} n'est pas exécutable", path.display()),
+        },
+        Ok(_) => DoctorCheck {
+            name,
+            ok: true,
+            detail: path.display().to_string(),
+        },
+        Err(err) => DoctorCheck {
+            name,
+            ok: false,
+            detail: format!("{}: {err}", path.display()),
+        },
+    }
+}
+
+fn check_path(name: &'static str, path: Option<&Path>, writable: bool) -> DoctorCheck {
+    let Some(path) = path else {
+        return DoctorCheck {
+            name,
+            ok: false,
+            detail: "chemin parent absent".into(),
+        };
+    };
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_dir() => DoctorCheck {
+            name,
+            ok: false,
+            detail: format!("{} existe mais n'est pas un répertoire", path.display()),
+        },
+        Ok(meta) if writable && meta.permissions().readonly() => DoctorCheck {
+            name,
+            ok: false,
+            detail: format!("{} n'est pas modifiable", path.display()),
+        },
+        Ok(_) => DoctorCheck {
+            name,
+            ok: true,
+            detail: path.display().to_string(),
+        },
+        Err(err) => DoctorCheck {
+            name,
+            ok: false,
+            detail: format!("{}: {err}", path.display()),
+        },
+    }
+}
+
+fn check_agent_resolvable() -> DoctorCheck {
+    match resolve_agent_bin(None) {
+        Ok(path) => check_file("agent_bin", &path, true),
+        Err(err) => DoctorCheck {
+            name: "agent_bin",
+            ok: false,
+            detail: err.to_string(),
+        },
+    }
+}
+
+fn check_userfaultfd() -> DoctorCheck {
+    let unprivileged = fs::read_to_string("/proc/sys/vm/unprivileged_userfaultfd")
+        .ok()
+        .map(|value| value.trim().to_string());
+    let fd = unsafe { libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd as i32);
+        }
+        return DoctorCheck {
+            name: "userfaultfd",
+            ok: true,
+            detail: format!(
+                "SYS_userfaultfd disponible{}",
+                unprivileged
+                    .map(|v| format!("; unprivileged_userfaultfd={v}"))
+                    .unwrap_or_default()
+            ),
+        };
+    }
+    let err = std::io::Error::last_os_error();
+    DoctorCheck {
+        name: "userfaultfd",
+        ok: false,
+        detail: format!(
+            "SYS_userfaultfd indisponible: {err}{}",
+            unprivileged
+                .map(|v| format!("; /proc/sys/vm/unprivileged_userfaultfd={v}"))
+                .unwrap_or_default()
+        ),
     }
 }
 
@@ -1143,14 +1434,10 @@ mod tests {
             "-m".to_string(),
             "512".to_string(),
         ];
-        let patched = inject_omega_qemu_args(
-            &args,
-            "ram0",
-            512,
-            &meta,
-        )
-        .unwrap();
-        assert!(patched.iter().any(|arg| arg.contains("memory-backend-file,id=ram0")));
+        let patched = inject_omega_qemu_args(&args, "ram0", 512, &meta).unwrap();
+        assert!(patched
+            .iter()
+            .any(|arg| arg.contains("memory-backend-file,id=ram0")));
         assert!(patched
             .windows(2)
             .any(|w| w[0] == "-machine" && w[1].contains("memory-backend=ram0")));
@@ -1171,12 +1458,41 @@ mod tests {
             log_level: "info".into(),
             store_timeout_ms: 2000,
             memfd_name: None,
-            bridge_lib: None,
+            bridge_lib: Some(PathBuf::from("/usr/local/lib/omega-uffd-bridge.so")),
             output: output.clone(),
         })
         .unwrap();
         let shell = fs::read_to_string(path).unwrap();
         assert!(shell.contains("exec-proxmox"));
         assert!(shell.contains("OMEGA_REAL_QEMU_BIN"));
+        assert!(shell.contains("OMEGA_BRIDGE_LIB"));
+        assert!(!shell.contains("export LD_PRELOAD"));
+    }
+
+    #[test]
+    fn cleanup_removes_runtime_files_without_log_when_requested() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let run_dir = tempdir.path();
+        let vm_id = 42;
+        fs::create_dir_all(default_vm_dir(run_dir, vm_id)).unwrap();
+        fs::write(default_metadata_path(run_dir, vm_id), "{}").unwrap();
+        fs::write(default_state_path(run_dir, vm_id), "{}").unwrap();
+        fs::write(default_log_path(run_dir, vm_id), "log").unwrap();
+
+        let report = cleanup(CleanupArgs {
+            state: StateSelector {
+                vm_id,
+                run_dir: run_dir.to_path_buf(),
+                state_path: None,
+            },
+            timeout_secs: 1,
+            keep_log: true,
+        })
+        .unwrap();
+
+        assert_eq!(report.vm_id, vm_id);
+        assert!(!default_metadata_path(run_dir, vm_id).exists());
+        assert!(!default_state_path(run_dir, vm_id).exists());
+        assert!(default_log_path(run_dir, vm_id).exists());
     }
 }

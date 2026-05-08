@@ -7,7 +7,10 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
+VM_CORES=$(vm_cores "$VMID");     VM_CORES="${VM_CORES:-4}"
 
 header "Test M1 — Mixte RAM + CPU (VM $VMID)"
 print_cluster_config
@@ -33,13 +36,13 @@ _TMPFILES+=("$LOG")
     --stores "$STORES_CSV" \
     --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
-    --vm-requested-mib 4096 \
-    --region-mib 4096 \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     --current-node "$COMPUTE_NODE" \
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 32 \
     --eviction-interval-secs 3 \
-    --vm-vcpus 8 \
+    --vm-vcpus "$VM_CORES" \
     --vm-initial-vcpus 1 \
     --vcpu-high-threshold-pct 60 \
     --vcpu-low-threshold-pct 20 \

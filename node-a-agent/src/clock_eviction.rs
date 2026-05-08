@@ -36,38 +36,46 @@ use tracing::{debug, trace};
 #[derive(Debug, Clone)]
 pub struct PageMeta {
     /// Bit d'accès pour l'algorithme CLOCK (1 = accédée récemment)
-    pub access_bit:    bool,
+    pub access_bit: bool,
     /// Timestamp du dernier accès (fault ou write-protect)
-    pub last_access:   Instant,
+    pub last_access: Instant,
     /// Nombre de fois que la page a été évinvée
     pub eviction_count: u32,
     /// La page est-elle actuellement sur un store distant ?
-    pub is_remote:     bool,
+    pub is_remote: bool,
 }
 
 impl Default for PageMeta {
     fn default() -> Self {
         Self {
-            access_bit:     true,  // nouvelle page = considérée récente
-            last_access:    Instant::now(),
+            access_bit: true, // nouvelle page = considérée récente
+            last_access: Instant::now(),
             eviction_count: 0,
-            is_remote:      false,
+            is_remote: false,
         }
     }
 }
 
 /// Anneau CLOCK avec lookup O(1).
 struct ClockRingInner {
-    deque:   VecDeque<u64>,
+    deque: VecDeque<u64>,
     present: HashSet<u64>,
 }
 
 impl ClockRingInner {
     fn with_capacity(cap: usize) -> Self {
-        Self { deque: VecDeque::with_capacity(cap), present: HashSet::with_capacity(cap) }
+        Self {
+            deque: VecDeque::with_capacity(cap),
+            present: HashSet::with_capacity(cap),
+        }
     }
-    fn contains(&self, id: u64) -> bool { self.present.contains(&id) }
-    fn push_back(&mut self, id: u64) { self.deque.push_back(id); self.present.insert(id); }
+    fn contains(&self, id: u64) -> bool {
+        self.present.contains(&id)
+    }
+    fn push_back(&mut self, id: u64) {
+        self.deque.push_back(id);
+        self.present.insert(id);
+    }
     fn pop_front(&mut self) -> Option<u64> {
         let id = self.deque.pop_front()?;
         self.present.remove(&id);
@@ -82,7 +90,9 @@ impl ClockRingInner {
         self.deque.retain(|&x| x != id);
         self.present.remove(&id);
     }
-    fn len(&self) -> usize { self.deque.len() }
+    fn len(&self) -> usize {
+        self.deque.len()
+    }
 }
 
 /// Gestionnaire d'éviction CLOCK.
@@ -90,31 +100,32 @@ impl ClockRingInner {
 /// Maintient un anneau circulaire de `num_pages` slots avec le bit d'accès.
 pub struct ClockEvictor {
     /// Métadonnées par page_id
-    pub meta:   Arc<DashMap<u64, PageMeta>>,
+    pub meta: Arc<DashMap<u64, PageMeta>>,
     /// Ordre circulaire des pages présentes localement (anneau CLOCK)
     clock_ring: Mutex<ClockRingInner>,
     /// Délai minimal avant qu'une page puisse être évinvée après son accès
-    min_age:    Duration,
-    num_pages:  usize,
+    min_age: Duration,
 }
 
 impl ClockEvictor {
     pub fn new(num_pages: usize, min_age_secs: u64) -> Self {
         Self {
-            meta:       Arc::new(DashMap::new()),
+            meta: Arc::new(DashMap::new()),
             clock_ring: Mutex::new(ClockRingInner::with_capacity(num_pages)),
-            min_age:    Duration::from_secs(min_age_secs),
-            num_pages,
+            min_age: Duration::from_secs(min_age_secs),
         }
     }
 
     /// Enregistre une page comme présente localement.
     pub fn mark_present(&self, page_id: u64) {
-        self.meta.entry(page_id).and_modify(|m| {
-            m.access_bit = true;
-            m.last_access = Instant::now();
-            m.is_remote  = false;
-        }).or_insert_with(PageMeta::default);
+        self.meta
+            .entry(page_id)
+            .and_modify(|m| {
+                m.access_bit = true;
+                m.last_access = Instant::now();
+                m.is_remote = false;
+            })
+            .or_insert_with(PageMeta::default);
 
         let mut ring = self.clock_ring.lock().unwrap();
         if !ring.contains(page_id) {
@@ -134,7 +145,7 @@ impl ClockEvictor {
     /// Marque la page comme distante (après éviction).
     pub fn mark_remote(&self, page_id: u64) {
         if let Some(mut meta) = self.meta.get_mut(&page_id) {
-            meta.is_remote      = true;
+            meta.is_remote = true;
             meta.eviction_count += 1;
         }
         // Retirer de l'anneau
@@ -146,9 +157,9 @@ impl ClockEvictor {
     ///
     /// Retourne les page_ids à évincer (dans l'ordre de priorité).
     pub fn select_victims(&self, count: usize) -> Vec<u64> {
-        let mut ring    = self.clock_ring.lock().unwrap();
+        let mut ring = self.clock_ring.lock().unwrap();
         let mut victims = Vec::with_capacity(count);
-        let ring_len    = ring.len();
+        let ring_len = ring.len();
 
         if ring_len == 0 || count == 0 {
             return victims;
@@ -156,22 +167,22 @@ impl ClockEvictor {
 
         // Un seul tour : les pages chaudes ont leur bit vidé et survivent jusqu'au prochain appel.
         let max_iterations = ring_len;
-        let mut iters      = 0;
+        let mut iters = 0;
 
         while victims.len() < count && iters < max_iterations {
             iters += 1;
 
             let page_id = match ring.deque.front().copied() {
                 Some(p) => p,
-                None    => break,
+                None => break,
             };
 
             // Vérifier si la page a le bit d'accès ou est trop jeune
-            let evictable = self.meta.get(&page_id).map(|m| {
-                !m.access_bit
-                && m.last_access.elapsed() >= self.min_age
-                && !m.is_remote
-            }).unwrap_or(false);
+            let evictable = self
+                .meta
+                .get(&page_id)
+                .map(|m| !m.access_bit && m.last_access.elapsed() >= self.min_age && !m.is_remote)
+                .unwrap_or(false);
 
             if evictable {
                 ring.pop_front();
@@ -188,8 +199,8 @@ impl ClockEvictor {
         }
 
         debug!(
-            found    = victims.len(),
-            wanted   = count,
+            found = victims.len(),
+            wanted = count,
             ring_len = ring_len,
             iters,
             "CLOCK select_victims terminé"
@@ -203,10 +214,10 @@ impl ClockEvictor {
         self.clock_ring.lock().unwrap().len()
     }
 
-
     /// Snapshot des métadonnées pour les métriques.
     pub fn cold_pages_count(&self) -> usize {
-        self.meta.iter()
+        self.meta
+            .iter()
             .filter(|e| !e.access_bit && !e.is_remote)
             .count()
     }
@@ -217,7 +228,6 @@ impl ClockEvictor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_clock_basic_eviction() {
@@ -246,7 +256,11 @@ mod tests {
         let victims = evictor.select_victims(1);
         // La page a le bit d'accès — elle ne doit pas être évinvée au premier tour
         // (CLOCK lui donne une seconde chance)
-        assert_eq!(victims.len(), 0, "page récente ne doit pas être évinvée immédiatement");
+        assert_eq!(
+            victims.len(),
+            0,
+            "page récente ne doit pas être évinvée immédiatement"
+        );
     }
 
     #[test]

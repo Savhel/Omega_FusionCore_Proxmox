@@ -16,7 +16,9 @@ fn main() {
         println!("cargo:rustc-link-search=native={lib_dir}");
         println!("cargo:rustc-link-lib=rados");
         println!("cargo:rustc-cfg=ceph_detected");
-        println!("cargo:warning=librados détecté dans {lib_dir} — backend Ceph activé automatiquement");
+        println!(
+            "cargo:warning=librados détecté dans {lib_dir} — backend Ceph activé automatiquement"
+        );
     } else {
         println!(
             "cargo:warning=librados absent — backend RAM uniquement \
@@ -48,7 +50,8 @@ fn probe_librados() -> Option<String> {
     if let Ok(path) = std::env::var("LIBRADOS_PATH") {
         let p = std::path::Path::new(&path);
         if p.exists() {
-            return p.parent()
+            return p
+                .parent()
                 .map(|d| d.to_string_lossy().into_owned())
                 .or(Some(path));
         }

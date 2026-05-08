@@ -40,37 +40,37 @@ use crate::cpu_cgroup::{CgroupCpuController, VmCpuStat};
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 /// Intervalle de polling : 1 ms.
-pub const POLL_INTERVAL_MS:   u64   = 1;
+pub const POLL_INTERVAL_MS: u64 = 1;
 /// Taille de la fenêtre glissante (100 échantillons × 1 ms = 100 ms).
-pub const WINDOW_SIZE:        usize = 100;
+pub const WINDOW_SIZE: usize = 100;
 /// Seuil d'usage vCPU déclenchant on_pressure (%).
-pub const USAGE_THRESHOLD:    f64   = 80.0;
+pub const USAGE_THRESHOLD: f64 = 80.0;
 /// Taux de throttling déclenchant on_pressure (0.0–1.0).
-pub const THROTTLE_THRESHOLD: f64   = 0.10;
+pub const THROTTLE_THRESHOLD: f64 = 0.10;
 
 // ─── Événement de pression ────────────────────────────────────────────────────
 
 /// Signale qu'une VM dépasse les seuils de pression CPU.
 #[derive(Debug, Clone)]
 pub struct CpuPressureEvent {
-    pub vm_id:            u32,
-    pub avg_usage_pct:    f64, // % moyen sur 100 ms
-    pub max_usage_pct:    f64, // pic sur 100 ms
-    pub avg_throttle:     f64, // taux de throttling moyen sur 100 ms
+    pub vm_id: u32,
+    pub avg_usage_pct: f64, // % moyen sur 100 ms
+    pub max_usage_pct: f64, // pic sur 100 ms
+    pub avg_throttle: f64,  // taux de throttling moyen sur 100 ms
 }
 
 // ─── Fenêtre glissante par VM ─────────────────────────────────────────────────
 
 struct SlidingWindow {
-    usage_pcts:    VecDeque<f64>,
+    usage_pcts: VecDeque<f64>,
     throttle_rates: VecDeque<f64>,
-    capacity:      usize,
+    capacity: usize,
 }
 
 impl SlidingWindow {
     fn new(capacity: usize) -> Self {
         Self {
-            usage_pcts:     VecDeque::with_capacity(capacity),
+            usage_pcts: VecDeque::with_capacity(capacity),
             throttle_rates: VecDeque::with_capacity(capacity),
             capacity,
         }
@@ -85,10 +85,14 @@ impl SlidingWindow {
         self.throttle_rates.push_back(throttle_ratio);
     }
 
-    fn is_full(&self) -> bool { self.usage_pcts.len() >= self.capacity }
+    fn is_full(&self) -> bool {
+        self.usage_pcts.len() >= self.capacity
+    }
 
     fn avg_usage(&self) -> f64 {
-        if self.usage_pcts.is_empty() { return 0.0; }
+        if self.usage_pcts.is_empty() {
+            return 0.0;
+        }
         self.usage_pcts.iter().sum::<f64>() / self.usage_pcts.len() as f64
     }
 
@@ -97,7 +101,9 @@ impl SlidingWindow {
     }
 
     fn avg_throttle(&self) -> f64 {
-        if self.throttle_rates.is_empty() { return 0.0; }
+        if self.throttle_rates.is_empty() {
+            return 0.0;
+        }
         self.throttle_rates.iter().sum::<f64>() / self.throttle_rates.len() as f64
     }
 }
@@ -108,13 +114,15 @@ impl SlidingWindow {
 ///
 /// `usage_usec` est cumulatif — on calcule le delta / temps écoulé.
 fn compute_usage_pct(curr: &VmCpuStat, prev: &VmCpuStat) -> f64 {
-    let delta_cpu  = curr.usage_usec.saturating_sub(prev.usage_usec) as f64;
+    let delta_cpu = curr.usage_usec.saturating_sub(prev.usage_usec) as f64;
     let delta_wall = (curr.usage_pct - prev.usage_pct).abs(); // repurposé ci-dessous
 
     // On utilise les timestamps implicites (les stats sont lues à ~1 ms d'intervalle)
     // elapsed ≈ POLL_INTERVAL_MS * 1000 µs
     let elapsed_us = (POLL_INTERVAL_MS * 1_000) as f64;
-    if elapsed_us <= 0.0 { return 0.0; }
+    if elapsed_us <= 0.0 {
+        return 0.0;
+    }
     let _ = delta_wall; // non utilisé ici — usage_pct sera recalculé proprement
     (delta_cpu / elapsed_us) * 100.0
 }
@@ -125,25 +133,25 @@ fn compute_usage_pct(curr: &VmCpuStat, prev: &VmCpuStat) -> f64 {
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
     /// Intervalle de polling en ms (défaut : 1).
-    pub poll_interval_ms:  u64,
+    pub poll_interval_ms: u64,
     /// Taille de la fenêtre glissante (défaut : 100).
-    pub window_size:       usize,
+    pub window_size: usize,
     /// Seuil d'usage vCPU pour émettre un événement (défaut : 80.0).
-    pub usage_threshold:   f64,
+    pub usage_threshold: f64,
     /// Seuil de throttling pour émettre un événement (défaut : 0.10).
     pub throttle_threshold: f64,
     /// Capacité du canal mpsc (défaut : 64).
-    pub channel_capacity:  usize,
+    pub channel_capacity: usize,
 }
 
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
-            poll_interval_ms:  POLL_INTERVAL_MS,
-            window_size:       WINDOW_SIZE,
-            usage_threshold:   USAGE_THRESHOLD,
+            poll_interval_ms: POLL_INTERVAL_MS,
+            window_size: WINDOW_SIZE,
+            usage_threshold: USAGE_THRESHOLD,
             throttle_threshold: THROTTLE_THRESHOLD,
-            channel_capacity:  64,
+            channel_capacity: 64,
         }
     }
 }
@@ -154,15 +162,15 @@ impl Default for MonitorConfig {
 /// Les événements de pression sont envoyés via le `Receiver` retourné.
 pub struct CgroupCpuMonitor {
     controller: CgroupCpuController,
-    config:     MonitorConfig,
-    tx:         mpsc::Sender<CpuPressureEvent>,
+    config: MonitorConfig,
+    tx: mpsc::Sender<CpuPressureEvent>,
 }
 
 impl CgroupCpuMonitor {
     /// Crée le monitor et retourne le canal de réception des événements.
     pub fn new(config: MonitorConfig) -> (Self, mpsc::Receiver<CpuPressureEvent>) {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
-        let monitor  = Self {
+        let monitor = Self {
             controller: CgroupCpuController::new(),
             config,
             tx,
@@ -177,11 +185,11 @@ impl CgroupCpuMonitor {
 
     async fn run(self) {
         let interval_dur = Duration::from_millis(self.config.poll_interval_ms);
-        let mut ticker   = time::interval(interval_dur);
+        let mut ticker = time::interval(interval_dur);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        let mut windows:    HashMap<u32, SlidingWindow> = HashMap::new();
-        let mut prev_stats: HashMap<u32, VmCpuStat>     = HashMap::new();
+        let mut windows: HashMap<u32, SlidingWindow> = HashMap::new();
+        let mut prev_stats: HashMap<u32, VmCpuStat> = HashMap::new();
         // rate-limit : une seule émission par fenêtre (100 ms) par VM
         let mut last_event: HashMap<u32, std::time::Instant> = HashMap::new();
         let rate_limit_dur = interval_dur * self.config.window_size as u32;
@@ -196,10 +204,12 @@ impl CgroupCpuMonitor {
             }
 
             for vm_id in vm_ids {
-                let Some(stat) = self.controller.read_cpu_stat(vm_id) else { continue };
+                let Some(stat) = self.controller.read_cpu_stat(vm_id) else {
+                    continue;
+                };
 
                 if let Some(prev) = prev_stats.get(&vm_id) {
-                    let usage_pct     = compute_usage_pct(&stat, prev);
+                    let usage_pct = compute_usage_pct(&stat, prev);
                     let throttle_rate = stat.throttle_ratio();
 
                     let window = windows
@@ -209,11 +219,13 @@ impl CgroupCpuMonitor {
 
                     // Émettre uniquement quand la fenêtre est pleine (100 ms de données)
                     if window.is_full() {
-                        let avg_usage    = window.avg_usage();
+                        let avg_usage = window.avg_usage();
                         let avg_throttle = window.avg_throttle();
 
                         let now = std::time::Instant::now();
-                        let last = last_event.get(&vm_id).copied()
+                        let last = last_event
+                            .get(&vm_id)
+                            .copied()
                             .unwrap_or(std::time::Instant::now() - rate_limit_dur * 2);
 
                         if (avg_usage >= self.config.usage_threshold
@@ -228,8 +240,8 @@ impl CgroupCpuMonitor {
                             };
                             debug!(
                                 vm_id,
-                                avg_usage_pct  = format!("{:.1}", avg_usage),
-                                avg_throttle   = format!("{:.3}", avg_throttle),
+                                avg_usage_pct = format!("{:.1}", avg_usage),
+                                avg_throttle = format!("{:.3}", avg_throttle),
                                 "pression CPU détectée"
                             );
                             // try_send : non-bloquant — on lâche si le canal est plein

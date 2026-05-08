@@ -5,7 +5,10 @@
 
 source "$(dirname "$0")/lib.sh"
 
-header "Test 1 — Smoke test local"
+VMID="${TEST_VMIDS_ARR[0]:-$TEST_VMID}"
+VM_RAM_MIB=$(vm_ram_mib "$VMID" 2>/dev/null || echo ""); VM_RAM_MIB="${VM_RAM_MIB:-512}"
+
+header "Test 1 — Smoke test (VM $VMID, ${VM_RAM_MIB} MiB)"
 
 require_omega_bins
 
@@ -21,7 +24,7 @@ fi
 pass "userfaultfd OK"
 
 step "Démarrage du store"
-start_store "smoke" 9100 9200
+start_store "smoke" "$STORE_PORT" "$STATUS_PORT"
 
 step "Exécution agent en mode demo"
 LOG="/tmp/omega-agent-smoke.log"
@@ -29,10 +32,10 @@ _TMPFILES+=("$LOG")
 t0=$SECONDS
 
 output=$("$AGENT_BIN" \
-    --stores "127.0.0.1:9100" \
-    --vm-id 1 \
-    --vm-requested-mib 64 \
-    --region-mib 64 \
+    --stores "127.0.0.1:$STORE_PORT" \
+    --vm-id "$VMID" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
     --mode demo 2>&1) || true
 
 echo "$output"
@@ -47,8 +50,8 @@ errors=$(echo "$output" | grep -oP 'errors=\K[0-9]+' | head -1)
 [[ "${errors:-0}" -eq 0 ]] || fail "$errors erreurs d'intégrité détectées"
 
 step "Vérification status store"
-wait_http "http://127.0.0.1:9200/status" 5
-pages=$(curl -sf "http://127.0.0.1:9200/status" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('page_count',0))")
+wait_http "http://127.0.0.1:$STATUS_PORT/status" 5
+pages=$(curl -sf "http://127.0.0.1:$STATUS_PORT/status" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('page_count',0))")
 info "pages stockées dans le store : $pages"
 
 pass "smoke test OK ($(elapsed $t0)s) — integrity_ok=true, errors=0"

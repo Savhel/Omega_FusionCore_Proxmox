@@ -54,7 +54,7 @@ fn scheduler_lock_path(pci_id: &str) -> String {
 
 pub struct GpuScheduler {
     /// Adresse PCI du GPU partagé, ex: "0000:02:00.0"
-    gpu_pci_id:   String,
+    gpu_pci_id: String,
     /// Temps alloué par VM avant rotation (secondes)
     quantum_secs: u64,
     /// Nœud courant (pour filtrer les VMs locales via pvesh)
@@ -63,7 +63,11 @@ pub struct GpuScheduler {
 
 impl GpuScheduler {
     pub fn new(gpu_pci_id: String, quantum_secs: u64, current_node: String) -> Self {
-        Self { gpu_pci_id, quantum_secs, current_node }
+        Self {
+            gpu_pci_id,
+            quantum_secs,
+            current_node,
+        }
     }
 
     /// Lance le scheduler.
@@ -78,7 +82,7 @@ impl GpuScheduler {
             .write(true)
             .open(&lock_path)
         {
-            Ok(f)  => f,
+            Ok(f) => f,
             Err(e) => {
                 warn!(error = %e, path = %lock_path, "impossible d'ouvrir le lock scheduler GPU");
                 return;
@@ -86,9 +90,7 @@ impl GpuScheduler {
         };
 
         // LOCK_EX | LOCK_NB : échoue immédiatement si un autre process tient le lock
-        let ret = unsafe {
-            libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-        };
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if ret != 0 {
             info!(
                 pci          = %self.gpu_pci_id,
@@ -117,10 +119,12 @@ impl GpuScheduler {
         let mut rr_idx = 0usize;
 
         loop {
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
 
             let gpu_vms = match self.list_gpu_vms_on_node().await {
-                Ok(v)  => v,
+                Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, "liste VMs GPU échouée — retry dans 10 s");
                     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -146,7 +150,7 @@ impl GpuScheduler {
             // Round-robin sur la liste courante
             rr_idx = rr_idx % gpu_vms.len();
             let vmid = gpu_vms[rr_idx];
-            rr_idx  += 1;
+            rr_idx += 1;
 
             info!(
                 vmid       = vmid,
@@ -175,7 +179,7 @@ impl GpuScheduler {
         // 1. Détacher des VMs qui ont actuellement le GPU (sauf la cible)
         for &vmid in gpu_vms.iter().filter(|&&v| v != target_vmid) {
             match self.qmp_device_del(vmid, "hostpci0").await {
-                Ok(_)  => debug!(vmid, "GPU détaché"),
+                Ok(_) => debug!(vmid, "GPU détaché"),
                 Err(e) => debug!(vmid, error = %e, "device_del : GPU peut-être déjà absent"),
             }
         }
@@ -184,7 +188,8 @@ impl GpuScheduler {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // 3. Attacher à la VM cible
-        self.qmp_device_add(target_vmid, &self.gpu_pci_id, "hostpci0").await
+        self.qmp_device_add(target_vmid, &self.gpu_pci_id, "hostpci0")
+            .await
     }
 
     // ── QMP ───────────────────────────────────────────────────────────────────
@@ -196,8 +201,10 @@ impl GpuScheduler {
         });
         let resp = self.qmp_execute(vmid, &cmd).await?;
         if let Some(err) = resp.get("error") {
-            bail!("device_del {device_id} VM {vmid} : {}",
-                err["desc"].as_str().unwrap_or("?"));
+            bail!(
+                "device_del {device_id} VM {vmid} : {}",
+                err["desc"].as_str().unwrap_or("?")
+            );
         }
         debug!(vmid, device = device_id, "QMP device_del OK");
         Ok(())
@@ -215,8 +222,10 @@ impl GpuScheduler {
         });
         let resp = self.qmp_execute(vmid, &cmd).await?;
         if let Some(err) = resp.get("error") {
-            bail!("device_add {pci_id} VM {vmid} : {}",
-                err["desc"].as_str().unwrap_or("?"));
+            bail!(
+                "device_add {pci_id} VM {vmid} : {}",
+                err["desc"].as_str().unwrap_or("?")
+            );
         }
         debug!(vmid, pci = pci_id, device = device_id, "QMP device_add OK");
         Ok(())
@@ -231,25 +240,27 @@ impl GpuScheduler {
     async fn qmp_execute(&self, vmid: u32, cmd: &serde_json::Value) -> Result<serde_json::Value> {
         let socket_path = qmp_socket_path(vmid);
 
-        let stream = tokio::time::timeout(
-            Duration::from_secs(3),
-            UnixStream::connect(&socket_path),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("timeout connexion QMP {socket_path}"))?
-        .map_err(|e| anyhow::anyhow!("connexion QMP {socket_path} : {e}"))?;
+        let stream =
+            tokio::time::timeout(Duration::from_secs(3), UnixStream::connect(&socket_path))
+                .await
+                .map_err(|_| anyhow::anyhow!("timeout connexion QMP {socket_path}"))?
+                .map_err(|e| anyhow::anyhow!("connexion QMP {socket_path} : {e}"))?;
 
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
 
         // 1. Greeting
-        lines.next_line().await?
+        lines
+            .next_line()
+            .await?
             .ok_or_else(|| anyhow::anyhow!("QMP : greeting absent de {socket_path}"))?;
 
         // 2. Capabilities
         let caps = format!("{}\n", serde_json::json!({"execute": "qmp_capabilities"}));
         writer.write_all(caps.as_bytes()).await?;
-        lines.next_line().await?
+        lines
+            .next_line()
+            .await?
             .ok_or_else(|| anyhow::anyhow!("QMP : ack capabilities absent"))?;
 
         // 3. Commande
@@ -258,14 +269,11 @@ impl GpuScheduler {
 
         // Lire en ignorant les événements async (clé "event") jusqu'à "return"/"error"
         loop {
-            let line = tokio::time::timeout(
-                Duration::from_secs(5),
-                lines.next_line(),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("QMP : timeout lecture réponse {socket_path}"))?
-            .map_err(|e| anyhow::anyhow!("QMP : erreur lecture : {e}"))?
-            .ok_or_else(|| anyhow::anyhow!("QMP : connexion fermée avant réponse"))?;
+            let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+                .await
+                .map_err(|_| anyhow::anyhow!("QMP : timeout lecture réponse {socket_path}"))?
+                .map_err(|e| anyhow::anyhow!("QMP : erreur lecture : {e}"))?
+                .ok_or_else(|| anyhow::anyhow!("QMP : connexion fermée avant réponse"))?;
 
             let val: serde_json::Value = serde_json::from_str(&line)
                 .map_err(|e| anyhow::anyhow!("QMP : JSON invalide '{line}' : {e}"))?;
@@ -290,7 +298,8 @@ impl GpuScheduler {
             .args([
                 "get",
                 &format!("/nodes/{}/qemu", self.current_node),
-                "--output-format", "json",
+                "--output-format",
+                "json",
             ])
             .output()
             .await?;
@@ -303,16 +312,22 @@ impl GpuScheduler {
             );
         }
 
-        let arr: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout)
-            .unwrap_or_default();
+        let arr: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
 
-        let vmids = arr.iter().filter_map(|item| {
-            let vmid      = item["vmid"].as_u64()? as u32;
-            let status    = item["status"].as_str().unwrap_or("");
-            let tags      = item["tags"].as_str().unwrap_or("");
-            let needs_gpu = tags.split(';').any(|t| t.trim() == GPU_TAG);
-            if status == "running" && needs_gpu { Some(vmid) } else { None }
-        }).collect();
+        let vmids = arr
+            .iter()
+            .filter_map(|item| {
+                let vmid = item["vmid"].as_u64()? as u32;
+                let status = item["status"].as_str().unwrap_or("");
+                let tags = item["tags"].as_str().unwrap_or("");
+                let needs_gpu = tags.split(';').any(|t| t.trim() == GPU_TAG);
+                if status == "running" && needs_gpu {
+                    Some(vmid)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         Ok(vmids)
     }
@@ -326,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_qmp_socket_path() {
-        assert_eq!(qmp_socket_path(100),  "/var/run/qemu-server/100.qmp");
+        assert_eq!(qmp_socket_path(100), "/var/run/qemu-server/100.qmp");
         assert_eq!(qmp_socket_path(9001), "/var/run/qemu-server/9001.qmp");
     }
 
@@ -334,7 +349,10 @@ mod tests {
     fn test_scheduler_lock_path_no_special_chars() {
         let path = scheduler_lock_path("0000:02:00.0");
         // La portion PCI ne doit pas contenir ':' ou '.' (remplacés par '-')
-        assert!(!path.contains(':'), "les ':' doivent être remplacés dans le chemin");
+        assert!(
+            !path.contains(':'),
+            "les ':' doivent être remplacés dans le chemin"
+        );
         // Le fichier se termine par .lock (seul '.' autorisé dans le chemin)
         assert!(path.ends_with(".lock"));
         assert!(path.contains("0000-02-00-0"));
@@ -355,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_gpu_tag_filter_in_vm_list() {
-        let tagged     = "web;omega-gpu;db";
+        let tagged = "web;omega-gpu;db";
         let not_tagged = "web;production";
         assert!(tagged.split(';').any(|t| t.trim() == GPU_TAG));
         assert!(!not_tagged.split(';').any(|t| t.trim() == GPU_TAG));
@@ -383,8 +401,8 @@ mod tests {
             }
         });
         assert_eq!(cmd["arguments"]["driver"], "vfio-pci");
-        assert_eq!(cmd["arguments"]["host"],   "0000:02:00.0");
-        assert_eq!(cmd["arguments"]["bus"],    "pcie.0");
+        assert_eq!(cmd["arguments"]["host"], "0000:02:00.0");
+        assert_eq!(cmd["arguments"]["bus"], "pcie.0");
     }
 
     #[test]
@@ -400,11 +418,7 @@ mod tests {
         // pas de sysfs reset explicite, pas de module externe requis.
         // Ce test documente l'invariant : assign_gpu_to ne doit pas
         // appeler de commande externe entre device_del et device_add.
-        let _scheduler = GpuScheduler::new(
-            "0000:02:00.0".into(),
-            30,
-            "pve1".into(),
-        );
+        let _scheduler = GpuScheduler::new("0000:02:00.0".into(), 30, "pve1".into());
         // Si reset_gpu() existait encore, la compilation échouerait ici.
     }
 }

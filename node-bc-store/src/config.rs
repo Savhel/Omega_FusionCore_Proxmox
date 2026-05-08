@@ -43,7 +43,6 @@ pub struct Config {
     pub store_data_path: String,
 
     // ─── Ceph RADOS (auto-détecté — aucune activation manuelle requise) ───────
-
     /// Chemin du fichier de configuration Ceph.
     #[arg(long, default_value = "/etc/ceph/ceph.conf", env = "STORE_CEPH_CONF")]
     pub ceph_conf: String,
@@ -57,7 +56,6 @@ pub struct Config {
     pub ceph_user: String,
 
     // ─── TLS (chiffrement du canal de paging) ────────────────────────────────
-
     /// Active le chiffrement TLS sur le canal de paging TCP (port 9100).
     /// Le certificat est auto-signé et auto-généré au premier démarrage.
     #[arg(long, default_value_t = false, env = "STORE_TLS_ENABLED")]
@@ -68,7 +66,6 @@ pub struct Config {
     pub tls_dir: String,
 
     // ─── Nettoyage des pages orphelines ──────────────────────────────────────
-
     /// Intervalle (secondes) entre deux passes de détection d'orphelins.
     /// 0 = désactivé.
     #[arg(long, default_value_t = 300, env = "STORE_ORPHAN_CHECK_INTERVAL_SECS")]

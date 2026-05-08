@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lance tous les tests sur cluster Proxmox (virtuel ou physique)
-# Usage : ./run-cluster.sh [vmid] [--gpu] [--ceph] [--skip M3,M7] [--drain-node 10.10.0.11]
+# Usage : ./run-cluster.sh [vmid] [--gpu] [--ceph] [--long] [--destructive] [--skip M3,M7] [--drain-node 10.10.0.11]
 #
 # Variables d'environnement :
 #   OMEGA_NODES=10.10.0.11,10.10.0.12,10.10.0.13   — tous les nœuds (N >= 2)
@@ -17,7 +17,7 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"; shift || true
-DO_GPU=false; DO_CEPH=false
+DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_DESTRUCTIVE=false
 SKIP_LIST="${OMEGA_SKIP:-}"
 DRAIN_NODE=""
 
@@ -25,6 +25,8 @@ for arg in "$@"; do
     case $arg in
         --gpu)          DO_GPU=true ;;
         --ceph)         DO_CEPH=true ;;
+        --long)         DO_LONG=true ;;
+        --destructive)  DO_DESTRUCTIVE=true ;;
         --skip=*)       SKIP_LIST="${arg#--skip=}" ;;
         --drain-node=*) DRAIN_NODE="${arg#--drain-node=}" ;;
     esac
@@ -33,6 +35,34 @@ done
 DRAIN_NODE="${DRAIN_NODE:-$CONTROLLER_NODE}"
 
 should_skip() { [[ ",$SKIP_LIST," == *",$1,"* ]]; }
+
+quote_args() {
+    printf ' %q' "$@"
+}
+
+remote_env() {
+    printf '%q=%q ' OMEGA_NODES "$OMEGA_NODES"
+    printf '%q=%q ' OMEGA_CONTROLLER "${OMEGA_CONTROLLER:-$CONTROLLER_NODE}"
+    printf '%q=%q ' OMEGA_TEST_VMID "$VMID"
+    printf '%q=%q ' OMEGA_TEST_VMIDS "${OMEGA_TEST_VMIDS:-$VMID}"
+    printf '%q=%q ' OMEGA_BIN_DIR "$REMOTE_BINS_DIR"
+    printf '%q=%q ' OMEGA_REMOTE_BIN_DIR "$REMOTE_BINS_DIR"
+    printf '%q=%q ' OMEGA_STORE_PORT "$STORE_PORT"
+    printf '%q=%q ' OMEGA_STATUS_PORT "$STATUS_PORT"
+    printf '%q=%q ' OMEGA_METRICS_PORT "$METRICS_PORT"
+    printf '%q=%q ' DEPLOY_USER "$DEPLOY_USER"
+    printf '%q=%q ' VMID "$VMID"
+    printf '%q=%q ' CLUSTER_MODE "1"
+    $DO_DESTRUCTIVE && printf '%q=%q ' OMEGA_DESTRUCTIVE "1"
+    $DO_LONG && printf '%q=%q ' OMEGA_SOAK_SECS "${OMEGA_SOAK_SECS:-1800}"
+}
+
+rsync_ssh_cmd() {
+    printf 'ssh'
+    for opt in "${SSH_OPTS[@]}"; do
+        printf ' %q' "$opt"
+    done
+}
 
 TESTS_DIR="$(dirname "$0")"
 PASS=0; FAIL=0; SKIP=0
@@ -44,12 +74,12 @@ REMOTE_BINS_DIR="/tmp/omega-tests-bins"
 
 sync_to_controller() {
     info "Synchronisation vers ${CONTROLLER_NODE}..."
-    rsync -aq --delete "${TESTS_DIR}/" "root@${CONTROLLER_NODE}:${REMOTE_TESTS_DIR}/"
-    ssh -o ConnectTimeout=5 "root@${CONTROLLER_NODE}" "mkdir -p ${REMOTE_BINS_DIR}"
+    rsync -aq -e "$(rsync_ssh_cmd)" --delete "${TESTS_DIR}/" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_TESTS_DIR}/"
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" "mkdir -p ${REMOTE_BINS_DIR}"
     for bin in node-a-agent node-bc-store; do
         local local_bin="${REPO_ROOT}/target/release/${bin}"
         if [[ -x "$local_bin" ]]; then
-            rsync -aq "$local_bin" "root@${CONTROLLER_NODE}:${REMOTE_BINS_DIR}/${bin}"
+            rsync -aq -e "$(rsync_ssh_cmd)" "$local_bin" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_BINS_DIR}/${bin}"
         fi
     done
     pass "scripts + binaires synchronisés sur ${CONTROLLER_NODE}"
@@ -97,13 +127,10 @@ run_test_on_node() {
     local exit_code=0
     local remote_script="${REMOTE_TESTS_DIR}/$(basename "$script")"
     # Passer les arguments en chaîne (pas de tableaux via SSH)
-    local args_str="$*"
-    ssh -o ConnectTimeout=10 -o BatchMode=yes "root@${CONTROLLER_NODE}" \
-        "OMEGA_NODES='${OMEGA_NODES}' \
-         OMEGA_CONTROLLER='${OMEGA_CONTROLLER}' \
-         OMEGA_TEST_VMID='${VMID}' \
-         OMEGA_BIN_DIR='${REMOTE_BINS_DIR}' \
-         bash '${remote_script}' ${args_str}" \
+    local args_str
+    args_str="$(quote_args "$@")"
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+        "$(remote_env) bash $(printf '%q' "$remote_script")${args_str}" \
         || exit_code=$?
     if [[ $exit_code -eq 0 ]]; then
         RESULTS+=("${GREEN}PASS${RESET}  $num $name [remote] ($(( SECONDS - t0 ))s)")
@@ -133,22 +160,19 @@ run_test_on_node_isolated() {
     t0=$SECONDS
 
     # Stopper omega-daemon pour libérer 9100-9202
-    ssh -o ConnectTimeout=5 "root@${CONTROLLER_NODE}" \
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "systemctl stop omega-daemon 2>/dev/null || true" || true
 
     local exit_code=0
     local remote_script="${REMOTE_TESTS_DIR}/$(basename "$script")"
-    local args_str="$*"
-    ssh -o ConnectTimeout=10 -o BatchMode=yes "root@${CONTROLLER_NODE}" \
-        "OMEGA_NODES='${OMEGA_NODES}' \
-         OMEGA_CONTROLLER='${OMEGA_CONTROLLER}' \
-         OMEGA_TEST_VMID='${VMID}' \
-         OMEGA_BIN_DIR='${REMOTE_BINS_DIR}' \
-         bash '${remote_script}' ${args_str}" \
+    local args_str
+    args_str="$(quote_args "$@")"
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+        "$(remote_env) bash $(printf '%q' "$remote_script")${args_str}" \
         || exit_code=$?
 
     # Redémarrer omega-daemon dans tous les cas
-    ssh -o ConnectTimeout=5 "root@${CONTROLLER_NODE}" \
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
         "systemctl start omega-daemon 2>/dev/null || true; sleep 2" || true
 
     if [[ $exit_code -eq 0 ]]; then
@@ -167,6 +191,8 @@ print_cluster_config
 info "VM test      : $VMID"
 info "GPU          : $DO_GPU"
 info "Ceph         : $DO_CEPH"
+info "Long         : $DO_LONG"
+info "Destructif   : $DO_DESTRUCTIVE"
 info "Skip         : ${SKIP_LIST:-aucun}"
 info "Nœuds        : $(node_count) ($(store_count) store(s))"
 
@@ -202,17 +228,35 @@ run_test_on_node "08" "Migration RAM"               "$TESTS_DIR/08-migration-ram
 run_test_on_node "09" "Orphan cleaner"              "$TESTS_DIR/09-orphan-cleaner.sh"
 run_test_on_node "19" "Compaction cluster"          "$TESTS_DIR/19-compaction.sh"           "$VMID"
 run_test_on_node "22" "Balloon thin-provisioning"   "$TESTS_DIR/22-balloon-thinprov.sh"     "$VMID"
+run_test_on_node "23C" "Disk I/O scheduler cluster" "$TESTS_DIR/23-disk-io-scheduler.sh"    "$VMID"
+run_test_on_node "24" "Installation doctor"         "$TESTS_DIR/24-install-doctor.sh"
+run_test_on_node "25" "Réseau VM invitée"           "$TESTS_DIR/25-vm-network.sh"            "$VMID"
 
 # ── Tests GPU (optionnels) ─────────────────────────────────────────────────────
 if $DO_GPU; then
     run_test_on_node "06" "GPU placement"           "$TESTS_DIR/06-gpu-placement.sh"        "$VMID"
-    run_test_on_node "07" "GPU scheduler"           "$TESTS_DIR/07-gpu-scheduler.sh"        "$VMID" "9002"
+    GPU_SECOND_VMID="${TEST_VMIDS_ARR[1]:-}"
+    if [[ -n "$GPU_SECOND_VMID" ]]; then
+        run_test_on_node "07" "GPU scheduler"       "$TESTS_DIR/07-gpu-scheduler.sh"        "$VMID" "$GPU_SECOND_VMID"
+    else
+        warn "Test 07 (GPU scheduler) — ignoré, OMEGA_TEST_VMIDS doit contenir au moins 2 VMs"
+        RESULTS+=("SKIP  07 GPU scheduler (2e VM absente)")
+        ((SKIP++)) || true
+    fi
+    run_test_on_node "27" "GPU réel / rendu minimal" "$TESTS_DIR/27-gpu-real-render.sh"      "$VMID"
 else
-    for t in "06:GPU placement" "07:GPU scheduler"; do
+    for t in "06:GPU placement" "07:GPU scheduler" "27:GPU réel / rendu minimal"; do
         num="${t%:*}"; name="${t#*:}"
         RESULTS+=("SKIP  $num $name (passer --gpu)")
         ((SKIP++)) || true
     done
+fi
+
+if $DO_CEPH; then
+    run_test_on_node "26" "Ceph réel"               "$TESTS_DIR/26-ceph-real.sh"
+else
+    RESULTS+=("SKIP  26 Ceph réel (passer --ceph)")
+    ((SKIP++)) || true
 fi
 
 # ── Tests mixtes ──────────────────────────────────────────────────────────────
@@ -231,6 +275,21 @@ if $DO_GPU; then
     run_test_on_node "M3" "GPU + CPU multi-contraintes" "$TESTS_DIR/13-mixed-gpu-cpu.sh"    "$VMID"
 else
     RESULTS+=("SKIP  M3 GPU+CPU multi-contraintes (passer --gpu)")
+    ((SKIP++)) || true
+fi
+
+# ── Tests destructifs / longue durée ─────────────────────────────────────────
+if $DO_DESTRUCTIVE; then
+    run_test_on_node "28" "Partition réseau contrôlée" "$TESTS_DIR/28-network-partition.sh" "${OMEGA_NODES_ARR[1]:-}"
+else
+    RESULTS+=("SKIP  28 Partition réseau contrôlée (passer --destructive)")
+    ((SKIP++)) || true
+fi
+
+if $DO_LONG; then
+    run_test_on_node "29" "Soak long physique" "$TESTS_DIR/29-long-run-soak.sh" "$VMID" "${OMEGA_SOAK_SECS:-1800}"
+else
+    RESULTS+=("SKIP  29 Soak long physique (passer --long)")
     ((SKIP++)) || true
 fi
 

@@ -8,13 +8,15 @@ use node_bc_store::store::{PageKey, PageStore};
 // ─── Store en RAM ─────────────────────────────────────────────────────────────
 
 fn bench_store_put(c: &mut Criterion) {
-    let store   = PageStore::new(Arc::new(StoreMetrics::default()));
-    let data    = vec![0x42u8; PAGE_SIZE];
+    let store = PageStore::new(Arc::new(StoreMetrics::default()));
+    let data = vec![0x42u8; PAGE_SIZE];
 
     c.bench_function("store/put_4k", |b| {
         let mut pid = 0u64;
         b.iter(|| {
-            store.put(PageKey::new(1, pid), black_box(data.clone())).unwrap();
+            store
+                .put(PageKey::new(1, pid), black_box(data.clone()))
+                .unwrap();
             pid += 1;
         });
     });
@@ -22,8 +24,8 @@ fn bench_store_put(c: &mut Criterion) {
 
 fn bench_store_get_hit(c: &mut Criterion) {
     let store = PageStore::new(Arc::new(StoreMetrics::default()));
-    let data  = vec![0x42u8; PAGE_SIZE];
-    let key   = PageKey::new(1, 0);
+    let data = vec![0x42u8; PAGE_SIZE];
+    let key = PageKey::new(1, 0);
     store.put(key.clone(), data).unwrap();
 
     c.bench_function("store/get_hit", |b| {
@@ -33,7 +35,7 @@ fn bench_store_get_hit(c: &mut Criterion) {
 
 fn bench_store_get_miss(c: &mut Criterion) {
     let store = PageStore::new(Arc::new(StoreMetrics::default()));
-    let key   = PageKey::new(99, 99999);
+    let key = PageKey::new(99, 99999);
 
     c.bench_function("store/get_miss", |b| {
         b.iter(|| black_box(store.get(&key)));
@@ -43,9 +45,9 @@ fn bench_store_get_miss(c: &mut Criterion) {
 // ─── Protocole — sérialisation / décompression ───────────────────────────────
 
 fn bench_protocol_serialize_put(c: &mut Criterion) {
-    let rt   = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let data = vec![0x42u8; PAGE_SIZE];
-    let msg  = Message::put_page(1, 0, data);
+    let msg = Message::put_page(1, 0, data);
 
     c.bench_function("protocol/serialize_put_4k", |b| {
         b.iter(|| {
@@ -57,28 +59,28 @@ fn bench_protocol_serialize_put(c: &mut Criterion) {
 
 fn bench_protocol_compression_zero_page(c: &mut Criterion) {
     let data = vec![0u8; PAGE_SIZE]; // page zéro — très compressible
-    let msg  = Message::put_page(1, 0, data);
+    let msg = Message::put_page(1, 0, data);
 
     c.bench_function("protocol/lz4_compress_zero_page", |b| {
-        b.iter(|| { black_box(black_box(&msg).try_compress()); });
+        b.iter(|| {
+            black_box(black_box(&msg).try_compress());
+        });
     });
 }
 
 fn bench_protocol_compression_by_ratio(c: &mut Criterion) {
     let mut group = c.benchmark_group("protocol/lz4_compress");
 
-    let scenarios: &[(&str, u8)] = &[
-        ("zero_fill",   0x00),
-        ("text_like",   0x41),
-        ("mixed",       0x7F),
-    ];
+    let scenarios: &[(&str, u8)] = &[("zero_fill", 0x00), ("text_like", 0x41), ("mixed", 0x7F)];
 
     for (name, fill) in scenarios {
         let data = vec![*fill; PAGE_SIZE];
-        let msg  = Message::put_page(1, 0, data);
+        let msg = Message::put_page(1, 0, data);
         group.throughput(Throughput::Bytes(PAGE_SIZE as u64));
         group.bench_with_input(BenchmarkId::from_parameter(name), name, |b, _| {
-            b.iter(|| { black_box(black_box(&msg).try_compress()); });
+            b.iter(|| {
+                black_box(black_box(&msg).try_compress());
+            });
         });
     }
     group.finish();

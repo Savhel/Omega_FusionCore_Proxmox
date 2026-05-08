@@ -6,15 +6,14 @@
 source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"
-qm status "$VMID" | grep -q "running" || fail "VM $VMID non démarrée — vérifier OMEGA_TEST_VMIDS dans cluster.conf (qm start $VMID)"
+require_vm_running "$VMID"
+VMID="$SELECTED_VMID"
+VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
 
 header "Test 8 — Migration RAM (VM $VMID)"
 
 step "Vérifications prérequis"
-require_bin qm
-require_bin pvesh
-nc -zv "${PVE2}" 9100 2>/dev/null || fail "store ${PVE2}:9100 inaccessible"
-nc -zv "${PVE3}" 9100 2>/dev/null || fail "store ${PVE3}:9100 inaccessible"
+require_cluster
 
 step "Nœud initial de la VM"
 node_before=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
@@ -26,12 +25,12 @@ step "Démarrage agent avec migration activée et seuil d'éviction agressif"
 LOG_AGENT="/tmp/omega-agent-migration.log"
 _TMPFILES+=("$LOG_AGENT")
 "$AGENT_BIN" \
-    --stores "${PVE2}:9100,${PVE3}:9100" \
-    --status-addrs "${PVE2}:9200,${PVE3}:9200" \
+    --stores "$STORES_CSV" \
+    --status-addrs "$STATUS_CSV" \
     --vm-id "$VMID" \
-    --vm-requested-mib 2048 \
-    --region-mib 2048 \
-    --current-node "$(hostname)" \
+    --vm-requested-mib "$VM_RAM_MIB" \
+    --region-mib "$VM_RAM_MIB" \
+    --current-node "$(local_pve_node)" \
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 64 \
     --eviction-interval-secs 3 \

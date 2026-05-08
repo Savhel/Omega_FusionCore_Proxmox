@@ -25,11 +25,11 @@ pass "tests unitaires disk_scheduler OK"
 
 step "2/3 : démarrage agent avec disk-scheduler-enabled"
 
-start_store "ds0" 9100 9200
+start_store "ds0" "$STORE_PORT" "$STATUS_PORT"
 
 AGENT_LOG=$(mktemp /tmp/omega-disk-sched-XXXXXX.log)
 "${AGENT_BIN}" \
-    --stores              "127.0.0.1:9100" \
+    --stores              "127.0.0.1:$STORE_PORT" \
     --vm-id               100 \
     --region-mib          32 \
     --vm-requested-mib    32 \
@@ -56,12 +56,19 @@ wait "$AGENT_PID" || true
 if grep -q "scheduler I/O disque activé" "$AGENT_LOG"; then
     pass "scheduler I/O disque activé : log confirmé"
 else
-    warn "scheduler I/O disque : log non trouvé (PSI peut-être non supporté sur ce kernel)"
+    if grep -qi "userfaultfd échouée\|Operation not permitted\|unprivileged_userfaultfd" "$AGENT_LOG"; then
+        warn "mode demo bloqué par userfaultfd — normal sur certains nœuds sans CAP_SYS_PTRACE"
+        warn "le scheduler disque reste validé par les tests unitaires; le test réel io.weight nécessite CLUSTER_MODE=1"
+    else
+        warn "scheduler I/O disque : log non trouvé (PSI peut-être non supporté sur ce kernel)"
+    fi
 fi
 
-# Vérifier que le mode demo s'est terminé correctement
+# Vérifier que le mode demo s'est terminé correctement quand userfaultfd est disponible.
 if grep -q "SUCCÈS" "$AGENT_LOG"; then
     pass "mode demo terminé avec succès"
+elif grep -qi "userfaultfd échouée\|Operation not permitted\|unprivileged_userfaultfd" "$AGENT_LOG"; then
+    warn "mode demo ignoré : userfaultfd indisponible sur ce nœud"
 else
     fail "mode demo n'a pas retourné SUCCÈS"
 fi
@@ -70,7 +77,7 @@ fi
 if [[ "${CLUSTER_MODE:-0}" != "1" ]]; then
     warn "CLUSTER_MODE non activé — test de charge I/O disque ignoré"
     info "Pour le tester sur cluster : CLUSTER_MODE=1 VMID=<vmid> ./23-disk-io-scheduler.sh"
-    pass "Test 23 terminé (unitaire + isolation OK, cluster ignoré)"
+    pass "Test 23 terminé (unitaire OK, cluster io.weight ignoré)"
     exit 0
 fi
 
@@ -80,7 +87,7 @@ step "3/3 : test cluster — io.weight sous charge I/O (VM ${VMID})"
 [[ -n "${CONTROLLER_NODE:-}" ]] || fail "CONTROLLER_NODE non défini"
 
 # Démarrer l'agent en mode daemon avec disk-scheduler-enabled
-ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "
+ssh_run "$CONTROLLER_NODE" "
     export AGENT_DISK_SCHEDULER_ENABLED=true
     export AGENT_DISK_PSI_THRESHOLD=5.0
     export AGENT_DISK_INTERVAL_SECS=3
@@ -91,7 +98,7 @@ ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "
 
 # Générer de la charge I/O dans la VM
 info "Génération de charge I/O dans la VM ${VMID}"
-ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "
+ssh_run "$CONTROLLER_NODE" "
     qm guest exec ${VMID} -- bash -c 'dd if=/dev/urandom of=/tmp/io-test bs=1M count=200 oflag=direct 2>&1 &' 2>/dev/null \
     || warn 'qm guest exec non disponible — utilisez stress-ng depuis la VM'
 " || true
@@ -104,8 +111,8 @@ for scope in \
     "/sys/fs/cgroup/qemu.slice/${VMID}.scope/io.weight" \
     "/sys/fs/cgroup/machine.slice/qemu-${VMID}.scope/io.weight"
 do
-    if ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "test -f '${scope}'" 2>/dev/null; then
-        CGROUP_ACTIVE=$(ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "cat '${scope}'" 2>/dev/null || echo "")
+    if ssh_run "$CONTROLLER_NODE" "test -f '${scope}'" 2>/dev/null; then
+        CGROUP_ACTIVE=$(ssh_run "$CONTROLLER_NODE" "cat '${scope}'" 2>/dev/null || echo "")
         break
     fi
 done
@@ -127,7 +134,7 @@ else
 fi
 
 # Nettoyage : remettre à la valeur par défaut
-ssh "${DEPLOY_USER:-root}@${CONTROLLER_NODE}" "
+ssh_run "$CONTROLLER_NODE" "
     for scope in \
         /sys/fs/cgroup/qemu.slice/${VMID}.scope/io.weight \
         /sys/fs/cgroup/machine.slice/qemu-${VMID}.scope/io.weight; do

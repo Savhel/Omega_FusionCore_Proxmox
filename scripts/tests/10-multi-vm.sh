@@ -5,30 +5,36 @@
 
 source "$(dirname "$0")/lib.sh"
 
-header "Test 10 — Charge multi-VM (3 stores × 3 VMs)"
+[[ ${#TEST_VMIDS_ARR[@]} -ge 3 ]] || \
+    fail "ce test requiert au moins 3 VMIDs dans OMEGA_TEST_VMIDS (actuellement ${#TEST_VMIDS_ARR[@]})"
+VMIDS=("${TEST_VMIDS_ARR[@]:0:3}")
+
+header "Test 10 — Charge multi-VM (3 stores × 3 VMs : ${VMIDS[*]})"
 
 require_omega_bins
 
 step "Démarrage 3 stores"
-start_store "m0" 9100 9200
-start_store "m1" 9101 9201
-start_store "m2" 9102 9202
+start_store "m0" "$STORE_PORT"          "$STATUS_PORT"
+start_store "m1" "$((STORE_PORT + 1))" "$((STATUS_PORT + 1))"
+start_store "m2" "$((STORE_PORT + 2))" "$((STATUS_PORT + 2))"
 
-step "Lancement 3 agents simultanés (vmid 11, 12, 13)"
+step "Lancement 3 agents simultanés"
 LOGS=()
 AGENT_PIDS=()
 t0=$SECONDS
 
-for vmid in 11 12 13; do
+for i in 0 1 2; do
+    vmid="${VMIDS[$i]}"
+    _ram=$(vm_ram_mib "$vmid" 2>/dev/null || echo ""); _ram="${_ram:-512}"
     LOG="/tmp/omega-agent-multi-${vmid}.log"
     _TMPFILES+=("$LOG")
     LOGS+=("$LOG")
     "$AGENT_BIN" \
-        --stores "127.0.0.1:9100,127.0.0.1:9101,127.0.0.1:9102" \
+        --stores "127.0.0.1:$STORE_PORT,127.0.0.1:$((STORE_PORT+1)),127.0.0.1:$((STORE_PORT+2))" \
         --vm-id "$vmid" \
-        --vm-requested-mib 64 \
-        --region-mib 64 \
-        --recall-priority "$vmid" \
+        --vm-requested-mib "$_ram" \
+        --region-mib "$_ram" \
+        --recall-priority "$((i + 1))" \
         --mode demo >"$LOG" 2>&1 &
     AGENT_PIDS+=($!)
     _PIDS+=($!)
@@ -37,7 +43,7 @@ done
 step "Attente fin des 3 agents"
 all_ok=true
 for i in 0 1 2; do
-    vmid=$((11 + i))
+    vmid="${VMIDS[$i]}"
     wait "${AGENT_PIDS[$i]}" 2>/dev/null || true
     if grep -q "SUCCÈS" "${LOGS[$i]}"; then
         pass "agent vmid=$vmid : SUCCÈS"
@@ -49,7 +55,7 @@ done
 
 step "Vérification isolation : pas de collision de pages entre VMs"
 pages_total=0
-for port in 9200 9201 9202; do
+for port in "$STATUS_PORT" "$((STATUS_PORT+1))" "$((STATUS_PORT+2))"; do
     pc=$(curl -sf "http://127.0.0.1:$port/status" | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('page_count',0))" 2>/dev/null || echo 0)
     info "store :$port — $pc pages"
@@ -63,9 +69,9 @@ for log in "${LOGS[@]}"; do
     [[ "$errors" -eq 0 ]] || fail "collision de pages détectée dans $log"
 done
 
-step "Vérification priorités recall (priorité = vmid, 11 < 12 < 13)"
+step "Vérification priorités recall"
 for i in 0 1 2; do
-    vmid=$((11 + i))
+    vmid="${VMIDS[$i]}"
     recall_delay=$(grep -oP 'recall.*delay=\K[0-9.]+' "${LOGS[$i]}" | head -1 || echo "?")
     info "vmid=$vmid recall_delay=$recall_delay"
 done

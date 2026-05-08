@@ -5,6 +5,7 @@
 //! 1. L'agent crée `{run_dir}/vm-{vmid}/uffd.sock` et y écoute.
 //! 2. Quand QEMU démarre avec LD_PRELOAD=omega-uffd-bridge.so :
 //!    – bridge.c intercepte le mmap() de `/dev/shm/omega-vm-{vmid}`
+//!      ou du memfd `omega-vm-{vmid}-...`
 //!    – bridge.c crée un uffd, enregistre la plage QEMU (MISSING mode)
 //!    – bridge.c se connecte au socket et envoie le fd via SCM_RIGHTS
 //!      avec payload `[base: u64, len: u64]`
@@ -14,15 +15,16 @@
 //!
 //! # Éviction
 //!
-//! L'agent mappe aussi `/dev/shm/omega-vm-{vmid}` en MAP_SHARED.
+//! L'agent mappe aussi le même backend partagé (`memfd` ou shm) en MAP_SHARED.
 //! `evict_page()` lit via cette vue, envoie au store, puis appelle
-//! MADV_DONTNEED sur sa propre vue → page cache partagée invalidée →
-//! QEMU faulte → ce handler injecte la page depuis le store.
+//! MADV_DONTNEED sur sa propre vue. Le mapping QEMU est enregistré auprès
+//! de userfaultfd par le bridge, donc une page absente déclenche ce handler,
+//! qui injecte la page depuis le store.
 
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use libc;
@@ -41,23 +43,23 @@ const UFFDIO_COPY: libc::c_ulong = 0xC028_AA03;
 
 #[repr(C)]
 struct UffdioCopy {
-    dst:  u64,
-    src:  u64,
-    len:  u64,
+    dst: u64,
+    src: u64,
+    len: u64,
     mode: u64,
     copy: i64,
 }
 
 #[repr(C, packed)]
 struct UffdMsg {
-    event:     u8,
+    event: u8,
     reserved1: u8,
     reserved2: u16,
     reserved3: u32,
-    flags:     u64,
-    address:   u64,
-    ptid:      u32,
-    _pad:      u32,
+    flags: u64,
+    address: u64,
+    ptid: u32,
+    _pad: u32,
 }
 
 const UFFD_MSG_SIZE: usize = std::mem::size_of::<UffdMsg>();
@@ -73,13 +75,13 @@ fn receive_uffd(conn_fd: RawFd) -> Result<(RawFd, u64, u64)> {
 
     let mut iov = libc::iovec {
         iov_base: payload.as_mut_ptr() as *mut libc::c_void,
-        iov_len:  std::mem::size_of_val(&payload),
+        iov_len: std::mem::size_of_val(&payload),
     };
 
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov        = &mut iov;
-    msg.msg_iovlen     = 1;
-    msg.msg_control    = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_buf.len() as _;
 
     let n = unsafe { libc::recvmsg(conn_fd, &mut msg, 0) };
@@ -119,7 +121,7 @@ fn receive_uffd(conn_fd: RawFd) -> Result<(RawFd, u64, u64)> {
     }
 
     let base = payload[0];
-    let len  = payload[1];
+    let len = payload[1];
 
     info!(
         uffd_fd,
@@ -153,7 +155,12 @@ fn spawn_qemu_fault_handler(
         .name(format!("qemu-uffd-{vm_id}"))
         .spawn(move || {
             uffd_active.fetch_add(1, Ordering::Relaxed);
-            info!(vm_id, base = format!("0x{base:x}"), len, "thread qemu-uffd-handler démarré");
+            info!(
+                vm_id,
+                base = format!("0x{base:x}"),
+                len,
+                "thread qemu-uffd-handler démarré"
+            );
 
             let page_size = PAGE_SIZE as u64;
             let mut msg: UffdMsg = unsafe { std::mem::zeroed() };
@@ -188,7 +195,11 @@ fn spawn_qemu_fault_handler(
                     break;
                 }
                 if (n as usize) != UFFD_MSG_SIZE {
-                    warn!(n, expected = UFFD_MSG_SIZE, "lecture uffd partielle ignorée");
+                    warn!(
+                        n,
+                        expected = UFFD_MSG_SIZE,
+                        "lecture uffd partielle ignorée"
+                    );
                     continue;
                 }
                 if msg.event != UFFD_EVENT_PAGEFAULT {
@@ -197,12 +208,16 @@ fn spawn_qemu_fault_handler(
                 }
 
                 let fault_addr = msg.address;
-                let _is_write  = (msg.flags & UFFD_PAGEFAULT_FLAG_WRITE) != 0;
-                let page_id    = (fault_addr.saturating_sub(base)) / page_size;
-                let page_addr  = fault_addr & !(page_size - 1);
+                let _is_write = (msg.flags & UFFD_PAGEFAULT_FLAG_WRITE) != 0;
+                let page_id = (fault_addr.saturating_sub(base)) / page_size;
+                let page_addr = fault_addr & !(page_size - 1);
 
                 metrics.fault_count.fetch_add(1, Ordering::Relaxed);
-                debug!(page_id, fault_addr = format!("0x{fault_addr:x}"), "QEMU page fault");
+                debug!(
+                    page_id,
+                    fault_addr = format!("0x{fault_addr:x}"),
+                    "QEMU page fault"
+                );
 
                 // Récupérer la page depuis le store distant.
                 // catch_unwind protège contre le panic "Tokio runtime is being shutdown"
@@ -213,7 +228,10 @@ fn spawn_qemu_fault_handler(
                 })) {
                     Ok(result) => result,
                     Err(_) => {
-                        info!(vm_id, "runtime tokio arrêté pendant block_on — sortie du handler");
+                        info!(
+                            vm_id,
+                            "runtime tokio arrêté pendant block_on — sortie du handler"
+                        );
                         break;
                     }
                 };
@@ -241,9 +259,9 @@ fn spawn_qemu_fault_handler(
                 // src = pointeur dans l'espace agent (valide ici)
                 // dst = adresse dans l'espace QEMU (kernel fait la copie cross-process)
                 let mut copy = UffdioCopy {
-                    dst:  page_addr,
-                    src:  page_data.as_ptr() as u64,
-                    len:  4096,
+                    dst: page_addr,
+                    src: page_data.as_ptr() as u64,
+                    len: 4096,
                     mode: 0,
                     copy: 0,
                 };
@@ -262,7 +280,9 @@ fn spawn_qemu_fault_handler(
                 }
             }
 
-            unsafe { libc::close(uffd_fd); }
+            unsafe {
+                libc::close(uffd_fd);
+            }
             uffd_active.fetch_sub(1, Ordering::Relaxed);
             info!(vm_id, "thread qemu-uffd-handler terminé");
         })
@@ -291,9 +311,7 @@ pub fn spawn_qemu_uffd_listener(
     let _ = std::fs::remove_file(&socket_path);
 
     // Créer le socket Unix non-bloquant (pour pouvoir checker shutdown)
-    let sock = unsafe {
-        libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0)
-    };
+    let sock = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if sock < 0 {
         bail!("socket(AF_UNIX): {}", std::io::Error::last_os_error());
     }
@@ -303,12 +321,12 @@ pub fn spawn_qemu_uffd_listener(
         libc::fcntl(sock, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
-    let path_str = socket_path
-        .to_str()
-        .context("chemin socket non-UTF8")?;
+    let path_str = socket_path.to_str().context("chemin socket non-UTF8")?;
 
     if path_str.len() >= 108 {
-        unsafe { libc::close(sock); }
+        unsafe {
+            libc::close(sock);
+        }
         bail!("chemin socket trop long (max 107 octets) : {path_str}");
     }
 
@@ -331,12 +349,20 @@ pub fn spawn_qemu_uffd_listener(
         )
     };
     if bind_ret < 0 {
-        unsafe { libc::close(sock); }
-        bail!("bind({}): {}", socket_path.display(), std::io::Error::last_os_error());
+        unsafe {
+            libc::close(sock);
+        }
+        bail!(
+            "bind({}): {}",
+            socket_path.display(),
+            std::io::Error::last_os_error()
+        );
     }
 
     if unsafe { libc::listen(sock, 4) } < 0 {
-        unsafe { libc::close(sock); }
+        unsafe {
+            libc::close(sock);
+        }
         bail!("listen: {}", std::io::Error::last_os_error());
     }
 
@@ -351,9 +377,8 @@ pub fn spawn_qemu_uffd_listener(
                     break;
                 }
 
-                let conn = unsafe {
-                    libc::accept(sock, std::ptr::null_mut(), std::ptr::null_mut())
-                };
+                let conn =
+                    unsafe { libc::accept(sock, std::ptr::null_mut(), std::ptr::null_mut()) };
 
                 if conn < 0 {
                     let err = std::io::Error::last_os_error();
@@ -372,7 +397,9 @@ pub fn spawn_qemu_uffd_listener(
 
                 match receive_uffd(conn) {
                     Ok((uffd_fd, base, len)) => {
-                        unsafe { libc::close(conn); }
+                        unsafe {
+                            libc::close(conn);
+                        }
                         spawn_qemu_fault_handler(
                             uffd_fd,
                             base,
@@ -387,12 +414,16 @@ pub fn spawn_qemu_uffd_listener(
                     }
                     Err(e) => {
                         error!(error = %e, "receive_uffd échoué");
-                        unsafe { libc::close(conn); }
+                        unsafe {
+                            libc::close(conn);
+                        }
                     }
                 }
             }
 
-            unsafe { libc::close(sock); }
+            unsafe {
+                libc::close(sock);
+            }
             let _ = std::fs::remove_file(&sock_path_clone);
             info!(vm_id, "listener uffd QEMU arrêté");
         })

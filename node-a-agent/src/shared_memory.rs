@@ -147,7 +147,10 @@ impl MemoryBackend {
         let meta = self.metadata();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!("création du répertoire parent des métadonnées: {}", parent.display())
+                format!(
+                    "création du répertoire parent des métadonnées: {}",
+                    parent.display()
+                )
             })?;
         }
         std::fs::write(path, serde_json::to_vec_pretty(&meta)?)

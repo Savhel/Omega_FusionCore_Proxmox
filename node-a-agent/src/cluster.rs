@@ -18,41 +18,41 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NodeStatus {
-    pub node_id:       String,
+    pub node_id: String,
     pub available_mib: u64,
-    pub total_mib:     u64,
-    pub cpu_count:     u32,
+    pub total_mib: u64,
+    pub cpu_count: u32,
 
     /// Le nœud store possède au moins un GPU (détection PCI générique).
     #[serde(default)]
-    pub has_gpu:            bool,
+    pub has_gpu: bool,
     /// Nombre de GPUs PCI détectés sur ce nœud (0 si aucun).
     #[serde(default)]
-    pub gpu_count:          u32,
+    pub gpu_count: u32,
     /// Espace disque disponible sur le répertoire de données du store (en Mio).
     #[serde(default)]
     pub disk_available_mib: u64,
     /// Espace disque total du répertoire de données du store (en Mio).
     #[serde(default)]
-    pub disk_total_mib:     u64,
+    pub disk_total_mib: u64,
     /// Le store utilise Ceph RADOS comme backend (auto-détecté au démarrage).
     #[serde(default)]
-    pub ceph_enabled:       bool,
+    pub ceph_enabled: bool,
     /// vCPUs totaux du nœud (physical_cores × overcommit_ratio).
     /// 0 = non reporté par ce nœud (compatibilité ancienne version).
     #[serde(default)]
-    pub vcpu_total:         u32,
+    pub vcpu_total: u32,
     /// vCPUs libres sur ce nœud (non encore alloués à une VM).
     /// 0 = non reporté.
     #[serde(default)]
-    pub vcpu_free:          u32,
+    pub vcpu_free: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeSnapshot {
-    pub store_idx:   usize,
-    pub store_addr:  String,  // host:port TCP store
-    pub status_addr: String,  // host:port HTTP status
+    pub store_idx: usize,
+    pub store_addr: String,  // host:port TCP store
+    pub status_addr: String, // host:port HTTP status
     pub last_status: Option<NodeStatus>,
 }
 
@@ -66,20 +66,23 @@ pub struct ClusterState {
 
 impl ClusterState {
     pub fn new(store_addrs: Vec<String>, status_addrs: Vec<String>) -> Self {
-        let n     = store_addrs.len();
+        let n = store_addrs.len();
         let nodes = store_addrs
             .into_iter()
             .zip(status_addrs)
             .enumerate()
             .map(|(i, (store, status))| NodeSnapshot {
-                store_idx:   i,
-                store_addr:  store,
+                store_idx: i,
+                store_addr: store,
                 status_addr: status,
                 last_status: None,
             })
             .collect();
         let local_delta = Arc::new((0..n).map(|_| AtomicI64::new(0)).collect());
-        Self { nodes: Arc::new(RwLock::new(nodes)), local_delta }
+        Self {
+            nodes: Arc::new(RwLock::new(nodes)),
+            local_delta,
+        }
     }
 
     /// Décrémente la capacité estimée d'un store après éviction d'une page (item 3).
@@ -135,7 +138,7 @@ impl ClusterState {
                             debug!(
                                 idx,
                                 disk_avail_mib = status.disk_available_mib,
-                                disk_pct       = pct,
+                                disk_pct = pct,
                                 "disque store ok"
                             );
                         }
@@ -173,9 +176,10 @@ impl ClusterState {
             .filter_map(|n| {
                 n.last_status.as_ref().map(|s| {
                     // Capacité brute depuis le dernier refresh HTTP
-                    let base  = (s.available_mib.saturating_mul(1024) / 4) as i64;
+                    let base = (s.available_mib.saturating_mul(1024) / 4) as i64;
                     // Delta local : pages évincées/rappelées depuis ce refresh
-                    let delta = self.local_delta
+                    let delta = self
+                        .local_delta
                         .get(n.store_idx)
                         .map(|d| d.load(Ordering::Relaxed))
                         .unwrap_or(0);
@@ -201,10 +205,13 @@ impl ClusterState {
     /// Retourne `false` si aucun nœud n'a encore reporté son statut.
     pub async fn all_ceph_enabled(&self) -> bool {
         let nodes = self.nodes.read().await;
-        let reported: Vec<_> = nodes.iter()
+        let reported: Vec<_> = nodes
+            .iter()
             .filter_map(|n| n.last_status.as_ref())
             .collect();
-        if reported.is_empty() { return false; }
+        if reported.is_empty() {
+            return false;
+        }
         reported.iter().all(|s| s.ceph_enabled)
     }
 
@@ -282,12 +289,30 @@ mod tests {
         {
             let mut nodes = state.nodes.write().await;
             nodes[0].last_status = Some(NodeStatus {
-                node_id: "pve2".into(), available_mib: 1024, total_mib: 8192, cpu_count: 4,
-                has_gpu: false, gpu_count: 0, disk_available_mib: 0, disk_total_mib: 0, ceph_enabled: false, vcpu_total: 0, vcpu_free: 0,
+                node_id: "pve2".into(),
+                available_mib: 1024,
+                total_mib: 8192,
+                cpu_count: 4,
+                has_gpu: false,
+                gpu_count: 0,
+                disk_available_mib: 0,
+                disk_total_mib: 0,
+                ceph_enabled: false,
+                vcpu_total: 0,
+                vcpu_free: 0,
             });
             nodes[1].last_status = Some(NodeStatus {
-                node_id: "pve3".into(), available_mib: 4096, total_mib: 8192, cpu_count: 4,
-                has_gpu: false, gpu_count: 0, disk_available_mib: 0, disk_total_mib: 0, ceph_enabled: false, vcpu_total: 0, vcpu_free: 0,
+                node_id: "pve3".into(),
+                available_mib: 4096,
+                total_mib: 8192,
+                cpu_count: 4,
+                has_gpu: false,
+                gpu_count: 0,
+                disk_available_mib: 0,
+                disk_total_mib: 0,
+                ceph_enabled: false,
+                vcpu_total: 0,
+                vcpu_free: 0,
             });
         }
         let targets = state.select_eviction_targets().await;
@@ -315,8 +340,17 @@ mod tests {
         {
             let mut nodes = state.nodes.write().await;
             nodes[0].last_status = Some(NodeStatus {
-                node_id: "pve2".into(), available_mib: 0, total_mib: 8192, cpu_count: 4,
-                has_gpu: false, gpu_count: 0, disk_available_mib: 0, disk_total_mib: 0, ceph_enabled: false, vcpu_total: 0, vcpu_free: 0,
+                node_id: "pve2".into(),
+                available_mib: 0,
+                total_mib: 8192,
+                cpu_count: 4,
+                has_gpu: false,
+                gpu_count: 0,
+                disk_available_mib: 0,
+                disk_total_mib: 0,
+                ceph_enabled: false,
+                vcpu_total: 0,
+                vcpu_free: 0,
             });
         }
         let targets = state.select_eviction_targets().await;

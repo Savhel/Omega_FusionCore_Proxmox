@@ -38,9 +38,9 @@ use tracing::{debug, info, warn};
 use crate::server::AnyStore;
 
 pub struct OrphanCleaner {
-    store:          Arc<AnyStore>,
+    store: Arc<AnyStore>,
     check_interval: Duration,
-    grace_period:   Duration,
+    grace_period: Duration,
 }
 
 impl OrphanCleaner {
@@ -48,7 +48,7 @@ impl OrphanCleaner {
         Self {
             store,
             check_interval: Duration::from_secs(check_interval_secs.max(60)),
-            grace_period:   Duration::from_secs(grace_secs),
+            grace_period: Duration::from_secs(grace_secs),
         }
     }
 
@@ -58,14 +58,18 @@ impl OrphanCleaner {
 
         info!(
             check_interval_s = self.check_interval.as_secs(),
-            grace_s          = self.grace_period.as_secs(),
+            grace_s = self.grace_period.as_secs(),
             "démon nettoyage orphelins démarré"
         );
 
         loop {
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             sleep(self.check_interval).await;
-            if shutdown.load(Ordering::Relaxed) { break; }
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
 
             self.cleanup_pass(&mut absent_since).await;
         }
@@ -84,7 +88,7 @@ impl OrphanCleaner {
         // 2. VM ids connus de Proxmox (tous états)
         let cluster_vmids = match list_proxmox_vmids().await {
             Ok(ids) => ids,
-            Err(e)  => {
+            Err(e) => {
                 warn!(error = %e, "impossible d'interroger Proxmox — nettoyage reporté");
                 return;
             }
@@ -139,7 +143,14 @@ impl OrphanCleaner {
 /// Retourne une erreur si `pvesh` n'est pas disponible ou si la sortie est invalide.
 async fn list_proxmox_vmids() -> anyhow::Result<Vec<u32>> {
     let out = tokio::process::Command::new("pvesh")
-        .args(["get", "/cluster/resources", "--type", "vm", "--output-format", "json"])
+        .args([
+            "get",
+            "/cluster/resources",
+            "--type",
+            "vm",
+            "--output-format",
+            "json",
+        ])
         .output()
         .await?;
 
@@ -149,7 +160,8 @@ async fn list_proxmox_vmids() -> anyhow::Result<Vec<u32>> {
     }
 
     let json: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    let ids = json.as_array()
+    let ids = json
+        .as_array()
         .unwrap_or(&vec![])
         .iter()
         .filter_map(|item| item.get("vmid")?.as_u64())
@@ -169,29 +181,34 @@ mod tests {
     fn test_grace_period_not_yet_elapsed() {
         let mut absent_since: HashMap<u32, Instant> = HashMap::new();
         let grace = Duration::from_secs(600);
-        let now   = Instant::now();
+        let now = Instant::now();
 
         // VM 42 absente depuis 1 seconde (< grâce)
         absent_since.insert(42, now - Duration::from_secs(1));
 
-        let to_delete: Vec<u32> = absent_since.iter()
+        let to_delete: Vec<u32> = absent_since
+            .iter()
             .filter(|(_, since)| now.duration_since(**since) >= grace)
             .map(|(&vmid, _)| vmid)
             .collect();
 
-        assert!(to_delete.is_empty(), "pas encore supprimée dans le délai de grâce");
+        assert!(
+            to_delete.is_empty(),
+            "pas encore supprimée dans le délai de grâce"
+        );
     }
 
     #[test]
     fn test_grace_period_elapsed() {
         let mut absent_since: HashMap<u32, Instant> = HashMap::new();
         let grace = Duration::from_secs(60);
-        let now   = Instant::now();
+        let now = Instant::now();
 
         // VM 99 absente depuis 120 s (> grâce)
         absent_since.insert(99, now - Duration::from_secs(120));
 
-        let to_delete: Vec<u32> = absent_since.iter()
+        let to_delete: Vec<u32> = absent_since
+            .iter()
             .filter(|(_, since)| now.duration_since(**since) >= grace)
             .map(|(&vmid, _)| vmid)
             .collect();
@@ -211,7 +228,10 @@ mod tests {
         let cluster_vmids = vec![10u32, 30];
         absent_since.retain(|vmid, _| !cluster_vmids.contains(vmid));
 
-        assert!(!absent_since.contains_key(&10), "VM 10 revenue → retirée des candidats");
+        assert!(
+            !absent_since.contains_key(&10),
+            "VM 10 revenue → retirée des candidats"
+        );
         assert!(absent_since.contains_key(&20), "VM 20 toujours absente");
     }
 
@@ -221,12 +241,17 @@ mod tests {
         let now = Instant::now();
 
         // Deux passes : le timestamp ne doit pas être écrasé à la 2e passe
-        absent_since.entry(55).or_insert(now - Duration::from_secs(100));
+        absent_since
+            .entry(55)
+            .or_insert(now - Duration::from_secs(100));
         let first_ts = absent_since[&55];
 
         // Simule une 2e passe
         absent_since.entry(55).or_insert(now); // or_insert ne remplace pas si existant
-        assert_eq!(absent_since[&55], first_ts, "timestamp préservé entre les passes");
+        assert_eq!(
+            absent_since[&55], first_ts,
+            "timestamp préservé entre les passes"
+        );
     }
 
     #[test]
@@ -236,7 +261,10 @@ mod tests {
             {"vmid": 101, "type": "qemu", "status": "stopped"},
             {"vmid": 200, "type": "lxc",  "status": "running"},
         ]);
-        let ids: Vec<u32> = json.as_array().unwrap().iter()
+        let ids: Vec<u32> = json
+            .as_array()
+            .unwrap()
+            .iter()
             .filter_map(|item| item.get("vmid")?.as_u64())
             .map(|id| id as u32)
             .collect();
@@ -246,12 +274,10 @@ mod tests {
     #[test]
     fn test_check_interval_minimum_60s() {
         let cleaner = OrphanCleaner::new(
-            Arc::new(crate::server::AnyStore::Ram(
-                Arc::new(crate::store::PageStore::new(
-                    Arc::new(crate::metrics::StoreMetrics::default()),
-                ))
-            )),
-            0,   // 0 → clamped à 60
+            Arc::new(crate::server::AnyStore::Ram(Arc::new(
+                crate::store::PageStore::new(Arc::new(crate::metrics::StoreMetrics::default())),
+            ))),
+            0, // 0 → clamped à 60
             300,
         );
         assert_eq!(cleaner.check_interval, Duration::from_secs(60));
@@ -260,7 +286,7 @@ mod tests {
     #[test]
     fn test_grace_period_zero_means_immediate() {
         let grace = Duration::from_secs(0);
-        let now   = Instant::now();
+        let now = Instant::now();
         let since = now; // absent depuis exactement maintenant
 
         // >= 0 → éligible immédiatement

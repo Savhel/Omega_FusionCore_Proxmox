@@ -27,8 +27,8 @@ if $USE_LOCAL_STORES; then
     info "Stores locaux (pas de cluster configuré)"
     NB_STORES_LOCAL=3
     for i in $(seq 1 "$NB_STORES_LOCAL"); do
-        port=$((9100 + i - 1))
-        sport=$((9200 + i - 1))
+        port=$((STORE_PORT + i - 1))
+        sport=$((STATUS_PORT + i - 1))
         start_store "burst$i" "$port" "$sport"
         BURST_STORES_CSV="${BURST_STORES_CSV:+$BURST_STORES_CSV,}127.0.0.1:$port"
         BURST_STATUS_CSV="${BURST_STATUS_CSV:+$BURST_STATUS_CSV,}127.0.0.1:$sport"

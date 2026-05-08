@@ -34,7 +34,7 @@ pub struct GpuInfo {
     /// Au moins un GPU PCI détecté.
     pub present: bool,
     /// Nombre de GPU PCI distincts.
-    pub count:   u32,
+    pub count: u32,
     /// Résumé textuel (vendor + device IDs et descriptions disponibles).
     pub summary: String,
 }
@@ -62,17 +62,15 @@ pub fn has_gpu() -> bool {
 
 fn detect_via_sysfs_pci() -> Option<GpuInfo> {
     let dir = std::fs::read_dir("/sys/bus/pci/devices").ok()?;
-    let mut count   = 0u32;
+    let mut count = 0u32;
     let mut entries = Vec::new();
 
     for entry in dir.filter_map(|e| e.ok()) {
         let class_path = entry.path().join("class");
-        let class_str  = std::fs::read_to_string(&class_path).ok()?;
+        let class_str = std::fs::read_to_string(&class_path).ok()?;
         // Format : "0x030200\n"
-        let class_val: u32 = u32::from_str_radix(
-            class_str.trim().trim_start_matches("0x"),
-            16,
-        ).ok()?;
+        let class_val: u32 =
+            u32::from_str_radix(class_str.trim().trim_start_matches("0x"), 16).ok()?;
 
         // La classe est sur 24 bits : les 8 bits de poids fort = classe PCI
         let class_top = class_val >> 16;
@@ -85,7 +83,7 @@ fn detect_via_sysfs_pci() -> Option<GpuInfo> {
         // Lire vendor/device pour le résumé (best-effort)
         let vendor = read_sysfs_id(entry.path().join("vendor"));
         let device = read_sysfs_id(entry.path().join("device"));
-        let label  = resolve_pci_class(class_val);
+        let label = resolve_pci_class(class_val);
         entries.push(format!("{label} [{vendor}:{device}]"));
     }
 
@@ -100,8 +98,8 @@ fn detect_via_dri() -> GpuInfo {
     let count = std::fs::read_dir("/dev/dri")
         .map(|d| {
             d.filter_map(|e| e.ok())
-             .filter(|e| e.file_name().to_string_lossy().starts_with("card"))
-             .count() as u32
+                .filter(|e| e.file_name().to_string_lossy().starts_with("card"))
+                .count() as u32
         })
         .unwrap_or(0);
 
@@ -128,7 +126,7 @@ fn resolve_pci_class(class: u32) -> &'static str {
         0x0301 => "XGA Compatible Controller",
         0x0302 => "3D Controller",
         0x0380 => "Display Controller",
-        _      => "GPU/Display Device",
+        _ => "GPU/Display Device",
     }
 }
 

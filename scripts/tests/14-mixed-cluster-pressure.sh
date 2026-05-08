@@ -6,8 +6,9 @@
 
 source "$(dirname "$0")/lib.sh"
 
-NB_VMS="${1:-3}"
+NB_VMS="${1:-${#TEST_VMIDS_ARR[@]}}"
 DUREE="${2:-120}"
+VMS_TO_TEST=("${TEST_VMIDS_ARR[@]:0:$NB_VMS}")
 
 header "Test M4 — Stress cluster complet ($NB_VMS VMs, ${DUREE}s)"
 print_cluster_config
@@ -15,6 +16,16 @@ print_cluster_config
 step "Prérequis"
 require_cluster
 require_bin stress-ng
+[[ ${#VMS_TO_TEST[@]} -ge 1 ]] || fail "aucune VM configurée — vérifier OMEGA_TEST_VMIDS dans cluster.conf"
+SELECTED_STRESS_VMS=()
+for _vmid in "${VMS_TO_TEST[@]}"; do
+    if require_vm_running "$_vmid"; then
+        SELECTED_STRESS_VMS+=("$SELECTED_VMID")
+    fi
+done
+mapfile -t VMS_TO_TEST < <(printf '%s\n' "${SELECTED_STRESS_VMS[@]}" | awk 'NF && !seen[$0]++')
+[[ ${#VMS_TO_TEST[@]} -ge 1 ]] || fail "aucune VM utilisable pour le stress cluster"
+NB_VMS="${#VMS_TO_TEST[@]}"
 
 step "Inventaire cluster avant stress"
 info "$(node_count) nœuds, $(store_count) stores"
@@ -28,28 +39,25 @@ print(f\"  {d.get('node_id','?'):12s}  ram={d.get('available_mib','?')} Mio  vcp
     echo "$status"
 done
 
-step "Démarrage $NB_VMS agents (un par vmid)"
+step "Démarrage ${#VMS_TO_TEST[@]} agents"
 LOGS=()
-BASE_VMID=9000
-for i in $(seq 1 "$NB_VMS"); do
-    vmid=$((BASE_VMID + i))
+for vmid in "${VMS_TO_TEST[@]}"; do
+    _ram=$(vm_ram_mib "$vmid"); _ram="${_ram:-1024}"
     LOG="/tmp/omega-m4-vm${vmid}.log"
     _TMPFILES+=("$LOG")
     LOGS+=("$LOG")
-    # On démarre un agent par VM — si la VM n'existe pas, l'agent tourne quand même
-    # (il ne peut pas faire de hotplug vCPU mais peut gérer la mémoire)
     "$AGENT_BIN" \
         --stores "$STORES_CSV" \
         --status-addrs "$STATUS_CSV" \
         --vm-id "$vmid" \
-        --vm-requested-mib 512 \
-        --region-mib 512 \
+        --vm-requested-mib "$_ram" \
+        --region-mib "$_ram" \
         --eviction-threshold-mib 999999 \
         --eviction-batch-size 32 \
         --eviction-interval-secs 3 \
         --mode daemon >"$LOG" 2>&1 &
     _PIDS+=($!)
-    info "agent vmid=$vmid démarré (log: $LOG)"
+    info "agent vmid=$vmid RAM=${_ram} MiB démarré (log: $LOG)"
 done
 sleep 3
 
@@ -121,4 +129,4 @@ done
 [[ $errors_total -eq 0 ]] || fail "M4 : $errors_total panic(s) détecté(s) dans les logs"
 [[ $stores_ok -eq $(store_count) ]] || warn "$(( $(store_count) - stores_ok )) store(s) inaccessible(s)"
 
-pass "M4 OK — cluster stable sous charge ($NB_VMS VMs, $(node_count) nœuds, ${DUREE}s)"
+pass "M4 OK — cluster stable sous charge (${#VMS_TO_TEST[@]} VMs, $(node_count) nœuds, ${DUREE}s)"

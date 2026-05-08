@@ -44,28 +44,28 @@ pub enum AnyStore {
 impl AnyStore {
     pub async fn put(&self, key: PageKey, data: Vec<u8>) -> Result<(), String> {
         match self {
-            AnyStore::Ram(s)  => s.put(key, data).map(|_| ()).map_err(|e| e.to_string()),
+            AnyStore::Ram(s) => s.put(key, data).map(|_| ()).map_err(|e| e.to_string()),
             AnyStore::Ceph(s) => s.put(key, data).await.map_err(|e| e.to_string()),
         }
     }
 
     pub async fn get(&self, key: &PageKey) -> Option<Vec<u8>> {
         match self {
-            AnyStore::Ram(s)  => s.get(key),
+            AnyStore::Ram(s) => s.get(key),
             AnyStore::Ceph(s) => s.get(key).await.ok().flatten(),
         }
     }
 
     pub async fn delete(&self, key: &PageKey) -> bool {
         match self {
-            AnyStore::Ram(s)  => s.delete(key),
+            AnyStore::Ram(s) => s.delete(key),
             AnyStore::Ceph(s) => s.delete(key).await.unwrap_or(false),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
-            AnyStore::Ram(s)  => s.len(),
+            AnyStore::Ram(s) => s.len(),
             AnyStore::Ceph(s) => s.len(),
         }
     }
@@ -78,7 +78,7 @@ impl AnyStore {
     /// Pour Ceph : retourne vide (Ceph gère sa propre capacité ; pas de listing trivial).
     pub fn list_vm_ids(&self) -> Vec<u32> {
         match self {
-            AnyStore::Ram(s)  => s.list_vm_ids(),
+            AnyStore::Ram(s) => s.list_vm_ids(),
             AnyStore::Ceph(_) => Vec::new(),
         }
     }
@@ -86,7 +86,7 @@ impl AnyStore {
     /// Supprime toutes les pages d'une VM.
     pub async fn delete_vm(&self, vm_id: u32) -> usize {
         match self {
-            AnyStore::Ram(s)  => s.delete_vm(vm_id),
+            AnyStore::Ram(s) => s.delete_vm(vm_id),
             AnyStore::Ceph(s) => {
                 warn!(vm_id, "delete_vm Ceph non supporté sans listing RADOS");
                 let _ = s;
@@ -102,7 +102,11 @@ impl AnyStore {
 ///
 /// `prebuilt_ceph` : CephStore déjà construit par main (partagé avec le status server).
 /// Si `None` et que `cfg.ceph_enabled`, on le reconstruit ici (usage legacy).
-pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Arc<StoreMetrics>) -> Result<()> {
+pub async fn run(
+    cfg: Config,
+    prebuilt_ceph: Option<Arc<CephStore>>,
+    metrics: Arc<StoreMetrics>,
+) -> Result<()> {
     let listener = TcpListener::bind(&cfg.listen).await?;
 
     // ── TLS optionnel ─────────────────────────────────────────────────────────
@@ -132,9 +136,9 @@ pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Ar
 
     // Tâche d'affichage périodique des métriques
     {
-        let metrics  = metrics.clone();
+        let metrics = metrics.clone();
         let interval = cfg.stats_interval;
-        let node_id  = cfg.node_id.clone();
+        let node_id = cfg.node_id.clone();
         tokio::spawn(async move {
             let mut ticker = time::interval(Duration::from_secs(interval));
             ticker.tick().await;
@@ -159,10 +163,10 @@ pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Ar
 
     loop {
         let (stream, peer) = listener.accept().await?;
-        let store    = store.clone();
-        let metrics  = metrics.clone();
+        let store = store.clone();
+        let metrics = metrics.clone();
         let max_pages = cfg.max_pages;
-        let node_id  = cfg.node_id.clone();
+        let node_id = cfg.node_id.clone();
 
         metrics.connections.fetch_add(1, Ordering::Relaxed);
         info!(peer = %peer, tls = cfg.tls_enabled, "nouvelle connexion");
@@ -174,8 +178,15 @@ pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Ar
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
                             if let Err(e) = handle_connection(
-                                tls_stream, peer, store, metrics.clone(), max_pages, &node_id,
-                            ).await {
+                                tls_stream,
+                                peer,
+                                store,
+                                metrics.clone(),
+                                max_pages,
+                                &node_id,
+                            )
+                            .await
+                            {
                                 if !is_connection_reset(&e) {
                                     warn!(peer = %peer, error = %e, "erreur connexion TLS");
                                 }
@@ -190,7 +201,8 @@ pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Ar
             None => {
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(stream, peer, store, metrics.clone(), max_pages, &node_id).await
+                        handle_connection(stream, peer, store, metrics.clone(), max_pages, &node_id)
+                            .await
                     {
                         if is_connection_reset(&e) {
                             debug!(peer = %peer, "connexion fermée par le client");
@@ -209,12 +221,12 @@ pub async fn run(cfg: Config, prebuilt_ceph: Option<Arc<CephStore>>, metrics: Ar
 // ─── Gestion d'une connexion (générique TLS/TCP) ──────────────────────────────
 
 async fn handle_connection<S>(
-    stream:    S,
-    peer:      SocketAddr,
-    store:     Arc<AnyStore>,
-    _metrics:  Arc<StoreMetrics>,
+    stream: S,
+    peer: SocketAddr,
+    store: Arc<AnyStore>,
+    _metrics: Arc<StoreMetrics>,
     max_pages: u64,
-    node_id:   &str,
+    node_id: &str,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -257,7 +269,7 @@ async fn dispatch(msg: &Message, store: &AnyStore, max_pages: u64, node_id: &str
             }
             let key = PageKey::new(msg.vm_id, msg.page_id);
             match store.put(key, msg.payload.clone()).await {
-                Ok(_)    => Message::ok(msg.vm_id, msg.page_id),
+                Ok(_) => Message::ok(msg.vm_id, msg.page_id),
                 Err(err) => Message::error_msg(&err),
             }
         }
@@ -266,7 +278,7 @@ async fn dispatch(msg: &Message, store: &AnyStore, max_pages: u64, node_id: &str
             let key = PageKey::new(msg.vm_id, msg.page_id);
             match store.get(&key).await {
                 Some(data) => Message::new(Opcode::Ok, msg.vm_id, msg.page_id, data),
-                None       => Message::not_found(msg.vm_id, msg.page_id),
+                None => Message::not_found(msg.vm_id, msg.page_id),
             }
         }
 
@@ -289,7 +301,7 @@ async fn dispatch(msg: &Message, store: &AnyStore, max_pages: u64, node_id: &str
         }
 
         Opcode::BatchPutPage => {
-            let count      = msg.page_id as usize;
+            let count = msg.page_id as usize;
             let entry_size = 8 + PAGE_SIZE;
             if msg.payload.len() != count * entry_size {
                 return Message::error_msg("BATCH_PUT payload corrompu");
@@ -298,12 +310,12 @@ async fn dispatch(msg: &Message, store: &AnyStore, max_pages: u64, node_id: &str
             let mut stored = 0u32;
             let mut failed = 0u32;
             for i in 0..count {
-                let off     = i * entry_size;
+                let off = i * entry_size;
                 let page_id = u64::from_be_bytes(msg.payload[off..off + 8].try_into().unwrap());
-                let data    = msg.payload[off + 8..off + entry_size].to_vec();
-                let key     = PageKey::new(vm_id, page_id);
+                let data = msg.payload[off + 8..off + entry_size].to_vec();
+                let key = PageKey::new(vm_id, page_id);
                 match store.put(key, data).await {
-                    Ok(_)  => stored += 1,
+                    Ok(_) => stored += 1,
                     Err(_) => failed += 1,
                 }
             }
