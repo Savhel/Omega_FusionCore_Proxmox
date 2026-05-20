@@ -18,6 +18,7 @@ def node(
     vcpu=16,
     gpu_total=0,
     gpu_free=0,
+    disk_pressure=0.0,
     local_vms=None,
 ):
     return NodeState(
@@ -29,6 +30,7 @@ def node(
         vcpu_free=vcpu,
         gpu_total_vram_mib=gpu_total,
         gpu_free_vram_mib=gpu_free,
+        disk_pressure_pct=disk_pressure,
         local_vms=local_vms or [],
     )
 
@@ -107,3 +109,56 @@ def test_rejects_without_gpu_and_without_fallback():
     )
 
     assert decision.action == GpuPlacementAction.REJECT
+
+
+def test_gpu_target_penalizes_unhealthy_disk_pressure():
+    states = {
+        "emilia": node("emilia", gpu_total=0, gpu_free=0),
+        "ram": node(
+            "ram",
+            ram=60000,
+            vcpu=24,
+            gpu_total=24576,
+            gpu_free=20000,
+            disk_pressure=95.0,
+        ),
+        "rem": node(
+            "rem",
+            ram=48000,
+            vcpu=18,
+            gpu_total=24576,
+            gpu_free=18000,
+            disk_pressure=1.0,
+        ),
+    }
+
+    decision = choose_gpu_placement(
+        source_node="emilia",
+        vm=vm(),
+        node_states=states,
+        required_vcpus=2,
+        gpu_budget_mib=1024,
+    )
+
+    assert decision.action == GpuPlacementAction.MIGRATE_TO_GPU
+    assert decision.target_node == "rem"
+
+
+def test_proxy_target_keeps_vram_headroom():
+    states = {
+        "emilia": node("emilia", gpu_total=0, gpu_free=0),
+        "ram": node("ram", gpu_total=8192, gpu_free=1500, ram=64000, vcpu=30),
+        "rem": node("rem", gpu_total=8192, gpu_free=4096, ram=32000, vcpu=16),
+    }
+
+    decision = choose_gpu_placement(
+        source_node="emilia",
+        vm=vm(),
+        node_states=states,
+        required_vcpus=64,
+        gpu_budget_mib=1024,
+        fallback_network=True,
+    )
+
+    assert decision.action == GpuPlacementAction.REMOTE_PROXY
+    assert decision.target_node == "rem"

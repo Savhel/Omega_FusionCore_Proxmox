@@ -157,15 +157,11 @@ def _best_gpu_migration_target(
     if not candidates:
         return None
 
-    # Score professionnel: ne choisit pas juste "plus de RAM", il reduit aussi
-    # la fragmentation en preferant les noeuds deja GPU mais peu charges.
+    # Score intelligent: ne choisit pas juste "plus de VRAM". On penalise les
+    # noeuds en pression disque et on garde un leger biais de consolidation pour
+    # eviter d'eparpiller les VMs quand plusieurs cibles sont equivalentes.
     candidates.sort(
-        key=lambda node: (
-            node.gpu_free_vram_mib,
-            node.vcpu_free,
-            node.mem_available_kb,
-            -len(node.local_vms),
-        ),
+        key=lambda node: _gpu_node_score(node, vm, required_vcpus, gpu_budget_mib),
         reverse=True,
     )
     return candidates[0].node_id
@@ -184,14 +180,60 @@ def _best_gpu_proxy_target(
     if not candidates:
         return None
     candidates.sort(
-        key=lambda node: (
-            node.gpu_free_vram_mib,
-            node.vcpu_free,
-            node.mem_available_kb,
+        key=lambda node: _gpu_node_score(
+            node,
+            vm=None,
+            required_vcpus=0,
+            gpu_budget_mib=gpu_budget_mib,
         ),
         reverse=True,
     )
     return candidates[0].node_id
+
+
+def _gpu_node_score(
+    node: NodeState,
+    vm: Optional[VmState],
+    required_vcpus: int,
+    gpu_budget_mib: int,
+) -> float:
+    gpu_free_ratio = (
+        node.gpu_free_vram_mib / node.gpu_total_vram_mib
+        if node.gpu_total_vram_mib > 0 else 0.0
+    )
+    ram_free_ratio = (
+        node.mem_available_kb / node.mem_total_kb
+        if node.mem_total_kb > 0 else 0.0
+    )
+    vcpu_free_ratio = (
+        node.vcpu_free / node.vcpu_total
+        if node.vcpu_total > 0 else 0.0
+    )
+    disk_free_ratio = max(0.0, 1.0 - node.disk_pressure_pct / 100.0)
+    consolidation_ratio = min(len(node.local_vms), 12) / 12.0
+
+    # Reserve fit: une cible qui a juste assez de VRAM reste possible, mais elle
+    # passe derriere une cible qui garde une marge exploitable pour d'autres VMs.
+    reserve_ratio = (
+        max(0, node.gpu_free_vram_mib - gpu_budget_mib) / node.gpu_total_vram_mib
+        if node.gpu_total_vram_mib > 0 else 0.0
+    )
+    capacity_fit = 1.0
+    if vm is not None:
+        if vm.max_mem_mib > 0 and node.mem_available_kb < vm.max_mem_mib * 1024:
+            capacity_fit -= 0.5
+        if required_vcpus > 0 and node.vcpu_free < required_vcpus:
+            capacity_fit -= 0.5
+
+    return (
+        gpu_free_ratio * 0.30
+        + reserve_ratio * 0.25
+        + ram_free_ratio * 0.18
+        + vcpu_free_ratio * 0.12
+        + disk_free_ratio * 0.15
+        + consolidation_ratio * 0.05
+        + capacity_fit
+    )
 
 
 def _proxy_url(node: NodeState, fallback_node_id: str, proxy_port: int) -> str:

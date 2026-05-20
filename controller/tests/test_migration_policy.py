@@ -23,6 +23,7 @@ def make_node(
     vcpu_total: int = 24,
     gpu_total: int = 0,
     gpu_free: int = 0,
+    disk_pressure: float = 0.0,
     vms: list = None,
 ) -> NodeState:
     total_kb = 32 * 1024 * 1024  # 32 Go
@@ -36,6 +37,7 @@ def make_node(
         vcpu_free       = vcpu_total - vcpu_used,
         gpu_total_vram_mib = gpu_total,
         gpu_free_vram_mib = gpu_free,
+        disk_pressure_pct = disk_pressure,
         local_vms       = vms or [],
     )
 
@@ -156,6 +158,28 @@ class TestTargetSelection:
         }
         target = policy._best_target_vcpu("node-a", make_vm(99), nodes)
         assert target == "node-b"  # 19 vCPU libres vs 12 pour node-c
+
+    def test_target_selection_penalizes_disk_pressure(self):
+        policy = default_policy()
+        vm = make_vm(1, max_mem_mib=2048)
+        nodes = {
+            "node-a": make_node("node-a", ram_pct=88.0, vms=[vm]),
+            "node-b": make_node("node-b", ram_pct=35.0, disk_pressure=1.0),
+            "node-c": make_node("node-c", ram_pct=20.0, disk_pressure=95.0),
+        }
+        target = policy._best_target("node-a", vm, nodes)
+        assert target == "node-b"
+
+    def test_gpu_target_selection_prefers_healthy_gpu_node(self):
+        policy = default_policy()
+        vm = make_vm(1, max_mem_mib=2048, gpu_budget=2048)
+        nodes = {
+            "node-a": make_node("node-a", ram_pct=88.0, gpu_total=8192, gpu_free=1024, vms=[vm]),
+            "node-b": make_node("node-b", ram_pct=20.0, gpu_total=8192, gpu_free=6144, disk_pressure=95.0),
+            "node-c": make_node("node-c", ram_pct=35.0, gpu_total=8192, gpu_free=4096, disk_pressure=1.0),
+        }
+        target = policy._best_target("node-a", vm, nodes)
+        assert target == "node-c"
 
 
 # ─── evaluate — scénarios complets ───────────────────────────────────────────

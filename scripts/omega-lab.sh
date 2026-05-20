@@ -491,6 +491,24 @@ Le script mesure les endpoints Omega par nœud, l'état Proxmox des VMs, qemu-gu
 Il écrit un rapport JSON dans /tmp/omega-production-metrics-*.json pour comparer si le cluster est lent ou rapide après plusieurs runs.
 EOF
             ;;
+        34|M8) cat <<'EOF'
+Valide le placement GPU global.
+Le script choisit le meilleur nœud GPU selon VRAM libre, RAM, vCPU et pression disque; si la VM n'est pas déjà dessus, il tente une migration Proxmox live, puis vérifie un job CUDA via le proxy.
+Si la migration est impossible mais que le fallback réseau est autorisé, il valide que la VM peut quand même consommer le GPU via omega-gpu-proxy.
+EOF
+            ;;
+        35|M9) cat <<'EOF'
+Valide le fallback GPU réseau.
+Le script ne dépend pas du passthrough GPU dans la VM: il attribue un budget VRAM logique et soumet un job CUDA au proxy applicatif.
+Un succès prouve le scénario VM sans GPU local -> API proxy -> worker CUDA sur nœud GPU.
+EOF
+            ;;
+        36) cat <<'EOF'
+Valide la concurrence GPU CUDA.
+Le script lance plusieurs jobs matrix_multiply CUDA depuis plusieurs VMIDs et exige que le proxy respecte les budgets, refuse le hors-budget et exécute réellement sur backend=torch device=cuda.
+Un échec indique souvent une mauvaise configuration OMEGA_GPU_PYTHON, un max_concurrent trop bas ou un worker qui retombe en CPU.
+EOF
+            ;;
         28) cat <<'EOF'
 Valide la resilience a une partition reseau controlee.
 Le script coupe volontairement une partie du reseau pour observer la reaction du cluster, puis restaure la connectivite.
@@ -1321,7 +1339,7 @@ run_section_4() {
     _hdr "══ Section 4 — Tests GPU ══"
     if ! $DO_GPU; then
         _warn "GPU non activé — relancez avec --gpu pour activer ces tests"
-        for t in 06 07 32; do RESULTS["$t"]="SKIP"; ((TOTAL_SKIP++)) || true; done
+        for t in 06 07 32 34 35 36; do RESULTS["$t"]="SKIP"; ((TOTAL_SKIP++)) || true; done
         return
     fi
     _sync
@@ -1333,6 +1351,9 @@ run_section_4() {
         RESULTS["07"]="SKIP"; ((TOTAL_SKIP++)) || true
     fi
     _run_cluster "32" "GPU proxy applicatif" "32-gpu-proxy.sh" "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "34" "GPU placement global" "34-gpu-placement-global.sh" "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "35" "GPU fallback réseau"  "35-gpu-network-fallback.sh" "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "36" "GPU concurrence CUDA" "36-gpu-concurrency-cuda.sh" "${TEST_VMIDS_ARR[0]}"
 }
 
 run_section_5() {
@@ -1351,6 +1372,12 @@ run_section_5() {
     _run_cluster "M5" "Live migration pression"     "15-mixed-live-migration-pressure.sh" "${TEST_VMIDS_ARR[0]}"
     _run_cluster "M6" "Rafale démarrages"           "16-mixed-burst-starts.sh"          6
     _run_cluster "M7" "Drain nœud"                  "17-mixed-drain-node.sh"            "${CONTROLLER_NODE}"
+    if $DO_GPU; then
+        _run_cluster "M8" "Placement GPU intelligent" "34-gpu-placement-global.sh"       "${TEST_VMIDS_ARR[0]}"
+        _run_cluster "M9" "Fallback GPU réseau"       "35-gpu-network-fallback.sh"       "${TEST_VMIDS_ARR[0]}"
+    else
+        for t in M8 M9; do RESULTS["$t"]="SKIP"; ((TOTAL_SKIP++)) || true; done
+    fi
 }
 
 run_section_6() {
@@ -1369,9 +1396,12 @@ run_section_6() {
     if $DO_GPU; then
         _run_cluster "27" "GPU réel / rendu"      "27-gpu-real-render.sh"  "${TEST_VMIDS_ARR[0]}"
         _run_cluster "32" "GPU proxy applicatif"  "32-gpu-proxy.sh"        "${TEST_VMIDS_ARR[0]}"
+        _run_cluster "34" "GPU placement global"  "34-gpu-placement-global.sh" "${TEST_VMIDS_ARR[0]}"
+        _run_cluster "35" "GPU fallback réseau"   "35-gpu-network-fallback.sh" "${TEST_VMIDS_ARR[0]}"
+        _run_cluster "36" "GPU concurrence CUDA"  "36-gpu-concurrency-cuda.sh" "${TEST_VMIDS_ARR[0]}"
     else
-        _warn "Tests 27/32 ignorés — relancer avec --gpu"
-        for t in 27 32; do RESULTS["$t"]="SKIP"; ((TOTAL_SKIP++)) || true; done
+        _warn "Tests 27/32/34/35/36 ignorés — relancer avec --gpu"
+        for t in 27 32 34 35 36; do RESULTS["$t"]="SKIP"; ((TOTAL_SKIP++)) || true; done
     fi
     if $DO_DESTRUCTIVE; then
         _run_cluster "28" "Partition réseau"      "28-network-partition.sh" "${NODES_ARR[1]:-}"
@@ -1500,6 +1530,9 @@ run_one() {
         27) _run_cluster  "27" "GPU réel / rendu"           "27-gpu-real-render.sh"       "${TEST_VMIDS_ARR[0]}" ;;
         32) _run_cluster  "32" "GPU proxy applicatif"        "32-gpu-proxy.sh"             "${TEST_VMIDS_ARR[0]}" ;;
         33) _run_cluster  "33" "Métriques production"        "33-production-metrics.sh" ;;
+        34) _run_cluster  "34" "GPU placement global"        "34-gpu-placement-global.sh"  "${TEST_VMIDS_ARR[0]}" ;;
+        35) _run_cluster  "35" "GPU fallback réseau"         "35-gpu-network-fallback.sh"  "${TEST_VMIDS_ARR[0]}" ;;
+        36) _run_cluster  "36" "GPU concurrence CUDA"        "36-gpu-concurrency-cuda.sh"  "${TEST_VMIDS_ARR[0]}" ;;
         28) _run_cluster  "28" "Partition réseau"           "28-network-partition.sh"     "${NODES_ARR[1]:-}" ;;
         29) _run_cluster  "29" "Soak long physique"         "29-long-run-soak.sh"         "${TEST_VMIDS_ARR[0]}" "${OMEGA_SOAK_SECS:-1800}" ;;
         31) _run_cluster  "31" "Scalabilité VMs physiques"   "31-scale-vms.sh"            "${OMEGA_SCALE_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}" "${OMEGA_SCALE_TARGET:-500}" "${OMEGA_SCALE_BATCH_SIZE:-20}" "${OMEGA_SCALE_SOAK_SECS:-1800}" ;;
@@ -1510,6 +1543,8 @@ run_one() {
         M5) _run_cluster  "M5" "Live migration pression"    "15-mixed-live-migration-pressure.sh" "${TEST_VMIDS_ARR[0]}" ;;
         M6) _run_cluster  "M6" "Rafale démarrages"          "16-mixed-burst-starts.sh"        6 ;;
         M7) _run_cluster  "M7" "Drain nœud"                 "17-mixed-drain-node.sh"          "${CONTROLLER_NODE}" ;;
+        M8) _run_cluster  "M8" "Placement GPU intelligent"  "34-gpu-placement-global.sh"      "${TEST_VMIDS_ARR[0]}" ;;
+        M9) _run_cluster  "M9" "Fallback GPU réseau"        "35-gpu-network-fallback.sh"      "${TEST_VMIDS_ARR[0]}" ;;
         *)  _warn "ID de test inconnu : $1" ;;
     esac
 }
@@ -1578,16 +1613,16 @@ show_menu() {
     echo -e "   ${BOLD}[1]${RESET}  Section 1 — Isolés    : smoke · réplication · failover · éviction"
     echo -e "   ${BOLD}[2]${RESET}  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU"
     echo -e "   ${BOLD}[3]${RESET}  Section 3 — Cluster   : vCPU · migration · balloon · compaction"
-    echo -e "   ${BOLD}[4]${RESET}  Section 4 — GPU       : placement · scheduler · proxy$(${DO_GPU} && echo '' || echo '  (--gpu requis)')"
-    echo -e "   ${BOLD}[5]${RESET}  Section 5 — Mixtes    : stress · live migration · drain"
+    echo -e "   ${BOLD}[4]${RESET}  Section 4 — GPU       : placement · scheduler · proxy · CUDA$(${DO_GPU} && echo '' || echo '  (--gpu requis)')"
+    echo -e "   ${BOLD}[5]${RESET}  Section 5 — Mixtes    : stress · live migration · drain · GPU"
     echo -e "   ${BOLD}[6]${RESET}  Section 6 — Physique  : install · réseau VM · Ceph/GPU réel · panne · soak"
     echo ""
 
     # ── Tests individuels ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Test individuel (entrer le numéro) ───────────────────────${RESET}"
     echo -e "   ${DIM}Isolés  :${RESET}  00  01  02  03  04  10  18  20  21  23"
-    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29  30  31  32  33"
-    echo -e "   ${DIM}Mixtes  :${RESET}  M1  M2  M3  M4  M5  M6  M7"
+    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29  30  31  32  33  34  35  36"
+    echo -e "   ${DIM}Mixtes  :${RESET}  M1  M2  M3  M4  M5  M6  M7  M8  M9"
     echo ""
 
     echo -e "   ${BOLD}[g]${RESET}  GPU tests : $(${DO_GPU} && echo "${GREEN}activé  ${RESET}→ [g] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [g] pour activer")"

@@ -26,9 +26,9 @@ Le daemon Rust reçoit l'ordre et exécute `qm migrate`.
 
 # Choix de la cible
 
-  La cible est le nœud avec le meilleur score composite :
-    score = (1 - ram_usage) × 0.6 + (1 - vcpu_usage) × 0.4
-  On n'envoie jamais vers un nœud avec RAM > 80% ou vCPU > 80%.
+  La cible est le nœud avec le meilleur score composite. Le score tient compte
+  de la RAM, du CPU, de la pression disque et, pour les VMs GPU, de la VRAM.
+  On n'envoie jamais vers un nœud qui ne peut pas accepter la VM.
 """
 
 from __future__ import annotations
@@ -534,10 +534,23 @@ class MigrationPolicy:
     def _placement_score_for_vm(self, node: NodeState, vm: VmState) -> float:
         ram_free_ratio  = 1.0 - node.ram_used_pct / 100.0
         vcpu_free_ratio = 1.0 - node.vcpu_used_pct / 100.0
+        disk_free_ratio = max(0.0, 1.0 - node.disk_pressure_pct / 100.0)
+        consolidation_ratio = min(len(node.local_vms), 12) / 12.0
         if vm.gpu_vram_budget_mib <= 0:
-            return ram_free_ratio * 0.6 + vcpu_free_ratio * 0.4
+            return (
+                ram_free_ratio * 0.50
+                + vcpu_free_ratio * 0.30
+                + disk_free_ratio * 0.15
+                + consolidation_ratio * 0.05
+            )
         gpu_free_ratio = (
             node.gpu_free_vram_mib / node.gpu_total_vram_mib
             if node.gpu_total_vram_mib > 0 else 0.0
         )
-        return ram_free_ratio * 0.45 + vcpu_free_ratio * 0.35 + gpu_free_ratio * 0.20
+        return (
+            gpu_free_ratio * 0.35
+            + ram_free_ratio * 0.30
+            + vcpu_free_ratio * 0.20
+            + disk_free_ratio * 0.10
+            + consolidation_ratio * 0.05
+        )
