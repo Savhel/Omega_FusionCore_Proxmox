@@ -14,14 +14,15 @@
 //!
 //! ## Commande Proxmox
 //!
-//! `qm balloon <vmid> <mib>` — la valeur est en Mio.
-//! Correspond à `PUT /nodes/{node}/qemu/{vmid}/resize` en interne mais qm
-//! ballot est plus direct et ne nécessite pas de redémarrage.
+//! Proxmox n'expose pas `qm balloon` sur toutes les versions. On passe donc par
+//! le moniteur QEMU/HMP: `qm monitor <vmid>`, puis commande `balloon <mib>`.
 
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -66,6 +67,10 @@ impl BalloonManager {
             current_mib: Arc::new(AtomicU64::new(min_mib)),
             metrics,
         }
+    }
+
+    pub fn current_mib_handle(&self) -> Arc<AtomicU64> {
+        self.current_mib.clone()
     }
 
     pub async fn run(self: Arc<Self>, shutdown: Arc<AtomicBool>) {
@@ -122,7 +127,9 @@ impl BalloonManager {
                             "balloon ajusté"
                         );
                     }
-                    Err(e) => warn!(vm_id = self.vm_id, error = %e, "qm balloon échoué"),
+                    Err(e) => {
+                        warn!(vm_id = self.vm_id, error = %e, "commande balloon QMP/HMP échouée")
+                    }
                 }
             }
         }
@@ -130,14 +137,35 @@ impl BalloonManager {
 }
 
 async fn set_balloon(vm_id: u32, mib: u64) -> anyhow::Result<()> {
-    let out = Command::new("qm")
-        .args(["balloon", &vm_id.to_string(), &mib.to_string()])
-        .output()
-        .await?;
+    let mut child = Command::new("qm")
+        .args(["monitor", &vm_id.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(format!("balloon {mib}\nquit\n").as_bytes())
+            .await?;
+    }
+
+    let out = child.wait_with_output().await?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
 
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("qm balloon {vm_id} {mib}: {stderr}");
+        anyhow::bail!("qm monitor {vm_id} balloon {mib}: {stderr}");
     }
+
+    let combined = format!("{stdout}\n{stderr}");
+    let combined_lower = combined.to_lowercase();
+    if combined_lower.contains("unknown command")
+        || combined_lower.contains("error:")
+        || combined_lower.contains("failed")
+    {
+        anyhow::bail!("qm monitor {vm_id} balloon {mib}: {}", combined.trim());
+    }
+
     Ok(())
 }

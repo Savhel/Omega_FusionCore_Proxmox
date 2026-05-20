@@ -9,6 +9,7 @@ source "$(dirname "$0")/lib.sh"
 VMID="${1:-$TEST_VMID}"
 require_vm_running "$VMID"
 VMID="$SELECTED_VMID"
+ensure_omega_vcpu_profile "$VMID"
 VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
 VM_CORES=$(vm_cores "$VMID");     VM_CORES="${VM_CORES:-4}"
 
@@ -21,8 +22,10 @@ step "Prérequis"
 require_cluster
 
 step "Remise à 1 vCPU (état de référence)"
-qm set "$VMID" --vcpus 1 &>/dev/null || true
-sleep 1
+stop_vm_for_reconfig "$VMID"
+qm set "$VMID" --vcpus 1 >/dev/null
+start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID avec 1 vCPU runtime"
+sleep 5
 
 step "État initial"
 node_init=$(vm_node "$VMID")
@@ -54,11 +57,11 @@ _PIDS+=($!)
 sleep 3
 
 step "Saturation CPU hôte (stress sur le nœud compute) + charge VM"
-info "Saturation CPU hôte avec stress-ng (60s)"
-stress-ng --cpu 0 --timeout 60s &>/dev/null &
-_PIDS+=($!)
+info "Saturation CPU hôte (60s)"
+host_cpu_stress 60 || true
 
 info "Charge RAM + CPU dans la VM (70s)"
+ensure_guest_packages "$VMID" stress-ng qemu-guest-agent || true
 if ! qm guest exec "$VMID" -- \
     stress-ng --vm 1 --vm-bytes 80% --cpu 0 --timeout 70s &>/dev/null 2>&1; then
     warn "qemu-guest-agent absent — injection CPU via cgroup (RAM stress ignorée)"

@@ -9,6 +9,7 @@ source "$(dirname "$0")/lib.sh"
 VMID="${1:-$TEST_VMID}"
 require_vm_running "$VMID"
 VMID="$SELECTED_VMID"
+ensure_omega_vcpu_profile "$VMID"
 VM_RAM_MIB=$(vm_ram_mib "$VMID"); VM_RAM_MIB="${VM_RAM_MIB:-1024}"
 VM_CORES=$(vm_cores "$VMID");     VM_CORES="${VM_CORES:-4}"
 MIN_VCPUS_REQUIRED=$VM_CORES
@@ -66,25 +67,25 @@ _TMPFILES+=("$LOG")
 _PIDS+=($!)
 
 step "Charge CPU dans la VM pour déclencher hotplug"
-qm guest exec "$VMID" -- stress-ng --cpu 0 --timeout 80s &>/dev/null &
-_PIDS+=($!)
+vm_cpu_stress "$VMID" 80
 
 step "Surveillance placement GPU + hotplug vCPU pendant 90s"
 t0=$SECONDS
 gpu_placed=false; vcpu_scaled=false
-vcpus_max=1
+vcpus_init="$(vm_runtime_vcpus "$VMID" || echo 1)"
+vcpus_max="$vcpus_init"
 
 while [[ $(elapsed $t0) -lt 90 ]]; do
     node_now=$(vm_node "$VMID" || echo "?")
-    vcpus_now=$(qm config "$VMID" | grep "^vcpus:" | awk '{print $2}' || echo "1")
-    [[ "${vcpus_now:-1}" -gt "$vcpus_max" ]] && vcpus_max="$vcpus_now"
+    vcpus_now="$(vm_runtime_vcpus "$VMID" || true)"
+    [[ -n "$vcpus_now" && "${vcpus_now:-1}" -gt "$vcpus_max" ]] && vcpus_max="$vcpus_now"
 
     # Placement GPU réussi si VM sur un nœud GPU
     printf '%s\n' "${GPU_NODES[@]}" | grep -qx "$node_now" && gpu_placed=true
     # vCPU scalé si plus de 1 vCPU
-    [[ "${vcpus_now:-1}" -gt 1 ]] && vcpu_scaled=true
+    [[ -n "$vcpus_now" && "${vcpus_now:-1}" -gt "$vcpus_init" ]] && vcpu_scaled=true
 
-    printf "\r  [%3ds] nœud=%-12s  vCPUs=%-3s(max=%s)  sur_gpu_node=%s" \
+    printf "\r  [%3ds] nœud=%-12s  vCPUs runtime=%-3s(max=%s)  sur_gpu_node=%s" \
         "$(elapsed $t0)" "$node_now" "${vcpus_now:-?}" "$vcpus_max" \
         "$([ $gpu_placed = true ] && echo OUI || echo non)"
     sleep 5
@@ -94,7 +95,7 @@ echo ""
 step "Résultats"
 node_final=$(vm_node "$VMID" || echo "inconnu")
 info "VM $VMID : $node_init → $node_final"
-info "vCPU initial=1 | max observé=$vcpus_max"
+info "vCPU runtime initial=$vcpus_init | max observé=$vcpus_max"
 info "Nœuds GPU : ${GPU_NODES[*]}"
 
 $gpu_placed   && pass "GPU placement OK — VM sur nœud GPU : $node_final" || \

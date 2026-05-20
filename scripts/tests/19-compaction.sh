@@ -48,10 +48,7 @@ AGENT_PID=$!
 sleep 5
 
 step "Simulation pression mémoire pour déclencher la compaction (stress 120s)"
-info "stress-ng --vm 1 --vm-bytes 88% --timeout 120s"
-stress-ng --vm 1 --vm-bytes 88% --timeout 120s &>/dev/null &
-STRESS_PID=$!
-_PIDS+=($STRESS_PID)
+host_mem_stress 120 "88%" || fail "impossible de générer une pression mémoire locale: installer python3 ou stress-ng"
 
 step "Surveillance compaction pendant 150s"
 t0=$SECONDS
@@ -77,8 +74,6 @@ while [[ $(elapsed $t0) -lt 150 ]]; do
     sleep 5
 done
 echo ""
-
-kill "$STRESS_PID" 2>/dev/null || true
 
 step "Logs compaction"
 grep -i "compact\|migrat\|bin.pack\|vider" "$LOG_AGENT" | head -20 || true

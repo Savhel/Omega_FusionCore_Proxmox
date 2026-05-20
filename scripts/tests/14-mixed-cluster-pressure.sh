@@ -15,8 +15,31 @@ print_cluster_config
 
 step "Prérequis"
 require_cluster
-require_bin stress-ng
+STRESS_NODES=()
+declare -A STRESS_MODE
+for n in "${OMEGA_NODES_ARR[@]}"; do
+    if _is_local_node "$n"; then
+        if command -v stress-ng >/dev/null 2>&1; then
+            STRESS_MODE["$n"]="stress-ng"
+            STRESS_NODES+=("$n")
+        elif command -v python3 >/dev/null 2>&1; then
+            STRESS_MODE["$n"]="python"
+            STRESS_NODES+=("$n")
+        else
+            warn "M4 continuera sans charge hôte sur $n; stress-ng/python3 absents"
+        fi
+    elif ssh_run "$n" "command -v stress-ng >/dev/null 2>&1"; then
+        STRESS_MODE["$n"]="stress-ng"
+        STRESS_NODES+=("$n")
+    elif ssh_run "$n" "command -v python3 >/dev/null 2>&1"; then
+        STRESS_MODE["$n"]="python"
+        STRESS_NODES+=("$n")
+    else
+        warn "M4 continuera sans charge hôte sur $n; stress-ng/python3 absents"
+    fi
+done
 [[ ${#VMS_TO_TEST[@]} -ge 1 ]] || fail "aucune VM configurée — vérifier OMEGA_TEST_VMIDS dans cluster.conf"
+[[ ${#STRESS_NODES[@]} -ge 1 ]] || warn "aucun noeud hôte avec générateur de charge; M4 validera surtout les agents/stores"
 SELECTED_STRESS_VMS=()
 for _vmid in "${VMS_TO_TEST[@]}"; do
     if require_vm_running "$_vmid"; then
@@ -25,6 +48,23 @@ for _vmid in "${VMS_TO_TEST[@]}"; do
 done
 mapfile -t VMS_TO_TEST < <(printf '%s\n' "${SELECTED_STRESS_VMS[@]}" | awk 'NF && !seen[$0]++')
 [[ ${#VMS_TO_TEST[@]} -ge 1 ]] || fail "aucune VM utilisable pour le stress cluster"
+NB_VMS="${#VMS_TO_TEST[@]}"
+
+step "Normalisation profil Omega des VMs"
+NORMALIZED_VMS=()
+for vmid in "${VMS_TO_TEST[@]}"; do
+    if ensure_omega_vcpu_profile_safe "$vmid"; then
+        _refresh_vm_node_cache "$vmid" >/dev/null
+        _cores=$(vm_cores "$vmid")
+        info "VM $vmid conforme : max_vcpus=${_cores:-?}"
+        NORMALIZED_VMS+=("$vmid")
+    else
+        warn "VM $vmid ignorée pour M4 : config distante illisible ou réparation impossible"
+        unset "_VM_NODE_CACHE[$vmid]"
+    fi
+done
+VMS_TO_TEST=("${NORMALIZED_VMS[@]}")
+[[ ${#VMS_TO_TEST[@]} -ge 1 ]] || fail "aucune VM normalisée utilisable pour M4"
 NB_VMS="${#VMS_TO_TEST[@]}"
 
 step "Inventaire cluster avant stress"
@@ -61,16 +101,34 @@ for vmid in "${VMS_TO_TEST[@]}"; do
 done
 sleep 3
 
-step "Saturation RAM sur tous les nœuds"
-for n in "${OMEGA_NODES_ARR[@]}"; do
-    info "stress-ng --vm 1 --vm-bytes 75% sur $n"
-    ssh_run_bg "$n" "stress-ng --vm 1 --vm-bytes 75% --timeout ${DUREE}s &>/dev/null"
+step "Saturation RAM sur les nœuds avec générateur disponible"
+for n in "${STRESS_NODES[@]}"; do
+    if [[ "${STRESS_MODE[$n]}" == "stress-ng" ]]; then
+        info "stress-ng --vm 1 --vm-bytes 75% sur $n"
+        ssh_run_bg "$n" "stress-ng --vm 1 --vm-bytes 75% --timeout ${DUREE}s &>/dev/null"
+    else
+        info "fallback Python mémoire sur $n"
+        ssh_run_bg "$n" "python3 -c \"import time; chunks=[]; deadline=time.time()+${DUREE}; chunk=16*1024*1024
+while time.time()<deadline:
+    try:
+        b=bytearray(chunk)
+        b[0]=1
+        chunks.append(b)
+    except MemoryError:
+        time.sleep(1)
+    time.sleep(0.05)\" &>/dev/null"
+    fi
 done
 
-step "Saturation CPU sur tous les nœuds"
-for n in "${OMEGA_NODES_ARR[@]}"; do
-    info "stress-ng --cpu 0 sur $n"
-    ssh_run_bg "$n" "stress-ng --cpu 0 --timeout ${DUREE}s &>/dev/null"
+step "Saturation CPU sur les nœuds avec générateur disponible"
+for n in "${STRESS_NODES[@]}"; do
+    if [[ "${STRESS_MODE[$n]}" == "stress-ng" ]]; then
+        info "stress-ng --cpu 0 sur $n"
+        ssh_run_bg "$n" "stress-ng --cpu 0 --timeout ${DUREE}s &>/dev/null"
+    else
+        info "fallback shell CPU sur $n"
+        ssh_run_bg "$n" "timeout ${DUREE}s bash -lc 'for i in \$(seq 1 \$(nproc 2>/dev/null || echo 1)); do while :; do :; done & done; wait' &>/dev/null"
+    fi
 done
 
 step "Observation pendant ${DUREE}s"

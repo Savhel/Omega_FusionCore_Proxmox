@@ -12,8 +12,14 @@ VMID="$SELECTED_VMID"
 header "Test 25 — Réseau VM invitée (VM $VMID)"
 
 step "Vérification qemu-guest-agent"
-if ! qm guest ping "$VMID" &>/dev/null; then
-    fail "qemu-guest-agent indisponible dans la VM $VMID — impossible de tester automatiquement le réseau invité"
+if ! qm guest cmd "$VMID" ping &>/dev/null; then
+    cfg="$(qm config "$VMID" 2>/dev/null || true)"
+    if ! printf '%s\n' "$cfg" | grep -q '^agent:.*enabled=1'; then
+        warn "agent Proxmox non activé dans la config — activation côté Proxmox"
+        qm set "$VMID" --agent enabled=1 >/dev/null || true
+        fail "qemu-guest-agent activé côté Proxmox mais la VM doit être redémarrée, puis installer/démarrer qemu-guest-agent dans l'invité"
+    fi
+    fail "qemu-guest-agent indisponible dans la VM $VMID — dans l'invité exécuter: apt-get update && apt-get install -y qemu-guest-agent && systemctl start qemu-guest-agent; puis redémarrer la VM si Proxmox ne répond toujours pas"
 fi
 pass "qemu-guest-agent OK"
 

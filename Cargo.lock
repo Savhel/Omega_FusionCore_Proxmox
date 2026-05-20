@@ -1347,6 +1347,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega-gpu-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "dashmap",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "omega-qemu-launcher"
 version = "0.1.0"
 dependencies = [

@@ -11,6 +11,7 @@ INTERVAL="${OMEGA_SOAK_INTERVAL:-30}"
 
 require_vm_running "$VMID"
 VMID="$SELECTED_VMID"
+ensure_omega_vcpu_profile "$VMID"
 
 header "Test 29 — Soak long physique (VM $VMID, ${DURATION}s)"
 

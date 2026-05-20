@@ -17,6 +17,7 @@
 #   SNIPPETS_DIR : snippets Proxmox          (défaut : /var/lib/vz/snippets)
 #   OMEGA_RUN_DIR: état runtime              (défaut : /var/lib/omega-qemu)
 #   OMEGA_LOG_DIR: logs                      (défaut : /var/log/omega)
+#   SSH_KEY      : clé SSH privée optionnelle pour les nœuds distants
 #   DRY_RUN      : =1 pour afficher les actions sans les exécuter
 
 set -euo pipefail
@@ -30,7 +31,14 @@ set -euo pipefail
 : "${OMEGA_LOG_DIR:=/var/log/omega}"
 : "${OMEGA_REAL_KVM:=/usr/bin/kvm.real}"
 : "${BRIDGE_LIB:=/usr/local/lib/omega-uffd-bridge.so}"
+: "${OMEGA_GPU_WORKER_DIR:=/opt/omega-remote-paging/workers}"
+: "${SSH_KEY:=}"
 : "${DRY_RUN:=0}"
+
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+if [[ -n "$SSH_KEY" && -f "$SSH_KEY" ]]; then
+    SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}")
+fi
 
 info()    { echo -e "\033[32m[INFO]\033[0m  $*"; }
 warn()    { echo -e "\033[33m[WARN]\033[0m  $*"; }
@@ -49,7 +57,7 @@ run() {
 
 clean_body() { cat <<'BODY'
     # Services
-    for svc in omega-daemon node-bc-store omega-store "omega-agent@" omega-agent omega-hookscript-watcher; do
+    for svc in omega-daemon node-bc-store omega-store "omega-agent@" omega-agent omega-hookscript-watcher omega-gpu-proxy; do
         systemctl stop    "${svc}.service" 2>/dev/null || true
         systemctl disable "${svc}.service" 2>/dev/null || true
         rm -f "/etc/systemd/system/${svc}.service"
@@ -88,6 +96,7 @@ clean_body() { cat <<'BODY'
     rm -f @@INSTALL_DIR@@/omega-qemu-launcher \
           @@INSTALL_DIR@@/node-a-agent \
           @@INSTALL_DIR@@/omega-daemon \
+          @@INSTALL_DIR@@/omega-gpu-proxy \
           @@INSTALL_DIR@@/kvm-omega
 
     # Bridge LD_PRELOAD
@@ -99,6 +108,7 @@ clean_body() { cat <<'BODY'
 
     # Répertoire de déploiement, certs TLS, runtime, logs
     rm -rf @@DEPLOY_DIR@@
+    rm -rf @@OMEGA_GPU_WORKER_DIR@@
     rm -rf /etc/omega-store/tls
     rm -rf @@OMEGA_RUN_DIR@@ @@OMEGA_LOG_DIR@@
     rm -f /run/omega-gpu-scheduler-*.lock 2>/dev/null || true
@@ -114,6 +124,7 @@ rendered_body() {
         | sed "s|@@BRIDGE_LIB@@|${BRIDGE_LIB}|g" \
         | sed "s|@@SNIPPETS_DIR@@|${SNIPPETS_DIR}|g" \
         | sed "s|@@DEPLOY_DIR@@|${DEPLOY_DIR}|g" \
+        | sed "s|@@OMEGA_GPU_WORKER_DIR@@|${OMEGA_GPU_WORKER_DIR}|g" \
         | sed "s|@@OMEGA_RUN_DIR@@|${OMEGA_RUN_DIR}|g" \
         | sed "s|@@OMEGA_LOG_DIR@@|${OMEGA_LOG_DIR}|g"
 }
@@ -125,7 +136,7 @@ clean_node_remote() {
         echo -e "\033[90m[DRY]\033[0m   ssh ${DEPLOY_USER}@${node} ..."
         rendered_body | sed 's/^/    /'
     else
-        ssh "${DEPLOY_USER}@${node}" "set -x
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "set -x
 $(rendered_body)" && success "Nœud ${node} nettoyé" || warn "Nœud ${node} — nettoyage partiel (voir logs ci-dessus)"
     fi
 }

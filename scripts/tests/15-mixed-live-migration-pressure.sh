@@ -49,8 +49,7 @@ AGENT_PID=$!
 _PIDS+=($!)
 
 info "Éviction forcée pendant 30s..."
-stress-ng --vm 1 --vm-bytes 70% --timeout 30s &>/dev/null &
-_PIDS+=($!)
+host_mem_stress 30 "70%" || warn "aucune pression mémoire hôte disponible pendant la phase d'éviction"
 sleep 30
 
 pages_before=0
@@ -64,8 +63,7 @@ info "Pages sur les stores avant migration : $pages_before"
 
 step "Phase 2 : migration live pendant que les stores ont des pages"
 info "stress-ng continu pendant la migration (simule activité VM)"
-stress-ng --vm 1 --vm-bytes 60% --timeout 120s &>/dev/null &
-_PIDS+=($!)
+host_mem_stress 120 "60%" || warn "aucune pression mémoire hôte disponible pendant la migration"
 
 # Éjecter les CD-ROMs locaux (ISOs) — Proxmox refuse de migrer les images CDROM locales
 qm config "$VMID" 2>/dev/null | grep "media=cdrom" | cut -d: -f1 | while read -r drv; do

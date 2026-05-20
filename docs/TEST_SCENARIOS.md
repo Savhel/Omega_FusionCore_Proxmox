@@ -120,6 +120,19 @@ watch -n2 'curl -s http://127.0.0.1:9300/metrics'
 
 **Prérequis :** Proxmox avec VM 9001 et `qm` accessible.
 
+La VM doit être créée avec un plafond supérieur à 1 vCPU. Le champ `vcpus`
+est le nombre actif au démarrage, mais `cores * sockets` définit le maximum
+que le test peut atteindre.
+
+```bash
+qm stop 9001
+qm set 9001 --cores 4 --sockets 1 --vcpus 1 --hotplug cpu,disk,network
+qm start 9001
+qm showcmd 9001 --pretty | grep -- '-smp'
+```
+
+La ligne QEMU doit contenir un équivalent de `-smp '1,sockets=1,cores=4,maxcpus=4'`.
+
 ```bash
 # Démarrer l'agent pour VM 9001 avec vCPU initial = 1, max = 8
 AGENT_VM_ID=9001 \
@@ -149,6 +162,7 @@ stress-ng --cpu 0 --timeout 60s  # dans la VM
 
 **Erreurs possibles :**
 - `qm set --vcpus échoué` → VM sans `--hotplug cpu` → l'agent essaie de la configurer automatiquement au 1er démarrage
+- `aucun scale-up observé` avec `cores=1` → VM créée avec un seul vCPU maximum ; corriger `--cores`, `--sockets`, `--vcpus 1` puis redémarrer la VM
 - `flock pool vCPU échoué` → problème de permissions sur `/run/`
 - cgroup v2 absent → fallback sur `/proc/<pid>/stat` automatique
 

@@ -104,8 +104,8 @@ Pour qu’omega puisse gérer une VM correctement (balloon, vCPU élastique, mig
 
 | Fonctionnalité | Paramètre Proxmox requis | Pourquoi |
 |---|---|---|
-| RAM balloon | `--balloon <max_mib>` = valeur de `--memory` | Active le driver virtio-balloon dans QEMU. Sans ça, `qm balloon` échoue. |
-| RAM thin-provisioning | `--memory <max_mib>` = RAM max souhaitée | C’est le plafond absolu. La VM démarre plus petite via balloon. |
+| RAM balloon | `--balloon <initial_mib>` inférieur ou égal à `--memory` | Active le driver virtio-balloon dans QEMU. Sans ça, `qm balloon` échoue. |
+| RAM thin-provisioning | `--memory <max_mib>` = RAM max souhaitée | C’est le plafond absolu. La VM démarre plus petite via balloon/Omega. |
 | vCPU élastique | `--hotplug cpu` + `--cores <max>` + `--vcpus 1` | Sans hotplug cpu, `qm set --vcpus N` échoue. Les cores définissent le plafond. |
 | Migration live | `--net0 virtio,...` + stockage Ceph | La migration QEMU online nécessite un réseau virtio et des disques partagés. |
 | Disk I/O scheduler | Aucun — géré via cgroups v2 automatiquement | Fonctionne dès que le kernel a cgroups v2 actif (PVE 8+). |
@@ -116,11 +116,11 @@ Pour qu’omega puisse gérer une VM correctement (balloon, vCPU élastique, mig
 qm create 9001 \
   --name omega-test \
   --memory 2048 \
-  --balloon 2048 \
+  --balloon 512 \
   --cores 4 \
   --sockets 1 \
   --vcpus 1 \
-  --hotplug cpu,memory \
+  --hotplug cpu,disk,network \
   --net0 virtio,bridge=vmbr0 \
   --ostype l26 \
   --scsihw virtio-scsi-pci \
@@ -131,19 +131,20 @@ qm create 9001 \
 
 Points clés :
 - `--memory 2048` = plafond RAM absolu (omega ne dépassera jamais ça)
-- `--balloon 2048` = doit être égal à `--memory` pour activer virtio-balloon
+- `--balloon 512` = RAM initiale/minimale ; `--memory 2048` reste le plafond
 - `--cores 4 --vcpus 1` = 4 cores disponibles (plafond hotplug), 1 actif au démarrage
-- `--hotplug cpu,memory` = permet à `qm set --vcpus N` de fonctionner à chaud
+- `--hotplug cpu,disk,network` = permet le hotplug CPU sans activer le hotplug mémoire Proxmox
 - stockage sur Ceph = obligatoire pour la migration live (disques partagés entre nœuds)
+- ne pas activer `memory` dans `--hotplug` pour les VMs Omega avec backend memfd ; la RAM progressive est gérée par balloon/Omega
 
 **Vérifier qu’une VM existante est correctement configurée :**
 
 ```bash
 qm config 9001 | grep -E "memory|balloon|cores|vcpus|hotplug"
 # Doit afficher :
-# balloon: 2048
+# balloon: 512
 # cores: 4
-# hotplug: cpu,memory
+# hotplug: cpu,disk,network
 # memory: 2048
 # vcpus: 1
 ```
@@ -169,11 +170,11 @@ qm agent 9001 ping   # doit répondre sans erreur
 
 ```bash
 # Activer balloon (à faire VM éteinte)
-qm set 9001 --balloon 2048
+qm set 9001 --balloon 512
 
 # Activer hotplug CPU (à faire VM éteinte)
-qm set 9001 --hotplug cpu,memory
-qm set 9001 --cores 4 --vcpus 1
+qm set 9001 --hotplug cpu,disk,network
+qm set 9001 --cores 4 --sockets 1 --vcpus 1
 ```
 
 > **Note** : `--balloon` et `--hotplug cpu` ne peuvent pas être activés à chaud sur une VM déjà démarrée sans ces options. Il faut arrêter la VM, modifier la config, puis redémarrer.
@@ -190,11 +191,11 @@ Exemple `9004` :
 qm create 9004 \
   --name omega-test-cpu \
   --memory 2048 \
-  --balloon 2048 \
+  --balloon 512 \
   --cores 4 \
   --sockets 1 \
   --vcpus 1 \
-  --hotplug cpu,memory \
+  --hotplug cpu,disk,network \
   --net0 virtio,bridge=vmbr0 \
   --ostype l26 \
   --scsihw virtio-scsi-pci

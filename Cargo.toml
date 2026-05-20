@@ -3,6 +3,7 @@ members = [
     "node-a-agent",         # agent userfaultfd nœud A
     "node-bc-store",        # stores distants B et C
     "omega-daemon",         # daemon cluster complet (RAM/CPU/GPU/disque)
+    "omega-gpu-proxy",      # proxy GPU applicatif VM -> nœud GPU
     "omega-qemu-launcher",  # wrapper QEMU — injecte le memory-backend au démarrage
 ]
 resolver = "2"

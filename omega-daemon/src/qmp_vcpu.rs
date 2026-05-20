@@ -134,7 +134,7 @@ impl QmpVcpuClient {
 
         // Activer les capacités
         self.send(stream, &json!({"execute": "qmp_capabilities"}))?;
-        let resp = self.recv(reader)?;
+        let resp = self.recv_command_response(reader)?;
         if resp.get("error").is_some() {
             bail!("qmp_capabilities échoué : {:?}", resp);
         }
@@ -154,6 +154,20 @@ impl QmpVcpuClient {
         serde_json::from_str(&line).with_context(|| format!("JSON invalide: {}", line))
     }
 
+    fn recv_command_response(&self, reader: &mut BufReader<UnixStream>) -> Result<Value> {
+        loop {
+            let resp = self.recv(reader)?;
+            if resp.get("return").is_some() || resp.get("error").is_some() {
+                return Ok(resp);
+            }
+            debug!(
+                vm_id = self.vm_id,
+                response = ?resp,
+                "événement QMP ignoré en attente de la réponse commande"
+            );
+        }
+    }
+
     // ── API publique ──────────────────────────────────────────────────────
 
     /// Interroge l'état des vCPUs de la VM.
@@ -166,7 +180,7 @@ impl QmpVcpuClient {
         self.handshake(&mut stream, &mut reader)?;
 
         self.send(&mut stream, &json!({"execute": "query-cpus-fast"}))?;
-        let resp = self.recv(&mut reader)?;
+        let resp = self.recv_command_response(&mut reader)?;
 
         if let Some(err) = resp.get("error") {
             bail!("query-cpus-fast échoué : {:?}", err);
@@ -218,7 +232,7 @@ impl QmpVcpuClient {
         self.handshake(&mut stream, &mut reader)?;
 
         self.send(&mut stream, &json!({"execute": "query-hotpluggable-cpus"}))?;
-        let resp = self.recv(&mut reader)?;
+        let resp = self.recv_command_response(&mut reader)?;
 
         if let Some(err) = resp.get("error") {
             bail!("query-hotpluggable-cpus échoué : {:?}", err);
@@ -318,7 +332,7 @@ impl QmpVcpuClient {
             }),
         )?;
 
-        let resp = self.recv(&mut reader)?;
+        let resp = self.recv_command_response(&mut reader)?;
 
         if let Some(err) = resp.get("error") {
             // Certains guests ne supportent pas le hot-unplug → fallback gracieux
@@ -327,18 +341,37 @@ impl QmpVcpuClient {
             return Ok(HotplugResult::Unavailable { reason: msg });
         }
 
-        let new_count = info.online_count + 1;
+        let expected_count = info.online_count + 1;
+        let verified_count = match self.query_cpus() {
+            Ok(after) => after.online_count,
+            Err(e) => {
+                let msg = format!("device_add envoyé mais vérification QMP impossible: {e}");
+                warn!(vm_id = self.vm_id, error = %msg, "hotplug vCPU non validé");
+                return Ok(HotplugResult::Unavailable { reason: msg });
+            }
+        };
+        if verified_count < expected_count {
+            let msg = format!(
+                "device_add envoyé mais vCPUs online inchangés: avant={} après={} attendu={}",
+                info.online_count, verified_count, expected_count
+            );
+            warn!(vm_id = self.vm_id, error = %msg, "hotplug vCPU non validé");
+            return Ok(HotplugResult::Unavailable { reason: msg });
+        }
+
         info!(
             vm_id = self.vm_id,
             socket_id = cpu_slot.socket_id,
             core_id = cpu_slot.core_id,
             thread_id = cpu_slot.thread_id,
             cpu_type = %cpu_slot.cpu_type,
-            new_count = new_count,
+            new_count = verified_count,
             "vCPU hotplugged via QMP"
         );
 
-        Ok(HotplugResult::Added { new_count })
+        Ok(HotplugResult::Added {
+            new_count: verified_count,
+        })
     }
 
     /// Retire un vCPU à chaud (hot-unplug -1).
@@ -395,7 +428,7 @@ impl QmpVcpuClient {
             }),
         )?;
 
-        let resp = self.recv(&mut reader)?;
+        let resp = self.recv_command_response(&mut reader)?;
 
         if let Some(err) = resp.get("error") {
             let msg = err["desc"].as_str().unwrap_or("inconnu").to_string();
@@ -403,16 +436,35 @@ impl QmpVcpuClient {
             return Ok(HotplugResult::Unavailable { reason: msg });
         }
 
-        let new_count = info.online_count - 1;
+        let expected_count = info.online_count - 1;
+        let verified_count = match self.query_cpus() {
+            Ok(after) => after.online_count,
+            Err(e) => {
+                let msg = format!("device_del envoyé mais vérification QMP impossible: {e}");
+                warn!(vm_id = self.vm_id, error = %msg, "hot-unplug vCPU non validé");
+                return Ok(HotplugResult::Unavailable { reason: msg });
+            }
+        };
+        if verified_count > expected_count {
+            let msg = format!(
+                "device_del envoyé mais vCPUs online non réduits: avant={} après={} attendu={}",
+                info.online_count, verified_count, expected_count
+            );
+            warn!(vm_id = self.vm_id, error = %msg, "hot-unplug vCPU non validé");
+            return Ok(HotplugResult::Unavailable { reason: msg });
+        }
+
         info!(
             vm_id     = self.vm_id,
             cpu_id    = %cpu_id,
             qom_path  = %cpu.qom_path,
-            new_count = new_count,
+            new_count = verified_count,
             "vCPU retiré via QMP"
         );
 
-        Ok(HotplugResult::Removed { new_count })
+        Ok(HotplugResult::Removed {
+            new_count: verified_count,
+        })
     }
 }
 

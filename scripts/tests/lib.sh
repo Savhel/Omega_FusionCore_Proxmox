@@ -39,6 +39,34 @@ if [[ -z "${OMEGA_NODES:-}" ]]; then
     _conf="$(dirname "${BASH_SOURCE[0]}")/../cluster.conf"
     [[ -f "$_conf" ]] && source "$_conf"
 fi
+# En cluster réel, l'installation écrit la configuration effective du nœud
+# dans /etc/omega/cluster.env (ex: nœud GPU détecté, URL proxy, token file).
+# On ne s'en sert que comme fallback pour éviter de figer des noms de cluster
+# dans les tests; les variables explicitement passées par omega-lab.sh gardent
+# la priorité.
+if [[ -f /etc/omega/cluster.env ]]; then
+    _env_OMEGA_NODES="${OMEGA_NODES:-}"
+    _env_OMEGA_CONTROLLER="${OMEGA_CONTROLLER:-}"
+    _env_OMEGA_GPU_NODES="${OMEGA_GPU_NODES:-}"
+    _env_OMEGA_GPU_PRIMARY_NODE="${OMEGA_GPU_PRIMARY_NODE:-}"
+    _env_OMEGA_GPU_PROXY_URL="${OMEGA_GPU_PROXY_URL:-}"
+    _env_OMEGA_GPU_PROXY_TOTAL_VRAM_MIB="${OMEGA_GPU_PROXY_TOTAL_VRAM_MIB:-}"
+    _env_OMEGA_GPU_PROXY_API_TOKEN="${OMEGA_GPU_PROXY_API_TOKEN:-}"
+    _env_OMEGA_GPU_PROXY_API_TOKEN_FILE="${OMEGA_GPU_PROXY_API_TOKEN_FILE:-}"
+    # shellcheck disable=SC1091
+    source /etc/omega/cluster.env
+    [[ -n "$_env_OMEGA_NODES" ]] && OMEGA_NODES="$_env_OMEGA_NODES"
+    [[ -n "$_env_OMEGA_CONTROLLER" ]] && OMEGA_CONTROLLER="$_env_OMEGA_CONTROLLER"
+    [[ -n "$_env_OMEGA_GPU_NODES" ]] && OMEGA_GPU_NODES="$_env_OMEGA_GPU_NODES"
+    [[ -n "$_env_OMEGA_GPU_PRIMARY_NODE" ]] && OMEGA_GPU_PRIMARY_NODE="$_env_OMEGA_GPU_PRIMARY_NODE"
+    [[ -n "$_env_OMEGA_GPU_PROXY_URL" ]] && OMEGA_GPU_PROXY_URL="$_env_OMEGA_GPU_PROXY_URL"
+    [[ -n "$_env_OMEGA_GPU_PROXY_TOTAL_VRAM_MIB" ]] && OMEGA_GPU_PROXY_TOTAL_VRAM_MIB="$_env_OMEGA_GPU_PROXY_TOTAL_VRAM_MIB"
+    [[ -n "$_env_OMEGA_GPU_PROXY_API_TOKEN" ]] && OMEGA_GPU_PROXY_API_TOKEN="$_env_OMEGA_GPU_PROXY_API_TOKEN"
+    [[ -n "$_env_OMEGA_GPU_PROXY_API_TOKEN_FILE" ]] && OMEGA_GPU_PROXY_API_TOKEN_FILE="$_env_OMEGA_GPU_PROXY_API_TOKEN_FILE"
+    unset _env_OMEGA_NODES _env_OMEGA_CONTROLLER _env_OMEGA_GPU_NODES _env_OMEGA_GPU_PRIMARY_NODE \
+        _env_OMEGA_GPU_PROXY_URL _env_OMEGA_GPU_PROXY_TOTAL_VRAM_MIB \
+        _env_OMEGA_GPU_PROXY_API_TOKEN _env_OMEGA_GPU_PROXY_API_TOKEN_FILE
+fi
 STORE_PORT="${OMEGA_STORE_PORT:-${STORE_PORT:-9100}}"
 STATUS_PORT="${OMEGA_STATUS_PORT:-${STATUS_PORT:-9200}}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-${METRICS_PORT:-9310}}"
@@ -118,6 +146,68 @@ require_omega_bins() {
     [[ -x "$STORE_BIN" ]] || fail "node-bc-store introuvable : $STORE_BIN"
 }
 
+ensure_local_packages() {
+    local packages=("$@")
+    local missing=()
+    local pkg
+    for pkg in "${packages[@]}"; do
+        command -v "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    done
+    [[ "${#missing[@]}" -eq 0 ]] && return 0
+
+    [[ "$(id -u)" -eq 0 ]] || fail "paquets manquants sur le noeud local: ${missing[*]} — relancer en root ou installer: apt install -y ${missing[*]}"
+    command -v apt-get >/dev/null 2>&1 || fail "apt-get introuvable; installer manuellement: ${missing[*]}"
+
+    info "installation automatique locale: ${missing[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+}
+
+ensure_node_packages() {
+    local node="$1"; shift
+    local packages=("$@")
+    [[ "${#packages[@]}" -gt 0 ]] || return 0
+
+    if _is_local_node "$node"; then
+        ensure_local_packages "${packages[@]}"
+        return
+    fi
+
+    local pkg_list="${packages[*]}"
+    info "vérification paquets sur $node: ${pkg_list}"
+    ssh_run "$node" "missing=''; for p in ${pkg_list}; do command -v \"\$p\" >/dev/null 2>&1 || missing=\"\$missing \$p\"; done; if [ -n \"\$missing\" ]; then export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y \$missing; fi"
+}
+
+ensure_node_packages_optional() {
+    local node="$1"; shift
+    local packages=("$@")
+    [[ "${#packages[@]}" -gt 0 ]] || return 0
+
+    local pkg_list="${packages[*]}"
+    info "vérification paquets sur $node: ${pkg_list}"
+
+    if _is_local_node "$node"; then
+        local missing=() pkg
+        for pkg in "${packages[@]}"; do
+            command -v "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+        done
+        [[ "${#missing[@]}" -eq 0 ]] && return 0
+        if [[ "$(id -u)" -ne 0 ]] || ! command -v apt-get >/dev/null 2>&1; then
+            warn "paquets manquants sur le noeud local: ${missing[*]} — installation automatique impossible"
+            return 1
+        fi
+        info "installation automatique locale optionnelle: ${missing[*]}"
+        DEBIAN_FRONTEND=noninteractive apt-get update && \
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" && return 0
+        warn "installation automatique locale échouée: ${missing[*]}"
+        return 1
+    fi
+
+    ssh_run "$node" "missing=''; for p in ${pkg_list}; do command -v \"\$p\" >/dev/null 2>&1 || missing=\"\$missing \$p\"; done; if [ -z \"\$missing\" ]; then exit 0; fi; export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y \$missing" && return 0
+    warn "paquets indisponibles sur $node: ${pkg_list}; ce noeud sera ignoré pour la charge hôte qui en dépend"
+    return 1
+}
+
 require_cluster() {
     require_bin qm
     require_bin pvesh
@@ -155,6 +245,30 @@ _is_local_node() {
     return 1
 }
 
+_refresh_vm_node_cache() {
+    local vmid="$1" node
+    unset "_VM_NODE_CACHE[$vmid]"
+    node="$(vm_node "$vmid" 2>/dev/null || true)"
+    [[ -n "$node" ]] && _VM_NODE_CACHE[$vmid]="$node"
+    echo "$node"
+}
+
+_qm_stale_owner_error() {
+    local vmid="$1"
+    grep -qiE "Configuration file 'nodes/.*/qemu-server/${vmid}\.conf' does not exist|unable to find configuration file|no such cluster node|VM ${vmid} does not exist"
+}
+
+_qm_capture_on_node() {
+    local node="$1"; shift
+    if [[ -n "$node" ]] && ! _is_local_node "$node"; then
+        ssh "${SSH_OPTS[@]+"${SSH_OPTS[@]}"}" -o ConnectTimeout=10 \
+            "${DEPLOY_USER:-root}@${node}" \
+            "qm $(printf '%q ' "$@")"
+        return $?
+    fi
+    command qm "$@"
+}
+
 # Surcharge de qm : route automatiquement les commandes vers le nœud hôte de la VM.
 # Détecte le vmid dynamiquement : premier argument numérique en position 2 ou 3
 # ($2 pour "qm config <vmid>", $3 pour "qm guest exec <vmid>").
@@ -164,16 +278,50 @@ qm() {
     [[ -z "$vmid" && "${3:-}" =~ ^[0-9]+$ ]] && vmid="${3}"
 
     if [[ -n "$vmid" ]]; then
-        local node
+        local node refreshed out rc
         node=$(_vm_node_cached "$vmid")
-        if [[ -n "$node" ]] && ! _is_local_node "$node"; then
-            ssh "${SSH_OPTS[@]+"${SSH_OPTS[@]}"}" -o ConnectTimeout=10 \
-                "${DEPLOY_USER:-root}@${node}" \
-                "$(printf 'qm %q ' "$@")"
-            return $?
+        out="$(_qm_capture_on_node "$node" "$@" 2>&1)"
+        rc=$?
+
+        if [[ $rc -ne 0 ]] && printf '%s\n' "$out" | _qm_stale_owner_error "$vmid"; then
+            refreshed="$(_refresh_vm_node_cache "$vmid")"
+            if [[ -n "$refreshed" && "$refreshed" != "$node" ]]; then
+                warn "VM $vmid relocalisée après échec qm : ${node:-local} -> $refreshed"
+                out="$(_qm_capture_on_node "$refreshed" "$@" 2>&1)"
+                rc=$?
+            fi
         fi
+
+        [[ -n "$out" ]] && printf '%s\n' "$out"
+        return "$rc"
     fi
     command qm "$@"
+}
+
+qm_monitor_cmd() {
+    local vmid="$1" cmd="$2"
+    local node_ip
+    node_ip="$(vm_node "$vmid" 2>/dev/null || true)"
+    [[ -n "$node_ip" ]] || node_ip="$CONTROLLER_NODE"
+
+    # qm monitor must run on the node currently owning the VM. The qm wrapper
+    # routes subcommands, but not stdin pipes, so route this explicitly.
+    if _is_local_node "$node_ip"; then
+        printf '%s\nquit\n' "$cmd" | command qm monitor "$vmid" 2>/dev/null || true
+    else
+        ssh_run "$node_ip" "printf '%s\nquit\n' \"$cmd\" | qm monitor \"$vmid\" 2>/dev/null || true" 2>/dev/null || true
+    fi
+}
+
+vm_runtime_vcpus() {
+    local vmid="$1" out count
+    out="$(qm_monitor_cmd "$vmid" "info cpus")"
+    count="$(printf '%s\n' "$out" | awk '/(^|[[:space:]])\*?[[:space:]]*CPU #[0-9]+/{c++} END{print c+0}')"
+    if [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]]; then
+        printf '%s\n' "$count"
+        return 0
+    fi
+    return 1
 }
 
 _cluster_vm_info() {
@@ -207,7 +355,11 @@ _try_start_vm() {
     local info node status node_ip
 
     info="$(_cluster_vm_info "$vmid")"
-    [[ -n "$info" ]] || return 2
+    if [[ -z "$info" ]]; then
+        warn "VM $vmid introuvable dans /cluster/resources — fallback vers une autre VM"
+        unset "_VM_NODE_CACHE[$vmid]"
+        return 2
+    fi
     node="${info%% *}"
     status="${info##* }"
     node_ip="$(_pve_node_to_ip "$node")"
@@ -221,9 +373,10 @@ _try_start_vm() {
     fi
 
     info "VM $vmid est '$status' sur $node — démarrage..."
-    if ! ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 "${DEPLOY_USER:-root}@${node_ip}" \
-        "qm start $vmid" 2>/dev/null; then
+    sanitize_vm_passthrough_for_node "$vmid" "$node_ip" || true
+    if ! start_vm_with_hostpci_repair "$vmid"; then
         warn "échec démarrage VM $vmid sur $node"
+        unset "_VM_NODE_CACHE[$vmid]"
         return 1
     fi
 
@@ -240,6 +393,94 @@ _try_start_vm() {
     done
     info "VM $vmid démarrée sur $node"
     return 0
+}
+
+delete_vm_hostpci() {
+    local vmid="$1" cfg keys key
+    cfg="$(qm config "$vmid" 2>/dev/null || true)"
+    [[ -n "$cfg" ]] || return 0
+    keys="$(printf '%s\n' "$cfg" | awk -F': ' '/^hostpci[0-9]+:/{print $1}')"
+    [[ -n "$keys" ]] || return 0
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        warn "VM $vmid: suppression $key pour éviter un passthrough GPU invalide sur ce nœud"
+        qm set "$vmid" --delete "$key" >/dev/null 2>&1 || true
+    done <<< "$keys"
+}
+
+start_vm_with_hostpci_repair() {
+    local vmid="$1" out
+    if out="$(qm start "$vmid" 2>&1)"; then
+        wait_vm_status "$vmid" running 90 || return 1
+        return 0
+    fi
+
+    if printf '%s\n' "$out" | grep -qi "no PCI device found"; then
+        warn "VM $vmid: démarrage bloqué par hostpci invalide — nettoyage puis nouvel essai"
+        delete_vm_hostpci "$vmid"
+        if out="$(qm start "$vmid" 2>&1)"; then
+            wait_vm_status "$vmid" running 90 || return 1
+            return 0
+        fi
+    fi
+
+    [[ -n "$out" ]] && warn "qm start $vmid a échoué: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-220)"
+    return 1
+}
+
+wait_vm_status() {
+    local vmid="$1" expected="$2" timeout="${3:-60}"
+    local i status
+    for ((i=0; i<timeout; i++)); do
+        status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}' || true)"
+        [[ "$status" == "$expected" ]] && return 0
+        sleep 1
+    done
+    warn "VM $vmid: statut attendu '$expected' non atteint après ${timeout}s (dernier='${status:-inconnu}')"
+    return 1
+}
+
+stop_vm_for_reconfig() {
+    local vmid="$1" status
+    status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}' || true)"
+    [[ "$status" == "stopped" ]] && return 0
+    qm stop "$vmid" >/dev/null
+    wait_vm_status "$vmid" stopped 90
+}
+
+sanitize_vm_passthrough_for_node() {
+    local vmid="$1" node_ip="${2:-}"
+    local node="${node_ip:-$(_vm_node_cached "$vmid")}"
+    local remote_cmd
+
+    [[ "${OMEGA_TEST_REMOVE_INVALID_HOSTPCI:-1}" == "1" ]] || return 0
+    [[ -n "$node" ]] || return 0
+
+    remote_cmd=$(cat <<'EOF'
+vmid="$1"
+cfg=$(qm config "$vmid" 2>/dev/null || true)
+[ -n "$cfg" ] || exit 0
+printf '%s\n' "$cfg" | awk -F': ' '/^hostpci[0-9]+:/{print $1 "|" $2}' | while IFS='|' read -r key val; do
+    pci=${val%%,*}
+    case "$pci" in
+        *:*) ;;
+        *) pci="0000:$pci" ;;
+    esac
+    if [ ! -e "/sys/bus/pci/devices/$pci" ]; then
+        echo "remove $key $pci"
+        qm set "$vmid" --delete "$key" >/dev/null
+    fi
+done
+EOF
+)
+
+    if _is_local_node "$node"; then
+        bash -c "$remote_cmd" _ "$vmid" 2>/dev/null | while read -r line; do warn "VM $vmid: hostpci invalide nettoyé ($line)"; done || true
+    else
+        ssh "${SSH_OPTS[@]+"${SSH_OPTS[@]}"}" -o ConnectTimeout=10 "${DEPLOY_USER:-root}@${node}" \
+            "bash -c $(printf '%q' "$remote_cmd") _ $(printf '%q' "$vmid")" 2>/dev/null | \
+            while read -r line; do warn "VM $vmid: hostpci invalide nettoyé ($line)"; done || true
+    fi
 }
 
 vm_fallback_candidates() {
@@ -468,16 +709,102 @@ print(max(ids)+1 if ids else 90001)
 # RAM configurée de la VM dans Proxmox (champ memory: en MiB)
 vm_ram_mib() {
     local vmid="$1"
-    qm config "$vmid" 2>/dev/null | awk '/^memory:/{print $2}' | head -1
+    local cfg
+    cfg=$(qm config "$vmid" 2>/dev/null || true)
+    printf '%s\n' "$cfg" | awk '/^memory:/{print $2}' | head -1
 }
 
 # Nombre total de cœurs CPU de la VM (cores × sockets)
 vm_cores() {
     local vmid="$1"
-    local cores sockets
-    cores=$(qm config "$vmid" 2>/dev/null | awk '/^cores:/{print $2}' | head -1)
-    sockets=$(qm config "$vmid" 2>/dev/null | awk '/^sockets:/{print $2}' | head -1)
+    local cfg cores sockets smp smp_max
+    cfg=$(qm config "$vmid" 2>/dev/null || true)
+    cores=$(printf '%s\n' "$cfg" | awk '/^cores:/{print $2}' | head -1)
+    sockets=$(printf '%s\n' "$cfg" | awk '/^sockets:/{print $2}' | head -1)
+    smp="$(qm showcmd "$vmid" --pretty 2>/dev/null | grep -- '-smp' | head -1 || true)"
+    smp_max="$(printf '%s\n' "$smp" | sed -n "s/.*maxcpus=\([0-9][0-9]*\).*/\1/p" | head -1)"
+    if [[ "$smp_max" =~ ^[0-9]+$ && "$smp_max" -gt 1 ]]; then
+        echo "$smp_max"
+        return
+    fi
     echo $(( ${cores:-1} * ${sockets:-1} ))
+}
+
+vm_desc_value() {
+    local description="$1" key="$2"
+    tr ' ' '\n' <<< "$description" | awk -F= -v k="$key" '$1 == k {print $2; exit}'
+}
+
+ensure_omega_vcpu_profile() {
+    local vmid="$1"
+    local cfg cores sockets vcpus hotplug memory balloon description max_vcpus desired_max desired_disk desired_gpu desc status smp smp_max
+
+    cfg=$(qm config "$vmid" 2>/dev/null || true)
+    if [[ -z "$cfg" ]]; then
+        _refresh_vm_node_cache "$vmid" >/dev/null
+        cfg=$(qm config "$vmid" 2>/dev/null || true)
+    fi
+    [[ -n "$cfg" ]] || fail "impossible de lire la config Proxmox de la VM $vmid"
+
+    cores=$(printf '%s\n' "$cfg" | awk '/^cores:/{print $2}' | head -1)
+    sockets=$(printf '%s\n' "$cfg" | awk '/^sockets:/{print $2}' | head -1)
+    vcpus=$(printf '%s\n' "$cfg" | awk '/^vcpus:/{print $2}' | head -1)
+    hotplug=$(printf '%s\n' "$cfg" | awk '/^hotplug:/{print $2}' | head -1)
+    memory=$(printf '%s\n' "$cfg" | awk '/^memory:/{print $2}' | head -1)
+    balloon=$(printf '%s\n' "$cfg" | awk '/^balloon:/{print $2}' | head -1)
+    description=$(printf '%s\n' "$cfg" | awk -F': ' '$1 == "description" {print $2; exit}')
+
+    cores="${cores:-1}"
+    sockets="${sockets:-1}"
+    vcpus="${vcpus:-1}"
+    memory="${memory:-1024}"
+    balloon="${balloon:-512}"
+    max_vcpus=$(( cores * sockets ))
+    smp="$(qm showcmd "$vmid" --pretty 2>/dev/null | grep -- '-smp' | head -1 || true)"
+    smp_max="$(printf '%s\n' "$smp" | sed -n "s/.*maxcpus=\([0-9][0-9]*\).*/\1/p" | head -1)"
+    if [[ "$smp_max" =~ ^[0-9]+$ && "$smp_max" -gt "$max_vcpus" ]]; then
+        max_vcpus="$smp_max"
+        cores="$smp_max"
+        sockets=1
+    fi
+    if [[ "$max_vcpus" -gt 1 && "$vcpus" -lt "$max_vcpus" && ",${hotplug:-}," == *,cpu,* && "$smp" == *"maxcpus=${max_vcpus}"* ]]; then
+        return 0
+    fi
+
+    desired_max="$(vm_desc_value "$description" omega_max_vcpus)"
+    [[ "$desired_max" =~ ^[0-9]+$ && "$desired_max" -gt 1 ]] || desired_max="${OMEGA_VCPU_TEST_MAX_VCPUS:-4}"
+    [[ "$desired_max" =~ ^[0-9]+$ && "$desired_max" -gt 1 ]] || desired_max=4
+    desired_disk="$(vm_desc_value "$description" omega_disk_max_gib)"
+    desired_gpu="$(vm_desc_value "$description" omega_gpu_vram_mib)"
+    desired_disk="${desired_disk:-20}"
+    desired_gpu="${desired_gpu:-0}"
+    desc="omega_min_vcpus=1 omega_max_vcpus=${desired_max} omega_memory_min_mib=${balloon} omega_memory_max_mib=${memory} omega_disk_max_gib=${desired_disk} omega_gpu_vram_mib=${desired_gpu}"
+
+    warn "VM $vmid non conforme CPU (vcpus=${vcpus}, max_config=${max_vcpus}, smp='${smp:-absent}') — réparation Omega: cores=${desired_max}, sockets=1, vcpus=1"
+    status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}' || true)"
+    [[ "$status" == "running" ]] && stop_vm_for_reconfig "$vmid"
+    qm set "$vmid" \
+        --cores "$desired_max" \
+        --sockets 1 \
+        --vcpus 1 \
+        --hotplug cpu,disk,network \
+        --description "$desc" >/dev/null
+    sanitize_vm_passthrough_for_node "$vmid" "$(_vm_node_cached "$vmid")" || true
+    start_vm_with_hostpci_repair "$vmid" >/dev/null || fail "impossible de redémarrer la VM $vmid après réparation CPU"
+    sleep 8
+    unset "_VM_NODE_CACHE[$vmid]"
+
+    smp="$(qm showcmd "$vmid" --pretty 2>/dev/null | grep -- '-smp' | head -1 || true)"
+    [[ "$smp" == *"maxcpus=${desired_max}"* ]] || \
+        fail "VM $vmid toujours non conforme après réparation: ${smp:-showcmd absent}"
+}
+
+ensure_omega_vcpu_profile_safe() {
+    local vmid="$1" out rc
+    out="$(ensure_omega_vcpu_profile "$vmid" 2>&1)"
+    rc=$?
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    return "$rc"
 }
 
 vm_node() {
@@ -518,12 +845,158 @@ print(f\"pages={d.get('page_count',0)}  ram_mib={d.get('available_mib','?')}  ce
     done
 }
 
+# ── Commandes dans l'invité via qemu-guest-agent ─────────────────────────────
+guest_agent_ready() {
+    local vmid="$1"
+    qm guest cmd "$vmid" ping >/dev/null 2>&1
+}
+
+guest_exec_wait() {
+    local vmid="$1"; shift
+    local started pid status exitcode
+    started=$(qm guest exec "$vmid" -- "$@" 2>/dev/null || true)
+    pid=$(printf '%s' "$started" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("pid",""))' 2>/dev/null || true)
+    [[ -n "$pid" ]] || return 1
+    for _ in $(seq 1 300); do
+        status=$(qm guest exec-status "$vmid" "$pid" 2>/dev/null || true)
+        if printf '%s' "$status" | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("exited") else 1)' 2>/dev/null; then
+            exitcode=$(printf '%s' "$status" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("exitcode", 1))' 2>/dev/null || echo 1)
+            printf '%s' "$status" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("out-data","") + d.get("err-data",""), end="")' 2>/dev/null || true
+            [[ "$exitcode" == "0" ]]
+            return
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+ensure_guest_packages() {
+    local vmid="$1"; shift
+    local packages=("$@")
+    [[ "${#packages[@]}" -gt 0 ]] || return 0
+
+    if ! guest_agent_ready "$vmid"; then
+        warn "qemu-guest-agent indisponible dans VM $vmid — installation auto ignorée"
+        return 1
+    fi
+
+    local pkg_list="${packages[*]}"
+    local missing
+    missing=$(guest_exec_wait "$vmid" bash -lc "for p in ${pkg_list}; do dpkg -s \"\$p\" >/dev/null 2>&1 || printf '%s ' \"\$p\"; done" 2>/dev/null || true)
+    missing="${missing%"${missing##*[![:space:]]}"}"
+    if [[ -z "$missing" ]]; then
+        return 0
+    fi
+
+    info "installation automatique dans VM $vmid : ${missing}"
+    guest_exec_wait "$vmid" bash -lc "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y ${missing}"
+}
+
+host_cpu_stress() {
+    local dur="${1:-60}"
+    if command -v stress-ng >/dev/null 2>&1; then
+        stress-ng --cpu 0 --timeout "${dur}s" &>/dev/null &
+        _PIDS+=($!)
+        info "stress-ng CPU hôte lancé (${dur}s, pid=$!)"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        warn "stress-ng hôte absent — fallback Python CPU (${dur}s)"
+        python3 -c '
+import multiprocessing as mp, os, sys, time
+duration = int(float(sys.argv[1]))
+deadline = time.time() + duration
+def burn():
+    x = 0
+    while time.time() < deadline:
+        x = (x * 1664525 + 1013904223) & 0xffffffff
+workers = [mp.Process(target=burn) for _ in range(max(1, os.cpu_count() or 1))]
+[p.start() for p in workers]
+[p.join() for p in workers]
+' "$dur" &>/dev/null &
+        _PIDS+=($!)
+        info "fallback Python CPU hôte lancé (${dur}s, pid=$!)"
+        return 0
+    fi
+    warn "aucun générateur CPU hôte disponible (stress-ng/python3 absents)"
+    return 1
+}
+
+host_mem_stress() {
+    local dur="${1:-60}" bytes="${2:-70%}"
+    if command -v stress-ng >/dev/null 2>&1; then
+        stress-ng --vm 1 --vm-bytes "$bytes" --timeout "${dur}s" &>/dev/null &
+        _PIDS+=($!)
+        info "stress-ng mémoire hôte lancé (${bytes}, ${dur}s, pid=$!)"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        warn "stress-ng hôte absent — fallback Python mémoire (${bytes}, ${dur}s)"
+        python3 - "$dur" "$bytes" <<'PY' &>/dev/null &
+import re
+import sys
+import time
+
+duration = int(float(sys.argv[1]))
+spec = sys.argv[2].strip().lower()
+
+def mem_available_mib():
+    values = {}
+    with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) >= 2:
+                values[parts[0].rstrip(":")] = int(parts[1]) // 1024
+    return values.get("MemAvailable") or values.get("MemFree") or 512
+
+def parse_target_mib(raw, available):
+    if raw.endswith("%"):
+        pct = max(1.0, min(95.0, float(raw[:-1] or 0)))
+        return int(available * pct / 100.0)
+    match = re.match(r"^([0-9]+)([mMgG]?)$", raw)
+    if not match:
+        return int(available * 0.70)
+    value = int(match.group(1))
+    unit = match.group(2).lower()
+    return value * 1024 if unit == "g" else value
+
+available = mem_available_mib()
+target_mib = parse_target_mib(spec, available)
+target_mib = max(64, min(target_mib, int(available * 0.90)))
+chunk_mib = 16
+chunks = []
+deadline = time.time() + duration
+allocated = 0
+
+while time.time() < deadline and allocated < target_mib:
+    try:
+        block = bytearray(chunk_mib * 1024 * 1024)
+        for i in range(0, len(block), 4096):
+            block[i] = 1
+        chunks.append(block)
+        allocated += chunk_mib
+    except MemoryError:
+        time.sleep(1)
+    time.sleep(0.05)
+
+while time.time() < deadline:
+    time.sleep(1)
+PY
+        _PIDS+=($!)
+        info "fallback Python mémoire hôte lancé (${bytes}, ${dur}s, pid=$!)"
+        return 0
+    fi
+    warn "aucun générateur mémoire hôte disponible (stress-ng/python3 absents)"
+    return 1
+}
+
 # ── Charge CPU via guest exec ou fallback cgroup ─────────────────────────────
 # Tente qm guest exec ; si l'agent invité est absent, injecte stress-ng
 # directement dans le cgroup QEMU de la VM (charge visible par l'agent omega).
 # Usage : vm_cpu_stress <vmid> <duration_secs>
 vm_cpu_stress() {
     local vmid="$1" dur="${2:-60}"
+    ensure_guest_packages "$vmid" stress-ng >/dev/null 2>&1 || true
     if qm guest exec "$vmid" -- stress-ng --cpu 0 --timeout "${dur}s" &>/dev/null 2>&1; then
         info "stress-ng lancé dans la VM $vmid via qemu-guest-agent"
         return
@@ -544,6 +1017,17 @@ vm_cpu_stress() {
     else
         warn "cgroup QEMU introuvable pour vmid=$vmid — pas de charge CPU simulée"
     fi
+}
+
+vm_mem_stress() {
+    local vmid="$1" dur="${2:-60}" bytes="${3:-70%}"
+    ensure_guest_packages "$vmid" stress-ng >/dev/null 2>&1 || true
+    if qm guest exec "$vmid" -- stress-ng --vm 1 --vm-bytes "$bytes" --timeout "${dur}s" &>/dev/null 2>&1; then
+        info "stress-ng mémoire lancé dans la VM $vmid via qemu-guest-agent (${bytes}, ${dur}s)"
+        return 0
+    fi
+    warn "charge mémoire invitée impossible — qemu-guest-agent ou stress-ng indisponible"
+    return 1
 }
 
 # ── Utilitaires ───────────────────────────────────────────────────────────────

@@ -28,8 +28,27 @@ for v in vms:
 fi
 
 if [[ ${#VMS_TO_DRAIN[@]} -eq 0 && -n "${TEST_VMIDS_ARR[*]:-}" ]]; then
-    info "aucune VM trouvée sur $DRAIN_NODE_PVE — utilisation de OMEGA_TEST_VMIDS"
-    VMS_TO_DRAIN=("${TEST_VMIDS_ARR[@]}")
+    info "aucune VM trouvée sur $DRAIN_NODE_PVE — recherche d'un nœud portant des VMs de test"
+    vmids_csv="$(IFS=,; echo "${TEST_VMIDS_ARR[*]}")"
+    result=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | \
+        python3 -c "
+import sys, json
+wanted = {int(x) for x in '$vmids_csv'.split(',') if x.strip().isdigit()}
+by_node = {}
+for v in json.load(sys.stdin):
+    vmid = v.get('vmid')
+    if vmid in wanted and v.get('status') == 'running':
+        by_node.setdefault(v.get('node',''), []).append(str(vmid))
+if by_node:
+    node, vmids = max(by_node.items(), key=lambda item: len(item[1]))
+    print(node + ' ' + ','.join(vmids))
+" 2>/dev/null || true)
+    if [[ -n "$result" ]]; then
+        DRAIN_NODE_PVE="${result%% *}"
+        DRAIN_NODE="$(_pve_node_to_ip "$DRAIN_NODE_PVE")"
+        IFS=',' read -ra VMS_TO_DRAIN <<< "${result#* }"
+        info "drain adapté au nœud $DRAIN_NODE_PVE ($DRAIN_NODE) avec VMs: ${VMS_TO_DRAIN[*]}"
+    fi
 fi
 
 # Si toujours aucune VM (ex: déjà migrée par M5), trouver la VM sur n'importe quel nœud
@@ -127,25 +146,46 @@ migrated=(); failed_migration=()
 target_idx=0
 
 for vmid in "${VMS_TO_DRAIN[@]}"; do
+    source_node=$(vm_node "$vmid")
+    source_pve=$(_ip_to_pve_node "$source_node")
+    if [[ -z "$source_node" ]]; then
+        failed_migration+=("$vmid")
+        warn "source introuvable pour VM $vmid — migration ignorée"
+        continue
+    fi
+
     target="${TARGET_NODES[$((target_idx % ${#TARGET_NODES[@]}))]}"
+    if [[ "$target" == "$source_node" ]]; then
+        for candidate in "${OMEGA_NODES_ARR[@]}"; do
+            if [[ "$candidate" != "$source_node" ]]; then
+                target="$candidate"
+                break
+            fi
+        done
+    fi
     target_pve=$(_ip_to_pve_node "$target")
     ((target_idx++)) || true
-    # Éjecter les CD-ROMs — qm commands must run on the source node (DRAIN_NODE)
-    ssh_run "$DRAIN_NODE" \
+    # Éjecter les CD-ROMs — qm doit être lancé sur le nœud source réel de la VM.
+    ssh_run "$source_node" \
         "qm config $vmid 2>/dev/null | grep 'media=cdrom' | cut -d: -f1 | while read drv; do
              qm set $vmid \"--\${drv}\" none 2>/dev/null || true
          done" 2>/dev/null || true
-    info "Migration VM $vmid → $target (pvesh: $target_pve, live)..."
+    info "Migration VM $vmid : $source_node (pvesh: $source_pve) → $target (pvesh: $target_pve, live)..."
     t_vm=$SECONDS
-    if ssh_run "$DRAIN_NODE" \
+    if ssh_run "$source_node" \
         "qm migrate $vmid $target_pve --online" 2>&1 | tee "/tmp/omega-m7-migrate-${vmid}.log"; then
         migrated+=("$vmid")
         info "VM $vmid migrée vers $target en $(elapsed $t_vm)s"
     else
-        failed_migration+=("$vmid")
         warn "Migration VM $vmid échouée — tentative offline..."
-        ssh_run "$DRAIN_NODE" \
-            "qm migrate $vmid $target_pve" 2>&1 || warn "Migration offline VM $vmid aussi échouée"
+        if ssh_run "$source_node" \
+            "qm migrate $vmid $target_pve" 2>&1; then
+            migrated+=("$vmid")
+            info "VM $vmid migrée offline vers $target en $(elapsed $t_vm)s"
+        else
+            failed_migration+=("$vmid")
+            warn "Migration offline VM $vmid aussi échouée"
+        fi
     fi
 done
 

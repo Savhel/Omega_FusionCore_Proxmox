@@ -1,6 +1,6 @@
 //! Point d'entrée de l'agent nœud A.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -269,6 +269,7 @@ async fn main() -> Result<()> {
     );
 
     // ── Balloon thin-provisioning ─────────────────────────────────────────────
+    let mut balloon_current_mib: Option<Arc<AtomicU64>> = None;
     if cfg.balloon_enabled {
         let initial_mib = cfg.balloon_initial_mib.min(cfg.region_mib as u64);
         let balloon_mgr = Arc::new(BalloonManager::new(
@@ -281,6 +282,7 @@ async fn main() -> Result<()> {
             cfg.balloon_shrink_faults_per_sec,
             metrics.clone(),
         ));
+        balloon_current_mib = Some(balloon_mgr.current_mib_handle());
         let sd = shutdown_flag.clone();
         tokio::spawn(async move { balloon_mgr.run(sd).await });
         info!(
@@ -325,6 +327,7 @@ async fn main() -> Result<()> {
                 uffd_fd,
                 cpu_pressure,
                 needs_gpu,
+                balloon_current_mib,
             )
             .await
         }
@@ -362,6 +365,7 @@ async fn run_daemon(
     uffd_fd: std::os::unix::io::RawFd,
     cpu_pressure: Arc<AtomicBool>,
     needs_gpu: bool,
+    balloon_current_mib: Option<Arc<AtomicU64>>,
 ) {
     use tokio::signal::unix::{signal, SignalKind};
     use tokio::time::interval;
@@ -402,6 +406,19 @@ async fn run_daemon(
     let mut compact_ticker = interval(Duration::from_secs(300));
     // Surveillance pression CPU : déclenche migration si vCPU saturé
     let mut cpu_ticker = interval(Duration::from_secs(cfg.vcpu_scale_interval_secs.max(10)));
+    // Surveillance balloon : si le guest consomme durablement une grosse part du plafond,
+    // on escalade vers la recherche de migration au lieu de rester en croissance locale.
+    let mut balloon_ticker = interval(Duration::from_secs(cfg.balloon_interval_secs.max(5)));
+    let balloon_migration_threshold_mib = if cfg.balloon_enabled {
+        let max_mib = cfg.region_mib as u64;
+        let half_max = max_mib.saturating_mul(50) / 100;
+        let min_plus_steps = cfg
+            .balloon_initial_mib
+            .saturating_add(cfg.balloon_step_mib.saturating_mul(2));
+        half_max.max(min_plus_steps).min(max_mib)
+    } else {
+        u64::MAX
+    };
 
     let mut migration_spawned = false;
     let mut consecutive_alerts = 0u32;
@@ -449,6 +466,23 @@ async fn run_daemon(
                     spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone(), needs_gpu);
                     metrics.migration_searches.fetch_add(1, Ordering::Relaxed);
                     migration_spawned = true;
+                }
+            }
+            _ = balloon_ticker.tick(), if cfg.migration_enabled && cfg.balloon_enabled && !migration_spawned => {
+                if let Some(current) = balloon_current_mib.as_ref() {
+                    let current_mib = current.load(Ordering::Relaxed);
+                    if current_mib >= balloon_migration_threshold_mib {
+                        info!(
+                            vm_id = cfg.vm_id,
+                            current_mib,
+                            threshold_mib = balloon_migration_threshold_mib,
+                            max_mib = cfg.region_mib,
+                            "balloon proche du plafond — déclenchement recherche migration"
+                        );
+                        spawn_migration_daemon(region, cluster, cfg, shutdown_flag, uffd_fd, cpu_pressure.clone(), needs_gpu);
+                        metrics.migration_searches.fetch_add(1, Ordering::Relaxed);
+                        migration_spawned = true;
+                    }
                 }
             }
             _ = recall_ticker.tick(), if recall_enabled => {

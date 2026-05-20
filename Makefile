@@ -1,7 +1,7 @@
 # Makefile — omega-remote-paging
 # Commandes principales pour compiler, tester et lancer les composants.
 
-.PHONY: all build build-debug build-bridge test test-rust test-python test-integration \
+.PHONY: all build build-debug build-bridge deb test test-rust test-python test-integration \
         store-b store-c agent-demo controller-status controller-monitor \
         clean fmt clippy help
 
@@ -41,6 +41,11 @@ build-bridge:
 build-debug:
 	@echo "==> Compilation debug..."
 	$(CARGO) build --workspace
+
+## deb : construit le paquet Debian release dans target/deb/
+deb:
+	@echo "==> Construction paquet Debian..."
+	bash $(ROOT_DIR)/scripts/build-deb.sh
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 

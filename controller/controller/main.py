@@ -10,6 +10,7 @@ Usage :
 from __future__ import annotations
 
 import json
+import os
 import time
 import sys
 import logging
@@ -28,6 +29,7 @@ from .cpu_admission import (
     VcpuPoolVm,
 )
 from .metrics import MetricsCollector
+from .gpu_global import GpuPlacementAction, choose_gpu_placement
 from .migration_policy import (
     MigrationCandidate,
     MigrationPolicy,
@@ -1183,6 +1185,54 @@ def _ensure_vm_gpu_placement(
     if gpu_budget_mib <= 0:
         return False
 
+    fallback_network = os.environ.get("OMEGA_GPU_FALLBACK_NETWORK", "1") != "0"
+    global_decision = choose_gpu_placement(
+        source_node=source_node,
+        vm=vm,
+        node_states=node_states,
+        required_vcpus=required_vcpus,
+        gpu_budget_mib=gpu_budget_mib,
+        proxy_port=int(os.environ.get("OMEGA_GPU_PROXY_PORT", "9400")),
+        fallback_network=fallback_network,
+    )
+    if global_decision.action == GpuPlacementAction.LOCAL_GPU:
+        _ensure_vm_gpu_budget(
+            source_url=source_url,
+            vm_id=vm.vm_id,
+            gpu_budget_mib=gpu_budget_mib,
+            dry_run=dry_run,
+        )
+        return False
+
+    if global_decision.action == GpuPlacementAction.MIGRATE_TO_GPU:
+        last_vm_migration = last_gpu_migrations.get(vm.vm_id)
+        if (
+            last_vm_migration is not None
+            and now - last_vm_migration < GPU_MIGRATION_COOLDOWN_SECS
+        ):
+            log.info(
+                "contrôleur GPU global — migration en cooldown",
+                vm_id=vm.vm_id,
+                source=source_node,
+                target=global_decision.target_node,
+                cooldown_remaining_secs=round(
+                    GPU_MIGRATION_COOLDOWN_SECS - (now - last_vm_migration), 1
+                ),
+            )
+            return False
+        return _start_auto_migration(
+            source_url=source_url,
+            node_states=node_states,
+            source_node=source_node,
+            vm=vm,
+            target=global_decision.target_node,
+            detail="contrôleur GPU global — migration vers nœud GPU",
+            tracker=last_gpu_migrations,
+            now=now,
+            dry_run=dry_run,
+            reason="gpu_global_placement",
+        )
+
     rust_plan = _rust_gpu_rebalance_plan(
         source_node=source_node,
         vm=vm,
@@ -1275,6 +1325,23 @@ def _ensure_vm_gpu_placement(
         now=now,
     )
     if plan is None:
+        if global_decision.action == GpuPlacementAction.REMOTE_PROXY:
+            proxy_ok = _ensure_remote_gpu_proxy_budget(
+                decision_proxy_url=global_decision.proxy_url,
+                vm_id=vm.vm_id,
+                gpu_budget_mib=gpu_budget_mib,
+                dry_run=dry_run,
+            )
+            log.warning(
+                "contrôleur GPU global — fallback proxy réseau",
+                vm_id=vm.vm_id,
+                source=source_node,
+                proxy_node=global_decision.target_node,
+                proxy_url=global_decision.proxy_url,
+                budget_configured=proxy_ok,
+                reason=global_decision.reason,
+            )
+            return proxy_ok
         return False
 
     target_node, evictions = plan
@@ -1509,6 +1576,54 @@ def _ensure_vm_gpu_budget(
         resp.raise_for_status()
     except requests.RequestException as exc:
         log.error("échec configuration budget GPU automatique", vm_id=vm_id, error=str(exc))
+
+
+def _ensure_remote_gpu_proxy_budget(
+    decision_proxy_url: str,
+    vm_id: int,
+    gpu_budget_mib: int,
+    dry_run: bool,
+) -> bool:
+    proxy_url = os.environ.get("OMEGA_GPU_PROXY_URL") or decision_proxy_url
+    if not proxy_url:
+        return False
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("OMEGA_GPU_PROXY_API_TOKEN", "")
+    token_file = os.environ.get("OMEGA_GPU_PROXY_API_TOKEN_FILE", "")
+    if not token and token_file:
+        try:
+            with open(token_file, "r", encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError:
+            token = ""
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    log.info(
+        "configuration budget GPU sur proxy réseau",
+        vm_id=vm_id,
+        proxy_url=proxy_url,
+        gpu_budget_mib=gpu_budget_mib,
+    )
+    if dry_run:
+        return True
+    try:
+        resp = requests.post(
+            proxy_url.rstrip("/") + f"/v1/vm/{vm_id}/budget",
+            json={"vram_budget_mib": gpu_budget_mib},
+            headers=headers,
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException as exc:
+        log.error(
+            "échec configuration budget GPU proxy réseau",
+            vm_id=vm_id,
+            proxy_url=proxy_url,
+            error=str(exc),
+        )
+        return False
 
 
 def _ensure_vm_vcpu_profile(

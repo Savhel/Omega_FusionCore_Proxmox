@@ -14,83 +14,74 @@ VMID1="${SELECTED_VMIDS[0]}"
 VMID2="${SELECTED_VMIDS[1]}"
 VM1_RAM=$(vm_ram_mib "$VMID1"); VM1_RAM="${VM1_RAM:-1024}"
 VM2_RAM=$(vm_ram_mib "$VMID2"); VM2_RAM="${VM2_RAM:-1024}"
+CONTROL_PORT="${OMEGA_CONTROL_PORT:-9300}"
+GPU_TEST_BUDGET_MIB="${OMEGA_GPU_TEST_BUDGET_MIB:-128}"
 
 header "Test 7 — GPU scheduler round-robin (VM $VMID1 + VM $VMID2)"
 
 step "Vérifications prérequis"
 require_bin qm
+require_bin curl
+require_bin python3
 
-step "Vérification lock GPU (aucun scheduler actif)"
-ls /run/omega-gpu-scheduler-*.lock 2>/dev/null && \
-    info "lock GPU existant : $(ls /run/omega-gpu-scheduler-*.lock)" || \
-    info "aucun lock GPU actif (normal)"
+vm1_node="$(vm_node "$VMID1" 2>/dev/null || true)"
+vm2_node="$(vm_node "$VMID2" 2>/dev/null || true)"
+info "VM $VMID1 sur ${vm1_node:-inconnu}"
+info "VM $VMID2 sur ${vm2_node:-inconnu}"
+if [[ -n "$vm1_node" && -n "$vm2_node" && "$vm1_node" != "$vm2_node" ]]; then
+    warn "les deux VMs ne sont pas sur le même nœud; le test vérifie le budget GPU sur le nœud de VM $VMID1"
+fi
 
-step "Démarrage agent 1 (VM $VMID1)"
-LOG1="/tmp/omega-agent-gpu1.log"
-_TMPFILES+=("$LOG1")
-"$AGENT_BIN" \
-    --stores "$STORES_CSV" \
-    --vm-id "$VMID1" \
-    --vm-requested-mib "$VM1_RAM" \
-    --region-mib "$VM1_RAM" \
-    --gpu-quantum-secs 15 \
-    --mode daemon >"$LOG1" 2>&1 &
-_PIDS+=($!)
-sleep 2
+GPU_NODE="${vm1_node:-$CONTROLLER_NODE}"
+GPU_URL="http://${GPU_NODE}:${CONTROL_PORT}"
 
-step "Démarrage agent 2 (VM $VMID2)"
-LOG2="/tmp/omega-agent-gpu2.log"
-_TMPFILES+=("$LOG2")
-"$AGENT_BIN" \
-    --stores "$STORES_CSV" \
-    --vm-id "$VMID2" \
-    --vm-requested-mib "$VM2_RAM" \
-    --region-mib "$VM2_RAM" \
-    --gpu-quantum-secs 15 \
-    --mode daemon >"$LOG2" 2>&1 &
-_PIDS+=($!)
+step "État GPU daemon sur ${GPU_NODE}:${CONTROL_PORT}"
+GPU_STATUS="$(curl -sf "${GPU_URL}/control/gpu/status" 2>/dev/null || true)"
+if [[ -z "$GPU_STATUS" ]]; then
+    fail "GPU runtime indisponible sur $GPU_NODE. Vérifier omega-daemon, /dev/dri/renderD*, driver GPU, et /control/gpu/status"
+fi
+printf '%s\n' "$GPU_STATUS" | python3 -m json.tool || printf '%s\n' "$GPU_STATUS"
 
-step "Observation rotation GPU pendant 90s"
-t0=$SECONDS
-rotations=0
-last_owner=""
-while [[ $(elapsed $t0) -lt 90 ]]; do
-    owner1=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG1" 2>/dev/null) || owner1=0
-    owner2=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG2" 2>/dev/null) || owner2=0
-    lock=$(ls /run/omega-gpu-scheduler-*.lock 2>/dev/null | head -1 || echo "aucun")
-    printf "\r  [%3ds] VM1 assigns=%-3s  VM2 assigns=%-3s  lock=%s" \
-        "$(elapsed $t0)" "$owner1" "$owner2" "$(basename "$lock" 2>/dev/null || echo aucun)"
-    sleep 5
+enabled="$(printf '%s\n' "$GPU_STATUS" | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("gpu") or {}).get("enabled", False))' 2>/dev/null || echo False)"
+backend="$(printf '%s\n' "$GPU_STATUS" | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("gpu") or {}).get("backend_name", ""))' 2>/dev/null || true)"
+socket_path="$(printf '%s\n' "$GPU_STATUS" | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("gpu") or {}).get("socket_path", ""))' 2>/dev/null || true)"
+total_vram="$(printf '%s\n' "$GPU_STATUS" | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("gpu") or {}).get("total_vram_mib", 0))' 2>/dev/null || echo 0)"
+[[ "$enabled" == "True" ]] || fail "GPU runtime présent mais non activé sur $GPU_NODE"
+info "backend GPU=${backend:-inconnu} total_vram_mib=${total_vram}"
+if [[ -n "$socket_path" ]]; then
+    ssh_run "$GPU_NODE" "test -S '$socket_path'" && pass "socket GPU présent : $socket_path" || warn "socket GPU absent/inaccessible : $socket_path"
+fi
+
+step "Allocation budgets VRAM pour les deux VMs"
+for vmid in "$VMID1" "$VMID2"; do
+    resp="$(curl -sf -X POST "${GPU_URL}/control/vm/${vmid}/gpu" \
+        -H "Content-Type: application/json" \
+        -d "{\"vram_budget_mib\":${GPU_TEST_BUDGET_MIB}}" 2>/dev/null || true)"
+    [[ -n "$resp" ]] || fail "échec allocation budget GPU pour VM $vmid sur $GPU_NODE"
+    printf '%s\n' "$resp" | python3 -m json.tool || printf '%s\n' "$resp"
 done
-echo ""
 
-step "Résultats"
-assigns1=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG1" 2>/dev/null) || assigns1=0
-assigns2=$(grep -c "GPU assigné\|gpu.*assign\|device_add" "$LOG2" 2>/dev/null) || assigns2=0
-info "VM $VMID1 : $assigns1 assignations GPU"
-info "VM $VMID2 : $assigns2 assignations GPU"
+step "Vérification budgets GPU"
+GPU_STATUS_AFTER="$(curl -sf "${GPU_URL}/control/gpu/status")"
+printf '%s\n' "$GPU_STATUS_AFTER" | python3 -m json.tool || printf '%s\n' "$GPU_STATUS_AFTER"
+missing="$(printf '%s\n' "$GPU_STATUS_AFTER" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+expected = {int(sys.argv[1]), int(sys.argv[2])}
+budget = int(sys.argv[3])
+seen = {
+    int(v.get("vm_id"))
+    for v in (d.get("gpu") or {}).get("budgets", [])
+    if int(v.get("budget_mib", -1)) == budget
+}
+missing = sorted(expected - seen)
+print(",".join(map(str, missing)))
+' "$VMID1" "$VMID2" "$GPU_TEST_BUDGET_MIB")"
+[[ -z "$missing" ]] || fail "budgets GPU manquants ou incorrects pour VM(s): $missing"
 
-step "Leader election (flock)"
-lock_files=$(ls /run/omega-gpu-scheduler-*.lock 2>/dev/null || echo "")
-if [[ -n "$lock_files" ]]; then
-    info "lock actif : $lock_files"
-    pass "leader election OK — lock flock présent"
-else
-    warn "aucun lock GPU détecté (QMP socket peut-être inaccessible)"
-fi
+step "Libération budgets GPU"
+for vmid in "$VMID1" "$VMID2"; do
+    curl -sf -X DELETE "${GPU_URL}/control/vm/${vmid}/gpu" >/dev/null || warn "échec libération budget GPU VM $vmid"
+done
 
-step "Logs GPU (agent 1)"
-grep -i "gpu\|flock\|leader\|device_del\|device_add\|qmp\|erreur\|error\|warn" "$LOG1" | head -15 || true
-step "Logs GPU (agent 2)"
-grep -i "gpu\|flock\|leader\|device_del\|device_add\|qmp\|erreur\|error\|warn" "$LOG2" | head -15 || true
-
-if [[ $((assigns1 + assigns2)) -eq 0 ]]; then
-    warn "aucune assignation GPU loggée — environnement probablement non applicable"
-    warn "à vérifier sur le nœud GPU : QMP socket, hostpci, et présence d'un GPU libre"
-    for vmid in "$VMID1" "$VMID2"; do
-        info "diagnostic VM $vmid"
-        qm config "$vmid" | grep -E "^hostpci|^args|^name|^machine" || true
-        qm monitor "$vmid" <<<"info status" 2>/dev/null | head -5 || warn "QMP monitor inaccessible pour VM $vmid"
-    done
-fi
-pass "GPU scheduler testé — voir logs pour la rotation"
+pass "GPU scheduler OK — runtime GPU actif et budgets VRAM appliqués/libérés pour VM $VMID1 et VM $VMID2"

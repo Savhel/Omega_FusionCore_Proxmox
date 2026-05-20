@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Lance tous les tests sur cluster Proxmox (virtuel ou physique)
-# Usage : ./run-cluster.sh [vmid] [--gpu] [--ceph] [--long] [--destructive] [--skip M3,M7] [--drain-node 10.10.0.11]
+# Usage : ./run-cluster.sh [vmid] [--gpu] [--ceph] [--long] [--destructive] [--skip M3,M7] [--drain-node NODE]
 #
 # Variables d'environnement :
-#   OMEGA_NODES=10.10.0.11,10.10.0.12,10.10.0.13   — tous les nœuds (N >= 2)
-#   OMEGA_CONTROLLER=10.10.0.11                     — nœud contrôleur (défaut: premier)
+#   OMEGA_NODES=NODE1,NODE2,NODE3                   — tous les nœuds (N >= 2)
+#   OMEGA_CONTROLLER=NODE1                          — nœud contrôleur (défaut: premier)
 #   OMEGA_TEST_VMID=9001                            — VM principale pour les tests
 #   OMEGA_BIN_DIR=/usr/local/bin                    — si binaires déployés
 #   OMEGA_REMOTE_BIN_DIR=/usr/local/bin             — binaires sur les nœuds distants
@@ -54,6 +54,18 @@ remote_env() {
     printf '%q=%q ' OMEGA_STORE_PORT "$STORE_PORT"
     printf '%q=%q ' OMEGA_STATUS_PORT "$STATUS_PORT"
     printf '%q=%q ' OMEGA_METRICS_PORT "$METRICS_PORT"
+    printf '%q=%q ' OMEGA_GPU_PRIMARY_NODE "${OMEGA_GPU_PRIMARY_NODE:-}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_URL "${OMEGA_GPU_PROXY_URL:-}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_LISTEN "${OMEGA_GPU_PROXY_LISTEN:-0.0.0.0:9400}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_BACKEND_COMMAND "${OMEGA_GPU_PROXY_BACKEND_COMMAND:-${REMOTE_BINS_DIR}/omega-gpu-worker-app.py}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_BACKEND_TIMEOUT_SECS "${OMEGA_GPU_PROXY_BACKEND_TIMEOUT_SECS:-900}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_TOTAL_VRAM_MIB "${OMEGA_GPU_PROXY_TOTAL_VRAM_MIB:-0}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_MAX_CONCURRENT "${OMEGA_GPU_PROXY_MAX_CONCURRENT:-1}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_API_TOKEN_FILE "${OMEGA_GPU_PROXY_API_TOKEN_FILE:-/etc/omega/gpu-proxy.token}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_API_TOKEN "${OMEGA_GPU_PROXY_API_TOKEN:-}"
+    printf '%q=%q ' OMEGA_GPU_MIGRATE_TO_GPU_NODE "${OMEGA_GPU_MIGRATE_TO_GPU_NODE:-1}"
+    printf '%q=%q ' OMEGA_GPU_FALLBACK_NETWORK "${OMEGA_GPU_FALLBACK_NETWORK:-1}"
+    printf '%q=%q ' OMEGA_GPU_PROXY_TEST_VM_COUNT "${OMEGA_GPU_PROXY_TEST_VM_COUNT:-3}"
     printf '%q=%q ' DEPLOY_USER "$DEPLOY_USER"
     printf '%q=%q ' VMID "$VMID"
     printf '%q=%q ' CLUSTER_MODE "1"
@@ -85,10 +97,17 @@ sync_to_controller() {
     info "Synchronisation vers ${CONTROLLER_NODE}..."
     rsync -aq -e "$(rsync_ssh_cmd)" --delete "${TESTS_DIR}/" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_TESTS_DIR}/"
     ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" "mkdir -p ${REMOTE_BINS_DIR}"
-    for bin in node-a-agent node-bc-store; do
+    for bin in node-a-agent node-bc-store omega-gpu-proxy; do
         local local_bin="${REPO_ROOT}/target/release/${bin}"
         if [[ -x "$local_bin" ]]; then
             rsync -aq -e "$(rsync_ssh_cmd)" "$local_bin" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_BINS_DIR}/${bin}"
+        fi
+    done
+    for worker in omega-gpu-worker-cpu.py omega-gpu-worker-app.py; do
+        local worker_path="${REPO_ROOT}/scripts/${worker}"
+        if [[ -f "$worker_path" ]]; then
+            rsync -aq -e "$(rsync_ssh_cmd)" "$worker_path" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_BINS_DIR}/${worker}"
+            ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" "chmod +x ${REMOTE_BINS_DIR}/${worker}" || true
         fi
     done
     pass "scripts + binaires synchronisés sur ${CONTROLLER_NODE}"
@@ -232,6 +251,11 @@ run_test_on_node_isolated "20" "Prefetch stride"      "$TESTS_DIR/20-prefetch-st
 run_test_on_node_isolated "21" "TLS TOFU"             "$TESTS_DIR/21-tls-tofu.sh"
 run_test_on_node_isolated "23" "Disk I/O scheduler"   "$TESTS_DIR/23-disk-io-scheduler.sh"
 
+# ── Normalisation des VMs de test avant les tests cluster ────────────────────
+# Évite que chaque test retombe sur une VM ancienne encore lancée avec
+# -smp maxcpus=1 malgré une description Omega correcte.
+run_test_on_node "30A" "Normalisation VMs Omega" "$TESTS_DIR/30-vm-conformity.sh" "${OMEGA_TEST_VMIDS:-$VMID}"
+
 # ── Tests cluster (daemon actif, qm/pvesh disponibles) ────────────────────────
 run_test_on_node "05" "vCPU élastique"              "$TESTS_DIR/05-vcpu-elastic.sh"         "$VMID"
 run_test_on_node "08" "Migration RAM"               "$TESTS_DIR/08-migration-ram.sh"        "$VMID"
@@ -255,8 +279,9 @@ if $DO_GPU; then
         ((SKIP++)) || true
     fi
     run_test_on_node "27" "GPU réel / rendu minimal" "$TESTS_DIR/27-gpu-real-render.sh"      "$VMID"
+    run_test_on_node "32" "GPU proxy applicatif"      "$TESTS_DIR/32-gpu-proxy.sh"           "$VMID"
 else
-    for t in "06:GPU placement" "07:GPU scheduler" "27:GPU réel / rendu minimal"; do
+    for t in "06:GPU placement" "07:GPU scheduler" "27:GPU réel / rendu minimal" "32:GPU proxy applicatif"; do
         num="${t%:*}"; name="${t#*:}"
         RESULTS+=("SKIP  $num $name (passer --gpu)")
         ((SKIP++)) || true
