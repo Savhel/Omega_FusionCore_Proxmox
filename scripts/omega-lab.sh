@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # omega-lab.sh — Lab interactif : configuration + installation + tests
 #
-# Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--long] [--scale] [--destructive] [--provision] [--production] [--auto]
+# Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--long] [--scale] [--fleet] [--destructive] [--provision] [--production] [--auto]
 #
 # Le script lit scripts/cluster.conf pour la configuration du cluster.
 # Si le fichier n'existe pas ou si les nœuds ne sont pas encore définis,
@@ -12,6 +12,7 @@
 #   --ceph   activer les tests Ceph
 #   --long   active les tests longue durée
 #   --scale  active le test de scalabilité VMs physiques
+#   --fleet  active le test puissance Omega sur 40-75 VMs
 #   --destructive active les tests qui modifient temporairement le réseau/services
 #   --provision cree les VMs physiques configurees avant les tests en mode --auto
 #   --production validation complete stricte: GPU/Ceph/long/scale/destructif, aucun skip accepte
@@ -24,16 +25,17 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONF_FILE="${SCRIPT_DIR}/cluster.conf"
 
 # ── Options CLI ───────────────────────────────────────────────────────────────
-DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_DESTRUCTIVE=false; DO_PROVISION=false; DO_PRODUCTION=false; AUTO=false
+DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_FLEET=false; DO_DESTRUCTIVE=false; DO_PROVISION=false; DO_PRODUCTION=false; AUTO=false
 for arg in "$@"; do
     case "$arg" in
         --gpu)         DO_GPU=true  ;;
         --ceph)        DO_CEPH=true ;;
         --long)        DO_LONG=true ;;
         --scale)       DO_SCALE=true ;;
+        --fleet)       DO_FLEET=true ;;
         --destructive) DO_DESTRUCTIVE=true ;;
         --provision)   DO_PROVISION=true ;;
-        --production)  DO_PRODUCTION=true; DO_GPU=true; DO_CEPH=true; DO_LONG=true; DO_SCALE=true; DO_DESTRUCTIVE=true ;;
+        --production)  DO_PRODUCTION=true; DO_GPU=true; DO_CEPH=true; DO_LONG=true; DO_SCALE=true; DO_FLEET=true; DO_DESTRUCTIVE=true ;;
         --auto)        AUTO=true    ;;
     esac
 done
@@ -63,12 +65,17 @@ OMEGA_VM_BRIDGE="vmbr0"
 OMEGA_VM_IMAGE_REMOTE="/var/lib/vz/template/iso/debian-12-generic-amd64.qcow2"
 OMEGA_VM_IMAGE_LOCAL=""
 OMEGA_VM_SSHKEY_REMOTE="/root/.ssh/id_rsa.pub"
-OMEGA_VM_MEMORY=2048
+OMEGA_VM_MEMORY=3072
 OMEGA_VM_BALLOON=512
 OMEGA_VM_CORES=4
 OMEGA_VM_VCPUS=1
 OMEGA_VM_DISK_MAX_GIB=20
 OMEGA_VM_GPU_VRAM_MIB=0
+OMEGA_QGA_WATCHDOG_NODES=""
+OMEGA_QGA_WATCHDOG_VMIDS=""
+OMEGA_QGA_WATCHDOG_ROOT_PASSWORD="root"
+OMEGA_QGA_WATCHDOG_RESET_STUCK=0
+OMEGA_QGA_WATCHDOG_INTERVAL_SECS=60
 OMEGA_GPU_NODES=""
 OMEGA_GPU_PRIMARY_NODE=""
 OMEGA_GPU_PROXY_URL=""
@@ -89,6 +96,16 @@ OMEGA_MIGRATION_TIMEOUT_SECS=120
 OMEGA_CEPH_TIMEOUT_SECS=60
 OMEGA_DISK_TIMEOUT_SECS=60
 OMEGA_SCALE_TIMEOUT_SECS=1800
+OMEGA_FLEET_VMIDS=""
+OMEGA_FLEET_VM_COUNT=50
+OMEGA_FLEET_CHAOS_VM_COUNT=75
+OMEGA_FLEET_DURATION_SECS=900
+OMEGA_FLEET_PHASE_SECS=180
+OMEGA_FLEET_BATCH_SIZE=10
+OMEGA_FLEET_MIGRATIONS=12
+OMEGA_FLEET_GPU_VM_COUNT=12
+OMEGA_FLEET_GPU_JOB_N=1024
+OMEGA_FLEET_GPU_JOB_VRAM_MIB=256
 DEPLOY_USER="root"
 STORE_PORT="9100"
 STATUS_PORT="9200"
@@ -115,14 +132,26 @@ _load_config() {
     OMEGA_VM_BRIDGE="${OMEGA_VM_BRIDGE:-vmbr0}"
     OMEGA_VM_IMAGE_REMOTE="${OMEGA_VM_IMAGE_REMOTE:-/var/lib/vz/template/iso/debian-12-generic-amd64.qcow2}"
     OMEGA_VM_IMAGE_LOCAL="${OMEGA_VM_IMAGE_LOCAL:-}"
+    OMEGA_VM_TEMPLATE_ID="${OMEGA_VM_TEMPLATE_ID:-2299}"
+    OMEGA_VM_LINKED_CLONE="${OMEGA_VM_LINKED_CLONE:-1}"
     OMEGA_VM_SSHKEY_REMOTE="${OMEGA_VM_SSHKEY_REMOTE:-/root/.ssh/id_rsa.pub}"
-    OMEGA_VM_MEMORY="${OMEGA_VM_MEMORY:-2048}"
+    OMEGA_VM_MEMORY="${OMEGA_VM_MEMORY:-3072}"
     OMEGA_VM_BALLOON="${OMEGA_VM_BALLOON:-512}"
     OMEGA_VM_CORES="${OMEGA_VM_CORES:-4}"
     OMEGA_VM_SOCKETS="${OMEGA_VM_SOCKETS:-1}"
     OMEGA_VM_VCPUS="${OMEGA_VM_VCPUS:-1}"
     OMEGA_VM_DISK_MAX_GIB="${OMEGA_VM_DISK_MAX_GIB:-20}"
     OMEGA_VM_GPU_VRAM_MIB="${OMEGA_VM_GPU_VRAM_MIB:-0}"
+    OMEGA_VM_ROOT_PASSWORD="${OMEGA_VM_ROOT_PASSWORD:-root}"
+    OMEGA_PROVISION_RANDOMIZE="${OMEGA_PROVISION_RANDOMIZE:-1}"
+    OMEGA_PROVISION_RECREATE_BAD="${OMEGA_PROVISION_RECREATE_BAD:-1}"
+    OMEGA_PROVISION_RESOURCE_ONLY="${OMEGA_PROVISION_RESOURCE_ONLY:-0}"
+    OMEGA_PROVISION_BOOT_WAIT_SECS="${OMEGA_PROVISION_BOOT_WAIT_SECS:-180}"
+    OMEGA_QGA_WATCHDOG_NODES="${OMEGA_QGA_WATCHDOG_NODES:-${OMEGA_NODES}}"
+    OMEGA_QGA_WATCHDOG_VMIDS="${OMEGA_QGA_WATCHDOG_VMIDS:-}"
+    OMEGA_QGA_WATCHDOG_ROOT_PASSWORD="${OMEGA_QGA_WATCHDOG_ROOT_PASSWORD:-${OMEGA_VM_ROOT_PASSWORD:-root}}"
+    OMEGA_QGA_WATCHDOG_RESET_STUCK="${OMEGA_QGA_WATCHDOG_RESET_STUCK:-0}"
+    OMEGA_QGA_WATCHDOG_INTERVAL_SECS="${OMEGA_QGA_WATCHDOG_INTERVAL_SECS:-60}"
     OMEGA_GPU_NODES="${OMEGA_GPU_NODES:-}"
     OMEGA_GPU_PRIMARY_NODE="${OMEGA_GPU_PRIMARY_NODE:-}"
     OMEGA_GPU_PROXY_URL="${OMEGA_GPU_PROXY_URL:-}"
@@ -143,6 +172,16 @@ _load_config() {
     OMEGA_CEPH_TIMEOUT_SECS="${OMEGA_CEPH_TIMEOUT_SECS:-60}"
     OMEGA_DISK_TIMEOUT_SECS="${OMEGA_DISK_TIMEOUT_SECS:-60}"
     OMEGA_SCALE_TIMEOUT_SECS="${OMEGA_SCALE_TIMEOUT_SECS:-1800}"
+    OMEGA_FLEET_VMIDS="${OMEGA_FLEET_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}"
+    OMEGA_FLEET_VM_COUNT="${OMEGA_FLEET_VM_COUNT:-50}"
+    OMEGA_FLEET_CHAOS_VM_COUNT="${OMEGA_FLEET_CHAOS_VM_COUNT:-75}"
+    OMEGA_FLEET_DURATION_SECS="${OMEGA_FLEET_DURATION_SECS:-900}"
+    OMEGA_FLEET_PHASE_SECS="${OMEGA_FLEET_PHASE_SECS:-180}"
+    OMEGA_FLEET_BATCH_SIZE="${OMEGA_FLEET_BATCH_SIZE:-10}"
+    OMEGA_FLEET_MIGRATIONS="${OMEGA_FLEET_MIGRATIONS:-12}"
+    OMEGA_FLEET_GPU_VM_COUNT="${OMEGA_FLEET_GPU_VM_COUNT:-12}"
+    OMEGA_FLEET_GPU_JOB_N="${OMEGA_FLEET_GPU_JOB_N:-1024}"
+    OMEGA_FLEET_GPU_JOB_VRAM_MIB="${OMEGA_FLEET_GPU_JOB_VRAM_MIB:-256}"
     IFS=',' read -ra TEST_VMIDS_ARR <<< "$OMEGA_TEST_VMIDS"
     DEPLOY_USER="${DEPLOY_USER:-root}"
     STORE_PORT="${STORE_PORT:-9100}"
@@ -255,6 +294,16 @@ OMEGA_SCALE_STEPS='${OMEGA_SCALE_STEPS:-}' \
 OMEGA_SCALE_STOP_AFTER='${OMEGA_SCALE_STOP_AFTER:-0}' \
 OMEGA_SCALE_DESTROY_AFTER='${OMEGA_SCALE_DESTROY_AFTER:-0}' \
 OMEGA_SCALE_CLEANUP_SCOPE='${OMEGA_SCALE_CLEANUP_SCOPE:-started}' \
+OMEGA_FLEET_VMIDS='${OMEGA_FLEET_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}' \
+OMEGA_FLEET_VM_COUNT='${OMEGA_FLEET_VM_COUNT:-50}' \
+OMEGA_FLEET_CHAOS_VM_COUNT='${OMEGA_FLEET_CHAOS_VM_COUNT:-75}' \
+OMEGA_FLEET_DURATION_SECS='${OMEGA_FLEET_DURATION_SECS:-900}' \
+OMEGA_FLEET_PHASE_SECS='${OMEGA_FLEET_PHASE_SECS:-180}' \
+OMEGA_FLEET_BATCH_SIZE='${OMEGA_FLEET_BATCH_SIZE:-10}' \
+OMEGA_FLEET_MIGRATIONS='${OMEGA_FLEET_MIGRATIONS:-12}' \
+OMEGA_FLEET_GPU_VM_COUNT='${OMEGA_FLEET_GPU_VM_COUNT:-12}' \
+OMEGA_FLEET_GPU_JOB_N='${OMEGA_FLEET_GPU_JOB_N:-1024}' \
+OMEGA_FLEET_GPU_JOB_VRAM_MIB='${OMEGA_FLEET_GPU_JOB_VRAM_MIB:-256}' \
 OMEGA_TEST_TIMEOUT_MULTIPLIER='${OMEGA_TEST_TIMEOUT_MULTIPLIER:-1}' \
 OMEGA_MIGRATION_TIMEOUT_SECS='${OMEGA_MIGRATION_TIMEOUT_SECS:-120}' \
 OMEGA_CEPH_TIMEOUT_SECS='${OMEGA_CEPH_TIMEOUT_SECS:-60}' \
@@ -507,6 +556,12 @@ EOF
 Valide la concurrence GPU CUDA.
 Le script lance plusieurs jobs matrix_multiply CUDA depuis plusieurs VMIDs et exige que le proxy respecte les budgets, refuse le hors-budget et exécute réellement sur backend=torch device=cuda.
 Un échec indique souvent une mauvaise configuration OMEGA_GPU_PYTHON, un max_concurrent trop bas ou un worker qui retombe en CPU.
+EOF
+            ;;
+        37) cat <<'EOF'
+Valide la puissance Omega sur une flotte physique large.
+Le script prend 40 à 50 VMs pour charger simultanément CPU, RAM, disque, GPU proxy et migrations, puis lance un chaos live sur jusqu'à 75 VMs avec démarrages/arrêts aléatoires et travaux mixtes.
+Il compare aussi une tâche de référence sur l'hôte physique puis dans une VM pour mesurer le coût Omega/virtualisation sur CPU, RAM et disque, et écrit un rapport JSON exploitable.
 EOF
             ;;
         28) cat <<'EOF'
@@ -860,6 +915,14 @@ do_configure() {
     read -r input_vm_image_local
     input_vm_image_local="${input_vm_image_local:-${OMEGA_VM_IMAGE_LOCAL}}"
 
+    _ask "Template VMID pour clones rapides (vide=désactivé) [${OMEGA_VM_TEMPLATE_ID}]"
+    read -r input_vm_template_id
+    input_vm_template_id="${input_vm_template_id:-${OMEGA_VM_TEMPLATE_ID}}"
+
+    _ask "Clones liés rapides depuis template 1/0 [${OMEGA_VM_LINKED_CLONE}]"
+    read -r input_vm_linked_clone
+    input_vm_linked_clone="${input_vm_linked_clone:-${OMEGA_VM_LINKED_CLONE}}"
+
     _ask "Clé publique distante injectée cloud-init [${OMEGA_VM_SSHKEY_REMOTE}]"
     read -r input_vm_sshkey_remote
     input_vm_sshkey_remote="${input_vm_sshkey_remote:-${OMEGA_VM_SSHKEY_REMOTE}}"
@@ -892,12 +955,32 @@ do_configure() {
     read -r input_vm_gpu_vram_mib
     input_vm_gpu_vram_mib="${input_vm_gpu_vram_mib:-${OMEGA_VM_GPU_VRAM_MIB}}"
 
-    for _vm_num in "$input_vm_memory" "$input_vm_balloon" "$input_vm_cores" "$input_vm_sockets" "$input_vm_vcpus" "$input_vm_disk_max_gib" "$input_vm_gpu_vram_mib"; do
+    _ask "Mot de passe root des VMs [${OMEGA_VM_ROOT_PASSWORD}]"
+    read -r input_vm_root_password
+    input_vm_root_password="${input_vm_root_password:-${OMEGA_VM_ROOT_PASSWORD}}"
+
+    _ask "Randomiser les profils conformes Omega 1/0 [${OMEGA_PROVISION_RANDOMIZE}]"
+    read -r input_provision_randomize
+    input_provision_randomize="${input_provision_randomize:-${OMEGA_PROVISION_RANDOMIZE}}"
+
+    _ask "Supprimer/recréer automatiquement les VMs non conformes 1/0 [${OMEGA_PROVISION_RECREATE_BAD}]"
+    read -r input_provision_recreate_bad
+    input_provision_recreate_bad="${input_provision_recreate_bad:-${OMEGA_PROVISION_RECREATE_BAD}}"
+
+    _ask "Attente boot/cloud-init avant checks secondes [${OMEGA_PROVISION_BOOT_WAIT_SECS}]"
+    read -r input_provision_boot_wait
+    input_provision_boot_wait="${input_provision_boot_wait:-${OMEGA_PROVISION_BOOT_WAIT_SECS}}"
+
+    for _vm_num in "$input_vm_memory" "$input_vm_balloon" "$input_vm_cores" "$input_vm_sockets" "$input_vm_vcpus" "$input_vm_disk_max_gib" "$input_vm_gpu_vram_mib" "$input_provision_randomize" "$input_provision_recreate_bad" "$input_provision_boot_wait" "$input_vm_linked_clone"; do
         if [[ ! "$_vm_num" =~ ^[0-9]+$ ]]; then
             _err "Valeur VM numérique invalide: $_vm_num"
             return 1
         fi
     done
+    if [[ -n "$input_vm_template_id" && ! "$input_vm_template_id" =~ ^[0-9]+$ ]]; then
+        _err "Template VMID invalide: $input_vm_template_id"
+        return 1
+    fi
     local input_vm_max_vcpus=$(( input_vm_cores * input_vm_sockets ))
     if [[ "$input_vm_balloon" -le 0 || "$input_vm_balloon" -ge "$input_vm_memory" ]]; then
         _err "RAM VM invalide: balloon=${input_vm_balloon} doit être > 0 et < memory=${input_vm_memory}"
@@ -948,6 +1031,18 @@ OMEGA_CEPH_TIMEOUT_SECS="${input_ceph_timeout}"
 OMEGA_DISK_TIMEOUT_SECS="${input_disk_timeout}"
 OMEGA_SCALE_TIMEOUT_SECS="${input_scale_timeout}"
 
+# Tests flotte Omega lourds (40-50 VMs + chaos jusqu'à 75 VMs).
+OMEGA_FLEET_VMIDS="${OMEGA_FLEET_VMIDS:-${normalized_provision_vmids}}"
+OMEGA_FLEET_VM_COUNT="${OMEGA_FLEET_VM_COUNT:-50}"
+OMEGA_FLEET_CHAOS_VM_COUNT="${OMEGA_FLEET_CHAOS_VM_COUNT:-75}"
+OMEGA_FLEET_DURATION_SECS="${OMEGA_FLEET_DURATION_SECS:-900}"
+OMEGA_FLEET_PHASE_SECS="${OMEGA_FLEET_PHASE_SECS:-180}"
+OMEGA_FLEET_BATCH_SIZE="${OMEGA_FLEET_BATCH_SIZE:-10}"
+OMEGA_FLEET_MIGRATIONS="${OMEGA_FLEET_MIGRATIONS:-12}"
+OMEGA_FLEET_GPU_VM_COUNT="${OMEGA_FLEET_GPU_VM_COUNT:-12}"
+OMEGA_FLEET_GPU_JOB_N="${OMEGA_FLEET_GPU_JOB_N:-1024}"
+OMEGA_FLEET_GPU_JOB_VRAM_MIB="${OMEGA_FLEET_GPU_JOB_VRAM_MIB:-256}"
+
 # GPU/proxy applicatif Omega.
 # OMEGA_GPU_NODES vide = detection automatique au deploiement.
 # OMEGA_GPU_PRIMARY_NODE vide = premier noeud GPU detecte.
@@ -968,6 +1063,8 @@ OMEGA_VM_STORAGE="${input_vm_storage}"
 OMEGA_VM_BRIDGE="${input_vm_bridge}"
 OMEGA_VM_IMAGE_REMOTE="${input_vm_image_remote}"
 OMEGA_VM_IMAGE_LOCAL="${input_vm_image_local}"
+OMEGA_VM_TEMPLATE_ID="${input_vm_template_id}"
+OMEGA_VM_LINKED_CLONE="${input_vm_linked_clone}"
 OMEGA_VM_SSHKEY_REMOTE="${input_vm_sshkey_remote}"
 OMEGA_VM_MEMORY="${input_vm_memory}"
 OMEGA_VM_BALLOON="${input_vm_balloon}"
@@ -976,6 +1073,10 @@ OMEGA_VM_SOCKETS="${input_vm_sockets}"
 OMEGA_VM_VCPUS="${input_vm_vcpus}"
 OMEGA_VM_DISK_MAX_GIB="${input_vm_disk_max_gib}"
 OMEGA_VM_GPU_VRAM_MIB="${input_vm_gpu_vram_mib}"
+OMEGA_VM_ROOT_PASSWORD="${input_vm_root_password}"
+OMEGA_PROVISION_RANDOMIZE="${input_provision_randomize}"
+OMEGA_PROVISION_RECREATE_BAD="${input_provision_recreate_bad}"
+OMEGA_PROVISION_BOOT_WAIT_SECS="${input_provision_boot_wait}"
 EOF
 
     _ok "Configuration sauvegardée dans ${CONF_FILE}"
@@ -988,7 +1089,7 @@ EOF
     echo -e "  ${GREEN}✓${RESET} Contrôleur : ${CYAN}${CONTROLLER_NODE}${RESET}"
     echo -e "  ${GREEN}✓${RESET} VMs test   : ${CYAN}${OMEGA_TEST_VMIDS}${RESET}"
     echo -e "  ${GREEN}✓${RESET} VMs create : ${CYAN}${OMEGA_PROVISION_VMIDS}${RESET}"
-    echo -e "  ${GREEN}✓${RESET} Profil VM  : ${CYAN}vCPU ${OMEGA_VM_VCPUS}/$(( OMEGA_VM_CORES * OMEGA_VM_SOCKETS )), RAM ${OMEGA_VM_BALLOON}/${OMEGA_VM_MEMORY} MiB, bridge ${OMEGA_VM_BRIDGE}, storage ${OMEGA_VM_STORAGE}${RESET}"
+    echo -e "  ${GREEN}✓${RESET} Profil VM  : ${CYAN}vCPU ${OMEGA_VM_VCPUS}/$(( OMEGA_VM_CORES * OMEGA_VM_SOCKETS )), RAM ${OMEGA_VM_BALLOON}/${OMEGA_VM_MEMORY} MiB, bridge ${OMEGA_VM_BRIDGE}, storage ${OMEGA_VM_STORAGE}, template=${OMEGA_VM_TEMPLATE_ID:-non}, linked=${OMEGA_VM_LINKED_CLONE}${RESET}"
     echo -e "  ${GREEN}✓${RESET} GPU/proxy  : nodes=${CYAN}${OMEGA_GPU_NODES:-auto}${RESET} · primary=${CYAN}${OMEGA_GPU_PRIMARY_NODE:-auto}${RESET} · ${CYAN}${OMEGA_GPU_PROXY_URL:-auto}${RESET} · listen=${CYAN}${OMEGA_GPU_PROXY_LISTEN}${RESET} · vram=${CYAN}${OMEGA_GPU_PROXY_TOTAL_VRAM_MIB:-0}${RESET}MiB"
     echo -e "  ${GREEN}✓${RESET} User SSH   : ${CYAN}${DEPLOY_USER}${RESET}"
     echo -e "  ${GREEN}✓${RESET} Timeouts   : ${CYAN}x${OMEGA_TEST_TIMEOUT_MULTIPLIER}, migration=${OMEGA_MIGRATION_TIMEOUT_SECS}s, ceph=${OMEGA_CEPH_TIMEOUT_SECS}s, disk=${OMEGA_DISK_TIMEOUT_SECS}s, scale=${OMEGA_SCALE_TIMEOUT_SECS}s${RESET}"
@@ -1083,6 +1184,9 @@ do_provision_vms() {
     local bridge="${OMEGA_VM_BRIDGE}"
     local image_remote="${OMEGA_VM_IMAGE_REMOTE}"
     local image_local="${OMEGA_VM_IMAGE_LOCAL}"
+    local template_id="${OMEGA_VM_TEMPLATE_ID:-}"
+    local image_prepared="${OMEGA_VM_IMAGE_PREPARED:-0}"
+    local linked_clone="${OMEGA_VM_LINKED_CLONE:-1}"
     local sshkey_remote="${OMEGA_VM_SSHKEY_REMOTE}"
     local memory="${OMEGA_VM_MEMORY}"
     local balloon="${OMEGA_VM_BALLOON}"
@@ -1091,6 +1195,10 @@ do_provision_vms() {
     local vcpus="${OMEGA_VM_VCPUS}"
     local disk_max_gib="${OMEGA_VM_DISK_MAX_GIB}"
     local gpu_vram_mib="${OMEGA_VM_GPU_VRAM_MIB}"
+    local root_password="${OMEGA_VM_ROOT_PASSWORD:-root}"
+    local randomize="${OMEGA_PROVISION_RANDOMIZE:-1}"
+    local recreate_bad="${OMEGA_PROVISION_RECREATE_BAD:-1}"
+    local resource_only="${OMEGA_PROVISION_RESOURCE_ONLY:-0}"
 
     if ! $AUTO; then
         _ask "VMIDs à créer [${provision_vmids}]"
@@ -1117,6 +1225,18 @@ do_provision_vms() {
         _ask "Image qcow2 locale à copier [${image_local:-aucune}]"
         read -r input
         image_local="${input:-$image_local}"
+
+        _ask "Template VMID pour clones rapides (vide=désactivé) [${template_id:-aucun}]"
+        read -r input
+        template_id="${input:-$template_id}"
+
+        _ask "Image déjà préparée, sans virt-customize 1/0 [${image_prepared}]"
+        read -r input
+        image_prepared="${input:-$image_prepared}"
+
+        _ask "Clones liés rapides depuis template 1/0 [${linked_clone}]"
+        read -r input
+        linked_clone="${input:-$linked_clone}"
 
         _ask "Clé publique distante injectée par cloud-init [${sshkey_remote}]"
         read -r input
@@ -1149,12 +1269,33 @@ do_provision_vms() {
         _ask "Budget VRAM MiB [${gpu_vram_mib}]"
         read -r input
         gpu_vram_mib="${input:-$gpu_vram_mib}"
+
+        _ask "Mot de passe root à imposer dans les VMs [${root_password}]"
+        read -r input
+        root_password="${input:-$root_password}"
+
+        _ask "Randomiser les profils conformes Omega 1/0 [${randomize}]"
+        read -r input
+        randomize="${input:-$randomize}"
+
+        _ask "Supprimer/recréer automatiquement les VMs non conformes 1/0 [${recreate_bad}]"
+        read -r input
+        recreate_bad="${input:-$recreate_bad}"
+
+        _ask "Validation ressources uniquement, sans QGA/ping/stress-ng 1/0 [${resource_only}]"
+        read -r input
+        resource_only="${input:-$resource_only}"
+
     fi
 
     [[ -n "$storage" ]] || { _err "Storage vide"; return 1; }
     [[ -n "$image_remote" ]] || { _err "Image distante vide"; return 1; }
     [[ -n "$provision_vmids" ]] || { _err "VMIDs provisioning vides"; return 1; }
-    [[ "$cores" =~ ^[0-9]+$ && "$sockets" =~ ^[0-9]+$ && "$vcpus" =~ ^[0-9]+$ ]] || { _err "cores/sockets/vcpus doivent être numériques"; return 1; }
+    [[ "$cores" =~ ^[0-9]+$ && "$sockets" =~ ^[0-9]+$ && "$vcpus" =~ ^[0-9]+$ && "$randomize" =~ ^[0-9]+$ && "$recreate_bad" =~ ^[0-9]+$ && "$resource_only" =~ ^[0-9]+$ && "$image_prepared" =~ ^[0-9]+$ && "$linked_clone" =~ ^[0-9]+$ ]] || { _err "cores/sockets/vcpus/randomize/recreate/resource_only/image_prepared/linked doivent être numériques"; return 1; }
+    if [[ -n "$template_id" && ! "$template_id" =~ ^[0-9]+$ ]]; then
+        _err "Template VMID invalide: $template_id"
+        return 1
+    fi
     local max_vcpus=$(( cores * sockets ))
     if [[ "$max_vcpus" -le 1 ]]; then
         _err "cores*sockets=$max_vcpus invalide pour les VMs Omega: il faut au moins 2 vCPU max pour tester le scale-up"
@@ -1170,6 +1311,9 @@ do_provision_vms() {
     _write_or_replace_conf_var "OMEGA_VM_BRIDGE" "$bridge"
     _write_or_replace_conf_var "OMEGA_VM_IMAGE_REMOTE" "$image_remote"
     _write_or_replace_conf_var "OMEGA_VM_IMAGE_LOCAL" "$image_local"
+    _write_or_replace_conf_var "OMEGA_VM_TEMPLATE_ID" "$template_id"
+    _write_or_replace_conf_var "OMEGA_VM_IMAGE_PREPARED" "$image_prepared"
+    _write_or_replace_conf_var "OMEGA_VM_LINKED_CLONE" "$linked_clone"
     _write_or_replace_conf_var "OMEGA_VM_SSHKEY_REMOTE" "$sshkey_remote"
     _write_or_replace_conf_var "OMEGA_VM_MEMORY" "$memory"
     _write_or_replace_conf_var "OMEGA_VM_BALLOON" "$balloon"
@@ -1178,6 +1322,10 @@ do_provision_vms() {
     _write_or_replace_conf_var "OMEGA_VM_VCPUS" "$vcpus"
     _write_or_replace_conf_var "OMEGA_VM_DISK_MAX_GIB" "$disk_max_gib"
     _write_or_replace_conf_var "OMEGA_VM_GPU_VRAM_MIB" "$gpu_vram_mib"
+    _write_or_replace_conf_var "OMEGA_VM_ROOT_PASSWORD" "$root_password"
+    _write_or_replace_conf_var "OMEGA_PROVISION_RANDOMIZE" "$randomize"
+    _write_or_replace_conf_var "OMEGA_PROVISION_RECREATE_BAD" "$recreate_bad"
+    _write_or_replace_conf_var "OMEGA_PROVISION_RESOURCE_ONLY" "$resource_only"
     _load_config
 
     echo ""
@@ -1188,8 +1336,10 @@ do_provision_vms() {
     echo -e "    Bridge     : ${CYAN}${bridge}${RESET}"
     echo -e "    Image dist : ${CYAN}${image_remote}${RESET}"
     [[ -n "$image_local" ]] && echo -e "    Image loc  : ${CYAN}${image_local}${RESET}"
+    echo -e "    Template   : ${CYAN}${template_id:-désactivé}${RESET} ${DIM}(linked=${linked_clone}, image_prepared=${image_prepared})${RESET}"
     echo -e "    vCPU       : ${CYAN}${vcpus}/${max_vcpus}${RESET} ${DIM}(cores=${cores}, sockets=${sockets})${RESET}"
     echo -e "    RAM        : ${CYAN}${balloon}/${memory} MiB${RESET}"
+    echo -e "    Post-check : ${CYAN}validation immédiate par VM: resource_only=${resource_only}, root/${root_password}, QGA, stress-ng, random=${randomize}, recreate=${recreate_bad}${RESET}"
     echo ""
 
     if ! $AUTO; then
@@ -1212,7 +1362,15 @@ do_provision_vms() {
         --vcpus "$vcpus"
         --disk-max-gib "$disk_max_gib"
         --gpu-vram-mib "$gpu_vram_mib"
+        --nodes "$OMEGA_NODES"
+        --root-password "$root_password"
     )
+    [[ -n "$template_id" ]] && args+=(--template-id "$template_id")
+    [[ "$linked_clone" == "1" ]] && args+=(--linked-clone)
+    [[ "$image_prepared" == "1" ]] && args+=(--image-prepared)
+    [[ "$randomize" == "1" ]] && args+=(--randomize)
+    [[ "$recreate_bad" == "1" ]] && args+=(--recreate-bad)
+    [[ "$resource_only" == "1" ]] && args+=(--resource-only)
     [[ -n "$image_local" ]] && args+=(--image-local "$image_local")
     [[ -f "${SSH_KEY:-}" ]] && args+=(--ssh-key "$SSH_KEY")
 
@@ -1239,6 +1397,81 @@ do_build() {
                           _warn "  ${bin} absent"
     done
     cd - &>/dev/null
+}
+
+
+do_install_qga_watchdog() {
+    _need_config || return
+    _hdr "══ Installation watchdog QGA ══"
+    local nodes="${OMEGA_QGA_WATCHDOG_NODES:-$OMEGA_NODES}"
+    local vmids="${OMEGA_QGA_WATCHDOG_VMIDS:-}"
+    local root_password="${OMEGA_QGA_WATCHDOG_ROOT_PASSWORD:-${OMEGA_VM_ROOT_PASSWORD:-root}}"
+    local reset_stuck="${OMEGA_QGA_WATCHDOG_RESET_STUCK:-0}"
+    local interval="${OMEGA_QGA_WATCHDOG_INTERVAL_SECS:-60}"
+
+    echo -e "  Agent systemd installé sur les nœuds Proxmox ciblés."
+    echo -e "  Il vérifie QGA périodiquement et répare l'invité via SSH si une IP est visible."
+    echo -e "  ${DIM}VMIDs vide = toutes les VMs locales taguées omega.${RESET}"
+    echo ""
+
+    if ! $AUTO; then
+        _ask "Nœuds où installer le watchdog [${nodes}]"
+        read -r input
+        nodes="${input:-$nodes}"
+
+        _ask "Limiter à des VMIDs précis, vide=tags omega [${vmids:-vide}]"
+        read -r input
+        vmids="${input:-$vmids}"
+        if [[ -n "$vmids" ]] && ! vmids="$(_normalize_vmids_spec "$vmids")"; then
+            _err "Format VMIDs invalide. Exemples valides: 2304,2306,2309 ou 2301-2310"
+            return 1
+        fi
+
+        _ask "Mot de passe root invité pour réparation SSH [${root_password}]"
+        read -r input
+        root_password="${input:-$root_password}"
+
+        _ask "Reset automatique VM bloquée sans QGA/IP après 3 échecs 1/0 [${reset_stuck}]"
+        read -r input
+        reset_stuck="${input:-$reset_stuck}"
+
+        _ask "Intervalle watchdog secondes [${interval}]"
+        read -r input
+        interval="${input:-$interval}"
+    fi
+
+    [[ -n "$nodes" ]] || { _err "Nœuds watchdog vides"; return 1; }
+    [[ "$reset_stuck" =~ ^[01]$ ]] || { _err "reset_stuck doit valoir 0 ou 1"; return 1; }
+    [[ "$interval" =~ ^[0-9]+$ && "$interval" -ge 10 ]] || { _err "intervalle invalide: $interval"; return 1; }
+
+    _write_or_replace_conf_var "OMEGA_QGA_WATCHDOG_NODES" "$nodes"
+    _write_or_replace_conf_var "OMEGA_QGA_WATCHDOG_VMIDS" "$vmids"
+    _write_or_replace_conf_var "OMEGA_QGA_WATCHDOG_ROOT_PASSWORD" "$root_password"
+    _write_or_replace_conf_var "OMEGA_QGA_WATCHDOG_RESET_STUCK" "$reset_stuck"
+    _write_or_replace_conf_var "OMEGA_QGA_WATCHDOG_INTERVAL_SECS" "$interval"
+    _load_config
+
+    echo ""
+    echo -e "  ${BOLD}Résumé watchdog QGA${RESET}"
+    echo -e "    Nœuds      : ${CYAN}${nodes}${RESET}"
+    echo -e "    VMIDs      : ${CYAN}${vmids:-tags omega locaux}${RESET}"
+    echo -e "    Intervalle : ${CYAN}${interval}s${RESET}"
+    echo -e "    Reset auto : ${CYAN}${reset_stuck}${RESET}"
+    echo ""
+
+    if ! $AUTO; then
+        read -rp "  Installer/mettre à jour le watchdog QGA maintenant ? [oui/N] " confirm
+        [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Installation watchdog annulée."; return; }
+    fi
+
+    bash "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" \
+        --nodes "$nodes" \
+        --user "$DEPLOY_USER" \
+        --root-password "$root_password" \
+        --vmids "$vmids" \
+        --reset-stuck "$reset_stuck" \
+        --interval "$interval"
+    _ok "Watchdog QGA installé"
 }
 
 do_uninstall() {
@@ -1287,7 +1520,7 @@ do_deploy() {
 do_install_full() {
     _need_config || return
     _hdr "══ Installation complète ══"
-    echo -e "  Étapes : ${CYAN}désinstallation → build → déploiement${RESET}"
+    echo -e "  Étapes : ${CYAN}désinstallation → build → déploiement → watchdog QGA${RESET}"
     echo -e "  Nœuds  : ${CYAN}${OMEGA_NODES}${RESET} (${#NODES_ARR[@]} nœud(s))"
     echo ""
     if ! $AUTO; then
@@ -1297,6 +1530,7 @@ do_install_full() {
     do_uninstall
     do_build
     do_deploy
+    do_install_qga_watchdog
 }
 
 # ── Sections de tests ─────────────────────────────────────────────────────────
@@ -1428,6 +1662,22 @@ run_section_6() {
     _run_cluster "33" "Métriques production" "33-production-metrics.sh"
 }
 
+run_section_7() {
+    _need_config || return
+    _hdr "══ Section 7 — Puissance flotte Omega (50 VMs + chaos 75 VMs) ══"
+    if ! $DO_FLEET; then
+        _warn "Fleet non activé — relancez avec --fleet ou appuyez sur [f] pour activer"
+        RESULTS["37"]="SKIP"; ((TOTAL_SKIP++)) || true
+        return
+    fi
+    _sync
+    _run_cluster "37" "Puissance Omega flotte" "37-fleet-omega-power.sh" \
+        "${OMEGA_FLEET_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}" \
+        "${OMEGA_FLEET_VM_COUNT:-50}" \
+        "${OMEGA_FLEET_CHAOS_VM_COUNT:-75}" \
+        "${OMEGA_FLEET_DURATION_SECS:-900}"
+}
+
 # ── Pause inter-section ───────────────────────────────────────────────────────
 _pause_section() {
     local name="$1"
@@ -1454,7 +1704,8 @@ run_all() {
     run_section_3; _pause_section "3 — Cluster"         || return
     run_section_4; _pause_section "4 — GPU"             || return
     run_section_5; _pause_section "5 — Mixtes"          || return
-    run_section_6
+    run_section_6; _pause_section "6 — Production"      || return
+    run_section_7
     show_results
 }
 
@@ -1473,6 +1724,7 @@ run_production_full() {
     DO_CEPH=true
     DO_LONG=true
     DO_SCALE=true
+    DO_FLEET=true
     DO_DESTRUCTIVE=true
     export OMEGA_GPU_PROXY_REQUIRE_CUDA=1
     export OMEGA_GPU_PROXY_REQUIRE_PARALLEL=1
@@ -1533,6 +1785,7 @@ run_one() {
         34) _run_cluster  "34" "GPU placement global"        "34-gpu-placement-global.sh"  "${TEST_VMIDS_ARR[0]}" ;;
         35) _run_cluster  "35" "GPU fallback réseau"         "35-gpu-network-fallback.sh"  "${TEST_VMIDS_ARR[0]}" ;;
         36) _run_cluster  "36" "GPU concurrence CUDA"        "36-gpu-concurrency-cuda.sh"  "${TEST_VMIDS_ARR[0]}" ;;
+        37) _run_cluster  "37" "Puissance Omega flotte"      "37-fleet-omega-power.sh"     "${OMEGA_FLEET_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}" "${OMEGA_FLEET_VM_COUNT:-50}" "${OMEGA_FLEET_CHAOS_VM_COUNT:-75}" "${OMEGA_FLEET_DURATION_SECS:-900}" ;;
         28) _run_cluster  "28" "Partition réseau"           "28-network-partition.sh"     "${NODES_ARR[1]:-}" ;;
         29) _run_cluster  "29" "Soak long physique"         "29-long-run-soak.sh"         "${TEST_VMIDS_ARR[0]}" "${OMEGA_SOAK_SECS:-1800}" ;;
         31) _run_cluster  "31" "Scalabilité VMs physiques"   "31-scale-vms.sh"            "${OMEGA_SCALE_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}" "${OMEGA_SCALE_TARGET:-500}" "${OMEGA_SCALE_BATCH_SIZE:-20}" "${OMEGA_SCALE_SOAK_SECS:-1800}" ;;
@@ -1567,8 +1820,9 @@ show_menu() {
         echo -e "    VMs provisioning  : ${CYAN}${OMEGA_PROVISION_VMIDS}${RESET}"
         echo -e "    VM provisioning   : ${CYAN}${OMEGA_VM_STORAGE}${RESET} · ${CYAN}${OMEGA_VM_BRIDGE}${RESET} · ${DIM}${OMEGA_VM_IMAGE_REMOTE}${RESET}"
         echo -e "    GPU               : $(${DO_GPU} && echo "${GREEN}activé${RESET}" || echo "${DIM}non (--gpu)${RESET}") · nodes=${CYAN}${OMEGA_GPU_NODES:-auto}${RESET} · primary=${CYAN}${OMEGA_GPU_PRIMARY_NODE:-auto}${RESET} · proxy=${CYAN}${OMEGA_GPU_PROXY_URL:-auto}${RESET} · vram=${CYAN}${OMEGA_GPU_PROXY_TOTAL_VRAM_MIB:-0}${RESET}MiB"
-        echo -e "    Long/scale        : $(${DO_LONG} && echo "${GREEN}long${RESET}" || echo "${DIM}long off${RESET}") / $(${DO_SCALE} && echo "${GREEN}scale${RESET}" || echo "${DIM}scale off${RESET}")"
+        echo -e "    Long/scale/fleet  : $(${DO_LONG} && echo "${GREEN}long${RESET}" || echo "${DIM}long off${RESET}") / $(${DO_SCALE} && echo "${GREEN}scale${RESET}" || echo "${DIM}scale off${RESET}") / $(${DO_FLEET} && echo "${GREEN}fleet${RESET}" || echo "${DIM}fleet off${RESET}")"
         echo -e "    Scale config      : ${CYAN}${OMEGA_SCALE_STEPS:-auto 50..target}${RESET} · cleanup=${CYAN}${OMEGA_SCALE_CLEANUP_SCOPE}${RESET} · stop=${CYAN}${OMEGA_SCALE_STOP_AFTER}${RESET} · destroy=${CYAN}${OMEGA_SCALE_DESTROY_AFTER}${RESET}"
+        echo -e "    Fleet config      : ${CYAN}${OMEGA_FLEET_VMIDS:-${OMEGA_PROVISION_VMIDS}}${RESET} · charge=${CYAN}${OMEGA_FLEET_VM_COUNT}${RESET} · chaos=${CYAN}${OMEGA_FLEET_CHAOS_VM_COUNT}${RESET} · durée=${CYAN}${OMEGA_FLEET_DURATION_SECS}s${RESET}"
         echo -e "    Destructif        : $(${DO_DESTRUCTIVE} && echo "${RED}activé${RESET}" || echo "${DIM}off${RESET}")"
     else
         echo -e "  ${RED}●${RESET} ${BOLD}Cluster non configuré${RESET} — entrez ${BOLD}[c]${RESET} pour définir les nœuds"
@@ -1599,7 +1853,7 @@ show_menu() {
 
     # ── Installation ──────────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Installation ─────────────────────────────────────────────${RESET}"
-    echo -e "   ${BOLD}[I]${RESET}  Installation complète  (désinstaller → build → déployer)"
+    echo -e "   ${BOLD}[I]${RESET}  Installation complète  (désinstaller → build → déployer → watchdog QGA)"
     echo -e "   ${BOLD}[u]${RESET}  Désinstaller           (arrêter services + supprimer fichiers)"
     echo -e "   ${BOLD}[b]${RESET}  Build                  (cargo build --release --workspace)"
     echo -e "   ${BOLD}[d]${RESET}  Déployer               (copier binaires + démarrer services)"
@@ -1608,7 +1862,7 @@ show_menu() {
 
     # ── Tests par section ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Tests ─────────────────────────────────────────────────────${RESET}"
-    echo -e "   ${BOLD}[A]${RESET}  Tout — sections 1→6 avec pause entre chaque"
+    echo -e "   ${BOLD}[A]${RESET}  Tout — sections 1→7 avec pause entre chaque"
     echo -e "   ${BOLD}[P]${RESET}  Production stricte — tout le projet, aucun skip, GPU/Ceph/long/scale/destructif"
     echo -e "   ${BOLD}[1]${RESET}  Section 1 — Isolés    : smoke · réplication · failover · éviction"
     echo -e "   ${BOLD}[2]${RESET}  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU"
@@ -1616,18 +1870,20 @@ show_menu() {
     echo -e "   ${BOLD}[4]${RESET}  Section 4 — GPU       : placement · scheduler · proxy · CUDA$(${DO_GPU} && echo '' || echo '  (--gpu requis)')"
     echo -e "   ${BOLD}[5]${RESET}  Section 5 — Mixtes    : stress · live migration · drain · GPU"
     echo -e "   ${BOLD}[6]${RESET}  Section 6 — Physique  : install · réseau VM · Ceph/GPU réel · panne · soak"
+    echo -e "   ${BOLD}[7]${RESET}  Section 7 — Fleet     : 50 VMs charge · 75 VMs chaos · perf host vs VM"
     echo ""
 
     # ── Tests individuels ─────────────────────────────────────────────────────
     echo -e "  ${BOLD}${MAG}── Test individuel (entrer le numéro) ───────────────────────${RESET}"
     echo -e "   ${DIM}Isolés  :${RESET}  00  01  02  03  04  10  18  20  21  23"
-    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29  30  31  32  33  34  35  36"
+    echo -e "   ${DIM}Cluster :${RESET}  05  06  07  08  09  19  22  24  25  26  27  28  29  30  31  32  33  34  35  36  37"
     echo -e "   ${DIM}Mixtes  :${RESET}  M1  M2  M3  M4  M5  M6  M7  M8  M9"
     echo ""
 
     echo -e "   ${BOLD}[g]${RESET}  GPU tests : $(${DO_GPU} && echo "${GREEN}activé  ${RESET}→ [g] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [g] pour activer")"
     echo -e "   ${BOLD}[l]${RESET}  Long tests : $(${DO_LONG} && echo "${GREEN}activé  ${RESET}→ [l] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [l] pour activer")"
     echo -e "   ${BOLD}[s]${RESET}  Scale 500 : $(${DO_SCALE} && echo "${GREEN}activé  ${RESET}→ [s] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [s] pour activer")"
+    echo -e "   ${BOLD}[f]${RESET}  Fleet 75 : $(${DO_FLEET} && echo "${GREEN}activé  ${RESET}→ [f] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [f] pour activer")"
     echo -e "   ${BOLD}[x]${RESET}  Destructif : $(${DO_DESTRUCTIVE} && echo "${RED}activé  ${RESET}→ [x] pour désactiver" || echo "${YELLOW}désactivé${RESET} → [x] pour activer")"
     echo -e "   ${BOLD}[r]${RESET}  Résumé détaillé des résultats       ${BOLD}[q]${RESET}  Quitter"
     echo ""
@@ -1656,6 +1912,7 @@ main_loop() {
             4)   run_section_4 ;;
             5)   run_section_5 ;;
             6)   run_section_6 ;;
+            7)   run_section_7 ;;
             g|G) if $DO_GPU; then DO_GPU=false; _info "Tests GPU désactivés"
                  else DO_GPU=true; _info "Tests GPU activés"
                  fi ;;
@@ -1665,13 +1922,16 @@ main_loop() {
             s|S) if $DO_SCALE; then DO_SCALE=false; _info "Tests scalabilité désactivés"
                  else DO_SCALE=true; _info "Tests scalabilité activés"
                  fi ;;
+            f|F) if $DO_FLEET; then DO_FLEET=false; _info "Tests fleet désactivés"
+                 else DO_FLEET=true; _info "Tests fleet activés"
+                 fi ;;
             x|X) if $DO_DESTRUCTIVE; then DO_DESTRUCTIVE=false; _info "Tests destructifs désactivés"
                  else DO_DESTRUCTIVE=true; _warn "Tests destructifs activés"
                  fi ;;
             r|R) show_results ;;
             q|Q) echo "Au revoir."; exit 0 ;;
             "")  continue ;;
-            # Tests individuels : 00-22 ou M1-M7 (insensible casse)
+            # Tests individuels : 00-37 ou M1-M9 (insensible casse)
             [0-9][0-9]|[0-9]|M[1-9]|m[1-9]) run_one "$choice" ;;
             *)   _warn "Choix inconnu : '${choice}'" ;;
         esac

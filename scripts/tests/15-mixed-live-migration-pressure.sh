@@ -21,11 +21,16 @@ require_cluster
 
 step "Nœud initial et nœud cible"
 node_init=$(vm_node "$VMID")
-# Choisir un nœud cible différent du nœud initial
+# Choisir un nœud cible différent du nœud initial. Priorité à la RAM libre pour
+# éviter de faire échouer M5 sur une cible techniquement disponible mais chargée.
 TARGET_NODE=""
-for n in "${OMEGA_NODES_ARR[@]}"; do
-    [[ "$n" != "$node_init" ]] && { TARGET_NODE="$n"; break; }
-done
+TARGET_NODE="$(
+    for n in "${OMEGA_NODES_ARR[@]}"; do
+        [[ "$n" != "$node_init" ]] || continue
+        free="$(curl -fsS "http://${n}:${STATUS_PORT}/status" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("available_mib",0))' 2>/dev/null || echo 0)"
+        printf '%s %s\n' "$free" "$n"
+    done | sort -nr | awk 'NR==1{print $2}'
+)"
 [[ -n "$TARGET_NODE" ]] || fail "aucun nœud cible disponible (cluster à 1 seul nœud ?)"
 TARGET_NODE_PVE=$(_ip_to_pve_node "$TARGET_NODE")
 info "VM $VMID : source=$node_init → cible=$TARGET_NODE (pvesh: $TARGET_NODE_PVE)"
@@ -72,8 +77,13 @@ done
 
 info "Lancement migration live : qm migrate $VMID $TARGET_NODE_PVE --online"
 t_migrate=$SECONDS
-qm migrate "$VMID" "$TARGET_NODE_PVE" --online 2>&1 | tee /tmp/omega-m5-migrate.log
+LOG_QM="/tmp/omega-m5-migrate.log"
+_TMPFILES+=("$LOG_QM")
+set +e
+qm migrate "$VMID" "$TARGET_NODE_PVE" --online >"$LOG_QM" 2>&1
 migrate_status=$?
+set -e
+cat "$LOG_QM"
 migrate_duration=$(elapsed $t_migrate)
 
 step "Résultats migration"
@@ -82,7 +92,11 @@ info "VM $VMID maintenant sur : $node_final"
 info "Durée migration : ${migrate_duration}s"
 info "Statut qm migrate : $migrate_status"
 
-[[ $migrate_status -eq 0 ]] || fail "qm migrate a échoué (code=$migrate_status)"
+if [[ $migrate_status -ne 0 ]]; then
+    warn "qm migrate a échoué; dernières lignes:"
+    tail -80 "$LOG_QM" || true
+    fail "qm migrate a échoué (code=$migrate_status). Vérifier Ceph, réseau migration, CD-ROM/local disk et locks Proxmox."
+fi
 [[ "$node_final" == "$TARGET_NODE" ]] || \
     fail "VM toujours sur $node_final, attendu $TARGET_NODE"
 

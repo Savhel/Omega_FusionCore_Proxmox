@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lance tous les tests sur cluster Proxmox (virtuel ou physique)
-# Usage : ./run-cluster.sh [vmid] [--gpu] [--ceph] [--long] [--destructive] [--skip M3,M7] [--drain-node NODE]
+# Usage : ./run-cluster.sh [vmid] [--gpu] [--ceph] [--long] [--scale] [--fleet] [--destructive] [--skip M3,M7] [--drain-node NODE]
 #
 # Variables d'environnement :
 #   OMEGA_NODES=NODE1,NODE2,NODE3                   — tous les nœuds (N >= 2)
@@ -20,7 +20,7 @@ source "$(dirname "$0")/lib.sh"
 
 VMID="${1:-$TEST_VMID}"; shift || true
 DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_DESTRUCTIVE=false
-DO_SCALE=false
+DO_SCALE=false; DO_FLEET=false
 SKIP_LIST="${OMEGA_SKIP:-}"
 DRAIN_NODE=""
 
@@ -30,6 +30,7 @@ for arg in "$@"; do
         --ceph)         DO_CEPH=true ;;
         --long)         DO_LONG=true ;;
         --scale)        DO_SCALE=true ;;
+        --fleet)        DO_FLEET=true ;;
         --destructive)  DO_DESTRUCTIVE=true ;;
         --skip=*)       SKIP_LIST="${arg#--skip=}" ;;
         --drain-node=*) DRAIN_NODE="${arg#--drain-node=}" ;;
@@ -51,6 +52,9 @@ remote_env() {
     printf '%q=%q ' OMEGA_TEST_VMIDS "${OMEGA_TEST_VMIDS:-$VMID}"
     printf '%q=%q ' OMEGA_BIN_DIR "$REMOTE_BINS_DIR"
     printf '%q=%q ' OMEGA_REMOTE_BIN_DIR "$REMOTE_BINS_DIR"
+    if [[ -n "${REMOTE_DEB_PATH:-}" ]]; then
+        printf '%q=%q ' OMEGA_DEB_PATH "$REMOTE_DEB_PATH"
+    fi
     printf '%q=%q ' OMEGA_STORE_PORT "$STORE_PORT"
     printf '%q=%q ' OMEGA_STATUS_PORT "$STATUS_PORT"
     printf '%q=%q ' OMEGA_METRICS_PORT "$METRICS_PORT"
@@ -72,10 +76,21 @@ remote_env() {
     $DO_DESTRUCTIVE && printf '%q=%q ' OMEGA_DESTRUCTIVE "1"
     $DO_LONG && printf '%q=%q ' OMEGA_SOAK_SECS "${OMEGA_SOAK_SECS:-1800}"
     $DO_SCALE && printf '%q=%q ' OMEGA_SCALE_ENABLED "1"
+    $DO_FLEET && printf '%q=%q ' OMEGA_FLEET_ENABLED "1"
     printf '%q=%q ' OMEGA_SCALE_VMIDS "${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS:-$VMID}}"
     printf '%q=%q ' OMEGA_SCALE_TARGET "${OMEGA_SCALE_TARGET:-500}"
     printf '%q=%q ' OMEGA_SCALE_BATCH_SIZE "${OMEGA_SCALE_BATCH_SIZE:-20}"
     printf '%q=%q ' OMEGA_SCALE_SOAK_SECS "${OMEGA_SCALE_SOAK_SECS:-1800}"
+    printf '%q=%q ' OMEGA_FLEET_VMIDS "${OMEGA_FLEET_VMIDS:-${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS:-$VMID}}}"
+    printf '%q=%q ' OMEGA_FLEET_VM_COUNT "${OMEGA_FLEET_VM_COUNT:-50}"
+    printf '%q=%q ' OMEGA_FLEET_CHAOS_VM_COUNT "${OMEGA_FLEET_CHAOS_VM_COUNT:-75}"
+    printf '%q=%q ' OMEGA_FLEET_DURATION_SECS "${OMEGA_FLEET_DURATION_SECS:-900}"
+    printf '%q=%q ' OMEGA_FLEET_PHASE_SECS "${OMEGA_FLEET_PHASE_SECS:-180}"
+    printf '%q=%q ' OMEGA_FLEET_BATCH_SIZE "${OMEGA_FLEET_BATCH_SIZE:-10}"
+    printf '%q=%q ' OMEGA_FLEET_MIGRATIONS "${OMEGA_FLEET_MIGRATIONS:-12}"
+    printf '%q=%q ' OMEGA_FLEET_GPU_VM_COUNT "${OMEGA_FLEET_GPU_VM_COUNT:-12}"
+    printf '%q=%q ' OMEGA_FLEET_GPU_JOB_N "${OMEGA_FLEET_GPU_JOB_N:-1024}"
+    printf '%q=%q ' OMEGA_FLEET_GPU_JOB_VRAM_MIB "${OMEGA_FLEET_GPU_JOB_VRAM_MIB:-256}"
 }
 
 rsync_ssh_cmd() {
@@ -92,11 +107,19 @@ RESULTS=()
 # ── Synchronisation scripts + binaires vers le nœud contrôleur ────────────────
 REMOTE_TESTS_DIR="/tmp/omega-tests"
 REMOTE_BINS_DIR="/tmp/omega-tests-bins"
+REMOTE_DEB_DIR="/tmp/omega-tests-deb"
 
 sync_to_controller() {
     info "Synchronisation vers ${CONTROLLER_NODE}..."
     rsync -aq -e "$(rsync_ssh_cmd)" --delete "${TESTS_DIR}/" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_TESTS_DIR}/"
-    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" "mkdir -p ${REMOTE_BINS_DIR}"
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 "${DEPLOY_USER}@${CONTROLLER_NODE}" "mkdir -p ${REMOTE_BINS_DIR} ${REMOTE_DEB_DIR}"
+    REMOTE_DEB_PATH=""
+    local latest_deb=""
+    latest_deb="$(ls -t "${REPO_ROOT}"/target/deb/omega-remote-paging_*_amd64.deb 2>/dev/null | head -1 || true)"
+    if [[ -n "$latest_deb" && -f "$latest_deb" ]]; then
+        REMOTE_DEB_PATH="${REMOTE_DEB_DIR}/$(basename "$latest_deb")"
+        rsync -aq -e "$(rsync_ssh_cmd)" "$latest_deb" "${DEPLOY_USER}@${CONTROLLER_NODE}:${REMOTE_DEB_PATH}"
+    fi
     for bin in node-a-agent node-bc-store omega-gpu-proxy; do
         local local_bin="${REPO_ROOT}/target/release/${bin}"
         if [[ -x "$local_bin" ]]; then
@@ -221,6 +244,7 @@ info "GPU          : $DO_GPU"
 info "Ceph         : $DO_CEPH"
 info "Long         : $DO_LONG"
 info "Scale        : $DO_SCALE"
+info "Fleet        : $DO_FLEET"
 info "Destructif   : $DO_DESTRUCTIVE"
 info "Skip         : ${SKIP_LIST:-aucun}"
 info "Nœuds        : $(node_count) ($(store_count) store(s))"
@@ -266,6 +290,7 @@ run_test_on_node "23C" "Disk I/O scheduler cluster" "$TESTS_DIR/23-disk-io-sched
 run_test_on_node "30" "Conformité VMs Omega"        "$TESTS_DIR/30-vm-conformity.sh"        "${OMEGA_TEST_VMIDS:-$VMID}"
 run_test_on_node "24" "Installation doctor"         "$TESTS_DIR/24-install-doctor.sh"
 run_test_on_node "25" "Réseau VM invitée"           "$TESTS_DIR/25-vm-network.sh"            "$VMID"
+run_test_on_node "38" "Déploiement .deb"            "$TESTS_DIR/38-deb-install.sh"
 
 # ── Tests GPU (optionnels) ─────────────────────────────────────────────────────
 if $DO_GPU; then
@@ -337,6 +362,17 @@ if $DO_SCALE; then
         "${OMEGA_SCALE_SOAK_SECS:-1800}"
 else
     RESULTS+=("SKIP  31 Scalabilité VMs physiques (passer --scale)")
+    ((SKIP++)) || true
+fi
+
+if $DO_FLEET; then
+    run_test_on_node "37" "Puissance Omega flotte" "$TESTS_DIR/37-fleet-omega-power.sh" \
+        "${OMEGA_FLEET_VMIDS:-${OMEGA_SCALE_VMIDS:-${OMEGA_TEST_VMIDS:-$VMID}}}" \
+        "${OMEGA_FLEET_VM_COUNT:-50}" \
+        "${OMEGA_FLEET_CHAOS_VM_COUNT:-75}" \
+        "${OMEGA_FLEET_DURATION_SECS:-900}"
+else
+    RESULTS+=("SKIP  37 Puissance Omega flotte (passer --fleet)")
     ((SKIP++)) || true
 fi
 

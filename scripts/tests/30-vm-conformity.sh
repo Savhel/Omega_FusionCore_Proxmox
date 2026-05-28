@@ -98,6 +98,15 @@ for vmid in "${vmids[@]}"; do
     cores="${cores:-1}"
     sockets="${sockets:-1}"
     max_vcpus=$((cores * sockets))
+    smp="$(qm showcmd "$vmid" --pretty 2>/dev/null | grep -- '-smp' || true)"
+    smp_max="$(printf '%s
+' "$smp" | sed -n "s/.*maxcpus=\([0-9][0-9]*\).*//p" | head -1)"
+    desc_max="$(desc_value "$description" omega_max_vcpus)"
+    if [[ "$smp_max" =~ ^[0-9]+$ && "$smp_max" -gt "$max_vcpus" ]]; then
+        max_vcpus="$smp_max"
+    elif [[ "$desc_max" =~ ^[0-9]+$ && "$desc_max" -gt "$max_vcpus" ]]; then
+        max_vcpus="$desc_max"
+    fi
 
     [[ -n "$vcpus" ]] || mark_fail "VM $vmid: champ 'vcpus' absent; Proxmox demarrera tous les cores et Omega ne pourra pas monter progressivement"
     if [[ -n "$vcpus" && "$vcpus" -gt "$max_vcpus" ]]; then
@@ -112,6 +121,9 @@ for vmid in "${vmids[@]}"; do
     [[ "$hotplug" == *cpu* ]] || mark_fail "VM $vmid: hotplug CPU absent (qm set $vmid --hotplug cpu,disk,network)"
     if [[ "$hotplug" == *memory* ]]; then
         mark_fail "VM $vmid: hotplug mémoire Proxmox actif; les VMs Omega doivent utiliser balloon + backend Omega, pas hotplug memory"
+    fi
+    if [[ "${numa:-0}" == "1" ]]; then
+        mark_fail "VM $vmid: numa=1 incompatible avec le backend mémoire Omega (-machine memory-backend et -numa memdev se bloquent)"
     fi
     [[ "$agent" == *enabled=1* || "$agent" == "1" ]] || mark_fail "VM $vmid: qemu-guest-agent non active (qm set $vmid --agent enabled=1)"
     [[ "$net0" == virtio* ]] || mark_fail "VM $vmid: net0 doit utiliser virtio"
@@ -147,7 +159,6 @@ for vmid in "${vmids[@]}"; do
     check_contains "$description" "omega_disk_max_gib=" "VM $vmid: description sans omega_disk_max_gib"
     check_contains "$description" "omega_gpu_vram_mib=" "VM $vmid: description sans omega_gpu_vram_mib"
 
-    smp="$(qm showcmd "$vmid" --pretty 2>/dev/null | grep -- '-smp' || true)"
     if [[ -z "$smp" ]]; then
         mark_fail "VM $vmid: impossible de lire qm showcmd"
     else
@@ -160,10 +171,10 @@ for vmid in "${vmids[@]}"; do
 
     status="$(_cluster_vm_status "$vmid")"
     if [[ "$status" == "running" ]]; then
-        if qm guest cmd "$vmid" ping >/dev/null 2>&1; then
+        if guest_agent_ready "$vmid"; then
             pass "VM $vmid: agent invite joignable"
         else
-            warn "VM $vmid: qemu-guest-agent configure mais non joignable; verifier service qemu-guest-agent dans l'invite"
+            warn "VM $vmid: qemu-guest-agent configure mais non joignable depuis le nœud hôte actuel; verifier service qemu-guest-agent dans l'invite et relancer après reboot"
         fi
     else
         warn "VM $vmid: statut '$status'; la conformite statique est testee mais pas l'agent invite"

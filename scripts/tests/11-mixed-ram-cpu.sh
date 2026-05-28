@@ -24,12 +24,20 @@ stop_vm_for_reconfig "$VMID"
 qm set "$VMID" --vcpus 1 >/dev/null
 start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID avec 1 vCPU runtime"
 sleep 5
+for _ in $(seq 1 30); do
+    guest_agent_ready "$VMID" && break
+    sleep 2
+done
 
 step "État initial"
 vcpus_init="$(vm_runtime_vcpus "$VMID" || true)"
 [[ -n "$vcpus_init" ]] || fail "impossible de lire les vCPUs runtime via QMP/qm monitor"
 node_init=$(vm_node "$VMID")
-ram_free_init=$(curl -sf "http://${COMPUTE_NODE}:${STATUS_PORT}/status" 2>/dev/null | \
+[[ -n "$node_init" ]] || fail "impossible de déterminer le nœud Proxmox de la VM $VMID"
+METRICS_BIND_HOST="${OMEGA_M1_METRICS_BIND_HOST:-127.0.0.1}"
+METRICS_LISTEN="${METRICS_BIND_HOST}:${METRICS_PORT}"
+METRICS_URL="http://127.0.0.1:${METRICS_PORT}/metrics"
+ram_free_init=$(curl -sf "http://${node_init}:${STATUS_PORT}/status" 2>/dev/null | \
     python3 -c "import sys,json; print(json.load(sys.stdin).get('available_mib','?'))" || echo "?")
 info "VM $VMID sur $node_init | vCPUs runtime=$vcpus_init | RAM libre nœud=${ram_free_init} Mio"
 
@@ -42,7 +50,7 @@ _TMPFILES+=("$LOG")
     --vm-id "$VMID" \
     --vm-requested-mib "$VM_RAM_MIB" \
     --region-mib "$VM_RAM_MIB" \
-    --current-node "$COMPUTE_NODE" \
+    --current-node "$node_init" \
     --eviction-threshold-mib 999999 \
     --eviction-batch-size 32 \
     --eviction-interval-secs 3 \
@@ -51,25 +59,36 @@ _TMPFILES+=("$LOG")
     --vcpu-high-threshold-pct 60 \
     --vcpu-low-threshold-pct 20 \
     --vcpu-scale-interval-secs 10 \
-    --metrics-listen "${COMPUTE_NODE}:${METRICS_PORT}" \
+    --metrics-listen "$METRICS_LISTEN" \
     --mode daemon >"$LOG" 2>&1 &
 _PIDS+=($!)
-wait_http "http://${COMPUTE_NODE}:${METRICS_PORT}/metrics" 20
+metrics_ready=0
+for _ in $(seq 1 20); do
+    if curl -sf "$METRICS_URL" >/dev/null 2>&1; then
+        metrics_ready=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$metrics_ready" -ne 1 ]]; then
+    warn "endpoint metrics M1 indisponible: $METRICS_URL"
+    warn "log agent M1:"
+    tail -80 "$LOG" || true
+    fail "URL $METRICS_URL non disponible après 20s"
+fi
 
 step "Charge simultanée RAM + CPU dans la VM (90s)"
 info "stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s"
 ensure_guest_packages "$VMID" stress-ng qemu-guest-agent || true
-if ! qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null 2>&1; then
-    warn "qemu-guest-agent absent — injection CPU via cgroup uniquement (RAM stress ignorée)"
-    vm_cpu_stress "$VMID" 90
-fi
+qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null 2>&1 || \
+    fail "qemu-guest-agent/stress-ng indisponible dans la VM $VMID — M1 exige une vraie pression RAM+CPU dans l'invité"
 
 step "Surveillance simultanée évictions + vCPUs pendant 100s"
 t0=$SECONDS
 vcpus_max="$vcpus_init"; evicted_max=0
 
 while [[ $(elapsed $t0) -lt 100 ]]; do
-    evicted=$(curl -sf "http://${COMPUTE_NODE}:${METRICS_PORT}/metrics" | \
+    evicted=$(curl -sf "$METRICS_URL" | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('pages_evicted',0))" 2>/dev/null || echo 0)
     vcpus_now="$(vm_runtime_vcpus "$VMID" || true)"
     pages_stores=0

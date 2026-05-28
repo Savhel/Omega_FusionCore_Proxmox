@@ -149,9 +149,15 @@ fi
 step "Soumission multi-VM"
 JOB_IDS=()
 for id in "${VMIDS[@]}"; do
-    JOB_JSON="$(curl_gpu -fsS -X POST "$PROXY_URL/v1/jobs" \
+    JOB_RESP="$(curl_gpu -sS -w '\n%{http_code}' -X POST "$PROXY_URL/v1/jobs" \
         -H "Content-Type: application/json" \
-        -d "{\"vm_id\":$id,\"kind\":\"matrix_multiply\",\"vram_mib\":$JOB_VRAM_MIB,\"payload\":{\"n\":$MATMUL_N,\"seed\":$id,\"require_cuda\":$REQUIRE_CUDA_JSON}}")"
+        -d "{\"vm_id\":$id,\"kind\":\"matrix_multiply\",\"vram_mib\":$JOB_VRAM_MIB,\"payload\":{\"n\":$MATMUL_N,\"seed\":$id,\"require_cuda\":$REQUIRE_CUDA_JSON}}" 2>/tmp/omega-gpu-submit-"$id".err || true)"
+    JOB_CODE="$(printf '%s\n' "$JOB_RESP" | tail -n1)"
+    JOB_JSON="$(printf '%s\n' "$JOB_RESP" | sed '$d')"
+    if [[ "$JOB_CODE" != 2* ]]; then
+        printf '%s\n' "$JOB_JSON" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$JOB_JSON"
+        fail "soumission job GPU VM $id refusée: http=$JOB_CODE n=$MATMUL_N vram=$JOB_VRAM_MIB budget=$BUDGET_MIB err=$(tr '\n' ' ' </tmp/omega-gpu-submit-"$id".err 2>/dev/null || true)"
+    fi
     JOB_ID="$(printf '%s' "$JOB_JSON" | json_get job_id)"
     JOB_IDS+=("$JOB_ID")
     info "VM ${id}: job_id=${JOB_ID}"

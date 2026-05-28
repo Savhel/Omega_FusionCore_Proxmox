@@ -130,12 +130,15 @@ _install_bin "$AGENT_SRC"    "${INSTALL_DIR}/node-a-agent"
 [[ -x "$GPU_PROXY_SRC" ]] && _install_bin "$GPU_PROXY_SRC" "${INSTALL_DIR}/omega-gpu-proxy" || warn "omega-gpu-proxy non trouvé (${GPU_PROXY_SRC}) — proxy GPU applicatif non installé"
 
 mkdir -p "$OMEGA_GPU_WORKER_DIR"
-if [[ -f "$GPU_WORKER_CPU_SRC" ]]; then
-    install -m 755 "$GPU_WORKER_CPU_SRC" "${OMEGA_GPU_WORKER_DIR}/omega-gpu-worker-cpu.py"
-fi
-if [[ -f "$GPU_WORKER_APP_SRC" ]]; then
-    install -m 755 "$GPU_WORKER_APP_SRC" "${OMEGA_GPU_WORKER_DIR}/omega-gpu-worker-app.py"
-fi
+_install_worker() {
+    local src="$1" dst="$2"
+    [[ -f "$src" ]] || return 0
+    # No-op si src et dst pointent vers le même fichier (cas .deb : source déjà à destination)
+    [[ "$(realpath "$src" 2>/dev/null)" == "$(realpath "$dst" 2>/dev/null)" ]] && return 0
+    install -m 755 "$src" "$dst"
+}
+_install_worker "$GPU_WORKER_CPU_SRC" "${OMEGA_GPU_WORKER_DIR}/omega-gpu-worker-cpu.py"
+_install_worker "$GPU_WORKER_APP_SRC" "${OMEGA_GPU_WORKER_DIR}/omega-gpu-worker-app.py"
 cat > "${OMEGA_GPU_WORKER_DIR}/omega-gpu-worker-app-cuda" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail

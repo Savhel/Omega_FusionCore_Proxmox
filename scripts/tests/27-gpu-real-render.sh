@@ -156,7 +156,7 @@ else
     warn "VM $VMID sans hostpci configuré — placement GPU peut encore migrer/configurer plus tard"
 fi
 
-if qm guest cmd "$VMID" ping &>/dev/null; then
+if guest_agent_ready "$VMID"; then
     guest_gpu=$(guest_exec "ls /dev/dri 2>/dev/null; command -v glxinfo >/dev/null && timeout 10 glxinfo -B 2>/dev/null | head -20 || true" || true)
     if [[ -n "$guest_gpu" ]]; then
         info "GPU visible dans l'invité:"

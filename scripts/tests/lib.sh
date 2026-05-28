@@ -788,6 +788,7 @@ ensure_omega_vcpu_profile() {
         --sockets 1 \
         --vcpus 1 \
         --hotplug cpu,disk,network \
+        --numa 0 \
         --description "$desc" >/dev/null
     sanitize_vm_passthrough_for_node "$vmid" "$(_vm_node_cached "$vmid")" || true
     start_vm_with_hostpci_repair "$vmid" >/dev/null || fail "impossible de redémarrer la VM $vmid après réparation CPU"
@@ -847,8 +848,16 @@ print(f\"pages={d.get('page_count',0)}  ram_mib={d.get('available_mib','?')}  ce
 
 # ── Commandes dans l'invité via qemu-guest-agent ─────────────────────────────
 guest_agent_ready() {
-    local vmid="$1"
-    qm guest cmd "$vmid" ping >/dev/null 2>&1
+    local vmid="$1" node
+    node="$(vm_node "$vmid" 2>/dev/null || true)"
+    [[ -n "$node" ]] || node="$(_vm_node_cached "$vmid")"
+    [[ -n "$node" ]] || return 1
+    _VM_NODE_CACHE[$vmid]="$node"
+
+    # QGA commands must run on the node currently owning the VM. Avoid relying
+    # on a stale cache here because migration-heavy tests move VMs frequently.
+    _qm_capture_on_node "$node" guest cmd "$vmid" ping >/dev/null 2>&1 || \
+        _qm_capture_on_node "$node" agent "$vmid" ping >/dev/null 2>&1
 }
 
 guest_exec_wait() {

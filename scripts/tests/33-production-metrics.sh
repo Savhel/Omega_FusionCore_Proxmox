@@ -108,7 +108,8 @@ PY
     vm_node_name="$(cut -f2 "$TMP_DIR/vm-${vmid}.tsv")"
     vm_node_ip="$(_pve_node_to_ip "$vm_node_name")"
     qga="no"
-    if ssh_run "$vm_node_ip" "qm guest cmd '$vmid' ping >/dev/null 2>&1" >/dev/null 2>&1; then
+    _VM_NODE_CACHE[$vmid]="$vm_node_ip"
+    if guest_agent_ready "$vmid"; then
         qga="yes"
     fi
     cat "$TMP_DIR/vm-${vmid}.tsv" | awk -v qga="$qga" '{print $0 "\tqga=" qga}' >> "$VM_SUMMARY"

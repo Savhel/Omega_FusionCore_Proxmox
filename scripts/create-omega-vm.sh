@@ -25,9 +25,12 @@ Options:
   --storage NAME        Stockage Proxmox cible, idealement Ceph RBD.
   --bridge NAME         Bridge reseau Proxmox. Defaut: vmbr0.
   --image PATH          Image cloud qcow2 a importer.
+  --template-id ID      Template Proxmox a cloner au lieu d'importer l'image.
+  --linked-clone        Clone lie depuis le template (rapide sur Ceph/RBD).
+  --adopt-existing      Configure une VM existante au lieu de la creer.
   --sshkey PATH         Cle publique injectee par cloud-init.
   --ciuser USER         Utilisateur cloud-init. Defaut: root.
-  --memory MIB          RAM max demandee par la VM. Defaut: 2048.
+  --memory MIB          RAM max demandee par la VM. Defaut: 3072.
   --balloon MIB         RAM locale initiale/minimale. Defaut: 512.
   --cores N             Cores QEMU. Avec sockets, definit le max vCPU hotpluggable. Defaut: 4.
   --vcpus N             vCPU au boot. Defaut: 1.
@@ -37,6 +40,10 @@ Options:
   --cpu TYPE            Type CPU QEMU. Defaut: kvm64.
   --ipconfig0 VALUE     Config IP cloud-init. Defaut: ip=dhcp.
   --nameserver VALUE    DNS cloud-init. Defaut: 8.8.8.8.
+  --root-password PASS  Mot de passe root cloud-init. Defaut: root.
+  --bootstrap-guest     Installe qemu-guest-agent + stress-ng + SSH via cloud-init.
+  --template-prepared   Le template contient deja qemu-guest-agent + stress-ng + SSH.
+  --snippet-storage S   Storage snippets Proxmox pour bootstrap. Defaut: local.
   --start               Demarre la VM apres creation.
   -h, --help            Affiche cette aide.
 
@@ -68,20 +75,66 @@ require_cfg_value() {
     [[ "$actual" == "$expected" ]] || fail "VM $vmid non conforme: $key='$actual', attendu '$expected'"
 }
 
+qm_set_retry() {
+    local vmid="$1"; shift
+    local attempt max_attempts delay out rc
+    max_attempts="${OMEGA_QM_SET_RETRY_MAX:-8}"
+    delay="${OMEGA_QM_SET_RETRY_DELAY_SECS:-10}"
+
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        out="$(qm set "$vmid" "$@" 2>&1)" && {
+            [[ -n "$out" ]] && printf '%s\n' "$out"
+            return 0
+        }
+        rc=$?
+        printf '%s\n' "$out" >&2
+        if [[ "$out" == *locked* || "$out" == *"command timed out"* || "$out" == *"File exists"* || "$out" == *"rbd create"* ]]; then
+            echo "WARN: qm set VM $vmid échoué (tentative ${attempt}/${max_attempts}) — attente ${delay}s puis retry" >&2
+            qm set "$vmid" --delete ide2 >/dev/null 2>&1 || true
+            pvesm free "${STORAGE}:vm-${vmid}-cloudinit" >/dev/null 2>&1 || true
+            sleep "$delay"
+            continue
+        fi
+        return "$rc"
+    done
+    fail "qm set VM $vmid impossible après ${max_attempts} tentatives"
+}
+
+cleanup_cloudinit_disk() {
+    local vmid="$1"
+    qm set "$vmid" --delete ide2 >/dev/null 2>&1 || true
+    pvesm free "${STORAGE}:vm-${vmid}-cloudinit" >/dev/null 2>&1 || true
+}
+
+prepare_template_for_clone() {
+    [[ -n "$TEMPLATE_ID" ]] || return 0
+    # Le cloud-init de la template ne doit pas être cloné. Chaque VM Omega
+    # recrée ensuite son propre disque cloud-init.
+    cleanup_cloudinit_disk "$TEMPLATE_ID"
+}
+
 verify_vm_profile() {
     local vmid="$1"
-    local cfg smp hotplug agent net0 scsihw description
+    local cfg smp hotplug agent net0 scsihw description status cfg_cores cfg_sockets
 
     cfg="$(qm config "$vmid" 2>/dev/null)" || fail "impossible de relire la config de la VM $vmid"
-    require_cfg_value "$cfg" cores "$CORES" "$vmid"
-    require_cfg_value "$cfg" sockets "$SOCKETS" "$vmid"
+    status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}' || true)"
+    cfg_cores="$(cfg_value "$cfg" cores)"
+    cfg_sockets="$(cfg_value "$cfg" sockets)"
     require_cfg_value "$cfg" vcpus "$VCPUS" "$vmid"
     require_cfg_value "$cfg" memory "$MEMORY" "$vmid"
     require_cfg_value "$cfg" balloon "$BALLOON" "$vmid"
 
     hotplug="$(cfg_value "$cfg" hotplug)"
+    if [[ "$status" == "running" && ! ( "$hotplug" == *cpu* && "$hotplug" == *disk* && "$hotplug" == *network* ) ]]; then
+        echo "WARN: VM $vmid running: hotplug expose '${hotplug}', réapplication cpu,disk,network"
+        qm set "$vmid" --hotplug cpu,disk,network >/dev/null
+        cfg="$(qm config "$vmid" 2>/dev/null)" || fail "impossible de relire la config de la VM $vmid"
+        hotplug="$(cfg_value "$cfg" hotplug)"
+    fi
     [[ "$hotplug" == *cpu* && "$hotplug" == *disk* && "$hotplug" == *network* ]] || fail "VM $vmid non conforme: hotplug='$hotplug', attendu cpu,disk,network"
     [[ "$hotplug" != *memory* ]] || fail "VM $vmid non conforme: hotplug memory interdit pour Omega"
+    [[ "$(cfg_value "$cfg" numa)" != "1" ]] || fail "VM $vmid non conforme: numa=1 incompatible avec le backend mémoire Omega"
 
     agent="$(cfg_value "$cfg" agent)"
     [[ "$agent" == *enabled=1* || "$agent" == "1" ]] || fail "VM $vmid non conforme: qemu-guest-agent non active"
@@ -105,6 +158,14 @@ verify_vm_profile() {
     echo "$smp"
     [[ "$smp" == *"maxcpus=${MAX_VCPUS}"* ]] || fail "VM $vmid non conforme: -smp ne contient pas maxcpus=${MAX_VCPUS}"
     [[ "$smp" == *"-smp '${VCPUS},"* || "$smp" == *"-smp ${VCPUS},"* ]] || fail "VM $vmid non conforme: -smp ne demarre pas a ${VCPUS} vCPU"
+    if [[ "$status" == "running" ]]; then
+        if [[ "$cfg_cores" != "$CORES" || "$cfg_sockets" != "$SOCKETS" ]]; then
+            echo "WARN: VM $vmid running: qm config expose cores=${cfg_cores}/sockets=${cfg_sockets}, mais showcmd confirme maxcpus=${MAX_VCPUS}"
+        fi
+    else
+        [[ "$cfg_cores" == "$CORES" ]] || fail "VM $vmid non conforme: cores='${cfg_cores}', attendu '${CORES}'"
+        [[ "$cfg_sockets" == "$SOCKETS" ]] || fail "VM $vmid non conforme: sockets='${cfg_sockets}', attendu '${SOCKETS}'"
+    fi
 
     echo "Profil Omega VM $vmid valide: vcpus=${VCPUS}, maxcpus=${MAX_VCPUS}, memory=${MEMORY}, balloon=${BALLOON}, hotplug=cpu,disk,network"
 }
@@ -114,9 +175,12 @@ NAME_PREFIX="omega-test"
 STORAGE=""
 BRIDGE="vmbr0"
 IMAGE=""
+TEMPLATE_ID=""
+LINKED_CLONE=false
+ADOPT_EXISTING=false
 SSHKEY=""
 CIUSER="root"
-MEMORY=2048
+MEMORY=3072
 BALLOON=512
 CORES=4
 VCPUS=1
@@ -126,6 +190,10 @@ GPU_VRAM_MIB=0
 CPU_TYPE="kvm64"
 IPCONFIG0="ip=dhcp"
 NAMESERVER="8.8.8.8"
+ROOT_PASSWORD="root"
+BOOTSTRAP_GUEST=false
+TEMPLATE_PREPARED=false
+SNIPPET_STORAGE="local"
 START=false
 OSTYPE="l26"
 MACHINE="q35"
@@ -139,6 +207,9 @@ while [[ $# -gt 0 ]]; do
         --storage) STORAGE="$2"; shift 2 ;;
         --bridge) BRIDGE="$2"; shift 2 ;;
         --image) IMAGE="$2"; shift 2 ;;
+        --template-id) TEMPLATE_ID="$2"; shift 2 ;;
+        --linked-clone) LINKED_CLONE=true; shift ;;
+        --adopt-existing) ADOPT_EXISTING=true; shift ;;
         --sshkey) SSHKEY="$2"; shift 2 ;;
         --ciuser) CIUSER="$2"; shift 2 ;;
         --memory) MEMORY="$2"; shift 2 ;;
@@ -151,6 +222,10 @@ while [[ $# -gt 0 ]]; do
         --cpu) CPU_TYPE="$2"; shift 2 ;;
         --ipconfig0) IPCONFIG0="$2"; shift 2 ;;
         --nameserver) NAMESERVER="$2"; shift 2 ;;
+        --root-password) ROOT_PASSWORD="$2"; shift 2 ;;
+        --bootstrap-guest) BOOTSTRAP_GUEST=true; shift ;;
+        --template-prepared) TEMPLATE_PREPARED=true; shift ;;
+        --snippet-storage) SNIPPET_STORAGE="$2"; shift 2 ;;
         --start) START=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "option inconnue: $1" ;;
@@ -160,8 +235,15 @@ done
 command -v qm >/dev/null 2>&1 || fail "qm introuvable: lancer ce script sur un noeud Proxmox"
 [[ -n "$VMIDS" ]] || fail "--vmid ou --vmids requis"
 [[ -n "$STORAGE" ]] || fail "--storage requis"
-[[ -n "$IMAGE" ]] || fail "--image requis"
-[[ -f "$IMAGE" ]] || fail "image introuvable: $IMAGE"
+if [[ -n "$TEMPLATE_ID" ]]; then
+    [[ "$TEMPLATE_ID" =~ ^[0-9]+$ ]] || fail "--template-id doit etre numerique"
+    if ! $ADOPT_EXISTING; then
+        qm status "$TEMPLATE_ID" >/dev/null 2>&1 || fail "template VM introuvable: $TEMPLATE_ID"
+    fi
+else
+    [[ -n "$IMAGE" ]] || fail "--image requis sans --template-id"
+    [[ -f "$IMAGE" ]] || fail "image introuvable: $IMAGE"
+fi
 [[ "$VCPUS" =~ ^[0-9]+$ && "$CORES" =~ ^[0-9]+$ && "$SOCKETS" =~ ^[0-9]+$ ]] || fail "vcpus/cores/sockets doivent etre numeriques"
 [[ "$MEMORY" =~ ^[0-9]+$ && "$BALLOON" =~ ^[0-9]+$ ]] || fail "memory/balloon doivent etre numeriques"
 [[ "$DISK_MAX_GIB" =~ ^[0-9]+$ && "$GPU_VRAM_MIB" =~ ^[0-9]+$ ]] || fail "disk-max-gib/gpu-vram-mib doivent etre numeriques"
@@ -182,14 +264,58 @@ IFS=',' read -ra VMID_ARR <<< "$VMIDS"
 for vmid in "${VMID_ARR[@]}"; do
     [[ "$vmid" =~ ^[0-9]+$ ]] || fail "VMID invalide: $vmid"
     if qm status "$vmid" >/dev/null 2>&1; then
-        fail "VM $vmid existe deja; supprimer ou choisir un autre VMID"
+        $ADOPT_EXISTING || fail "VM $vmid existe deja; supprimer ou choisir un autre VMID"
+        echo "Adoption VM existante $vmid"
     fi
 
     name="${NAME_PREFIX}-${vmid}"
     desc="omega_min_vcpus=${VCPUS} omega_max_vcpus=${MAX_VCPUS} omega_memory_min_mib=${BALLOON} omega_memory_max_mib=${MEMORY} omega_disk_max_gib=${DISK_MAX_GIB} omega_gpu_vram_mib=${GPU_VRAM_MIB}"
 
-    echo "Creation VM $vmid ($name)"
-    qm create "$vmid" \
+    if $ADOPT_EXISTING; then
+        :
+    elif [[ -n "$TEMPLATE_ID" ]]; then
+        echo "Clone VM $vmid ($name) depuis template $TEMPLATE_ID"
+        prepare_template_for_clone
+        cleanup_cloudinit_disk "$vmid"
+        if $LINKED_CLONE; then
+            # Proxmox refuse --storage pour les clones lies: ils restent sur le
+            # meme stockage backing que la template.
+            qm clone "$TEMPLATE_ID" "$vmid" --name "$name" --full 0
+        else
+            qm clone "$TEMPLATE_ID" "$vmid" --name "$name" --storage "$STORAGE" --full 1
+        fi
+    else
+        echo "Creation VM $vmid ($name)"
+        qm create "$vmid" \
+            --name "$name" \
+            --ostype "$OSTYPE" \
+            --machine "$MACHINE" \
+            --agent enabled=1 \
+            --cpu "$CPU_TYPE" \
+            --sockets "$SOCKETS" \
+            --cores "$CORES" \
+            --vcpus "$VCPUS" \
+            --memory "$MEMORY" \
+            --balloon "$BALLOON" \
+            --hotplug cpu,disk,network \
+            --numa 0 \
+            --scsihw virtio-scsi-single \
+            --net0 "virtio,bridge=${BRIDGE},firewall=0" \
+            --serial0 socket \
+            --vga serial0 \
+            --tags "$TAGS" \
+            --description "$desc"
+
+        qm importdisk "$vmid" "$IMAGE" "$STORAGE"
+        qm set "$vmid" \
+            --scsi0 "${STORAGE}:vm-${vmid}-disk-0,discard=on,iothread=1,ssd=1"
+    fi
+
+    # Une tentative interrompue ou un clone de template peut laisser un disque
+    # cloud-init vm-${vmid}-cloudinit. Proxmox refuse ensuite de le recreer.
+    cleanup_cloudinit_disk "$vmid"
+
+    qm_set_retry "$vmid" \
         --name "$name" \
         --ostype "$OSTYPE" \
         --machine "$MACHINE" \
@@ -201,32 +327,134 @@ for vmid in "${VMID_ARR[@]}"; do
         --memory "$MEMORY" \
         --balloon "$BALLOON" \
         --hotplug cpu,disk,network \
+            --numa 0 \
         --scsihw virtio-scsi-single \
         --net0 "virtio,bridge=${BRIDGE},firewall=0" \
         --serial0 socket \
         --vga serial0 \
         --tags "$TAGS" \
-        --description "$desc"
-
-    qm importdisk "$vmid" "$IMAGE" "$STORAGE"
-    qm set "$vmid" \
-        --scsi0 "${STORAGE}:vm-${vmid}-disk-0,discard=on,iothread=1,ssd=1" \
+        --description "$desc" \
         --boot order=scsi0 \
         --ide2 "${STORAGE}:cloudinit" \
         --ipconfig0 "$IPCONFIG0" \
         --nameserver "$NAMESERVER" \
-        --ciuser "$CIUSER"
+        --ciuser "$CIUSER" \
+        --cipassword "$ROOT_PASSWORD"
 
     if [[ -n "$SSHKEY" ]]; then
         [[ -f "$SSHKEY" ]] || fail "cle SSH introuvable: $SSHKEY"
         qm set "$vmid" --sshkeys "$SSHKEY"
     fi
 
+    if $BOOTSTRAP_GUEST; then
+        snippet_dir="/var/lib/vz/snippets"
+        snippet_name="omega-bootstrap-${vmid}.yaml"
+        snippet_path="${snippet_dir}/${snippet_name}"
+        mkdir -p "$snippet_dir"
+        ssh_keys_yaml=""
+        package_yaml=""
+        if [[ -n "$SSHKEY" && -f "$SSHKEY" ]]; then
+            ssh_keys_yaml="ssh_authorized_keys:
+  - $(cat "$SSHKEY")"
+        fi
+        if ! $TEMPLATE_PREPARED; then
+            package_yaml="package_update: true
+packages:
+  - qemu-guest-agent
+  - stress-ng
+  - openssh-server"
+        fi
+        cat > "$snippet_path" <<EOF
+#cloud-config
+hostname: ${name}
+manage_etc_hosts: true
+fqdn: ${name}
+user: ${CIUSER}
+disable_root: false
+ssh_pwauth: true
+password: ${ROOT_PASSWORD}
+chpasswd:
+  expire: false
+${ssh_keys_yaml}
+${package_yaml}
+write_files:
+  - path: /usr/local/sbin/omega-qga-ensure
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      LOG=/var/log/omega-qga-ensure.log
+      {
+      echo "=== omega-qga-ensure \$(date) ==="
+      if ! command -v qemu-ga >/dev/null 2>&1; then
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update 2>/dev/null && apt-get install -y qemu-guest-agent 2>/dev/null || true
+      fi
+      systemctl unmask qemu-guest-agent.service qemu-guest-agent.socket 2>/dev/null || true
+      systemctl enable qemu-guest-agent.service 2>/dev/null || true
+      systemctl enable qemu-guest-agent.socket 2>/dev/null || true
+      i=0
+      while [ "\$i" -lt 20 ]; do
+          if [ -e /dev/virtio-ports/org.qemu.guest_agent.0 ]; then
+              systemctl restart qemu-guest-agent.service 2>/dev/null || systemctl start qemu-guest-agent.service 2>/dev/null || true
+              systemctl start qemu-guest-agent.socket 2>/dev/null || true
+              break
+          fi
+          i=\$((i+1))
+          sleep 2
+      done
+      systemctl is-active qemu-guest-agent 2>/dev/null && echo "qemu-guest-agent ACTIF" || echo "qemu-guest-agent INACTIF"
+      } >>"\$LOG" 2>&1
+  - path: /etc/systemd/system/omega-qga-ensure.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Omega - garantit qemu-guest-agent actif a chaque boot
+      After=multi-user.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/omega-qga-ensure
+      RemainAfterExit=no
+      TimeoutStartSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+bootcmd:
+  - [ bash, -lc, "if [ ! -e /var/lib/omega-firstboot-machine-id.done ]; then rm -f /etc/machine-id /var/lib/dbus/machine-id; systemd-machine-id-setup || true; touch /var/lib/omega-firstboot-machine-id.done; fi" ]
+runcmd:
+  - [ bash, -lc, "rm -f /var/lib/dhcp/* /var/lib/NetworkManager/*lease* /var/lib/systemd/network/* 2>/dev/null || true" ]
+  - [ bash, -lc, "test -s /etc/machine-id || systemd-machine-id-setup || true" ]
+  - [ bash, -lc, "rm -f /var/lib/dbus/machine-id; ln -sf /etc/machine-id /var/lib/dbus/machine-id || true" ]
+  - [ bash, -lc, "echo '${CIUSER}:${ROOT_PASSWORD}' | chpasswd" ]
+  - [ bash, -lc, "export DEBIAN_FRONTEND=noninteractive; command -v qemu-ga >/dev/null 2>&1 && command -v stress-ng >/dev/null 2>&1 && test -x /usr/sbin/sshd || (apt-get update && apt-get install -y qemu-guest-agent stress-ng openssh-server)" ]
+  - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/99-omega-root-login.conf; systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
+  - [ bash, -lc, "systemctl unmask qemu-guest-agent.service qemu-guest-agent.socket 2>/dev/null || true; systemctl enable --now qemu-guest-agent.socket 2>/dev/null || true; systemctl restart qemu-guest-agent.service 2>/dev/null || systemctl start qemu-guest-agent.service 2>/dev/null || true" ]
+  - [ bash, -lc, "systemctl daemon-reload; systemctl enable --now omega-qga-ensure.service 2>/dev/null || true" ]
+  - [ bash, -lc, "systemctl restart systemd-networkd 2>/dev/null || true; netplan apply 2>/dev/null || true; command -v dhclient >/dev/null 2>&1 && dhclient -r || true; command -v dhclient >/dev/null 2>&1 && dhclient -v || true" ]
+EOF
+        qm set "$vmid" --cicustom "user=${SNIPPET_STORAGE}:snippets/${snippet_name}"
+    fi
+
     echo "Verification profil Omega VM $vmid"
     verify_vm_profile "$vmid"
 
     if $START; then
-        qm start "$vmid"
+        # Le provisioning démarre les VMs hors hook Omega. Le hookscript peut
+        # être réattaché plus tard par l'installation Omega une fois la VM saine.
+        qm set "$vmid" --delete hookscript >/dev/null 2>&1 || true
+        if ! qm start "$vmid"; then
+            status="$(qm status "$vmid" 2>/dev/null | awk '{print $2}' || true)"
+            if [[ "$status" == "running" ]]; then
+                echo "WARN: qm start $vmid a retourné une erreur, mais la VM est running; poursuite des vérifications"
+            else
+                fail "qm start $vmid a échoué et la VM n'est pas running"
+            fi
+        fi
+        # Certains chemins clone+target Proxmox exposent temporairement
+        # hotplug=cpu après le premier start; on réapplique le profil Omega.
+        qm set "$vmid" --hotplug cpu,disk,network >/dev/null
         echo "Verification profil Omega VM $vmid apres demarrage"
         verify_vm_profile "$vmid"
         echo "VM $vmid demarree"

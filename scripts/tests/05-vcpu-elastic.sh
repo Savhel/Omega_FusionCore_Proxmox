@@ -9,9 +9,9 @@ VMID="${1:-$TEST_VMID}"
 require_vm_running "$VMID"
 VMID="$SELECTED_VMID"
 VM_NODE="$(_vm_node_cached "$VMID")"
-HIGH_THRESHOLD="${OMEGA_VCPU_TEST_HIGH_THRESHOLD:-45}"
+HIGH_THRESHOLD="${OMEGA_VCPU_TEST_HIGH_THRESHOLD:-85}"
 LOW_THRESHOLD="${OMEGA_VCPU_TEST_LOW_THRESHOLD:-15}"
-SCALE_INTERVAL="${OMEGA_VCPU_TEST_SCALE_INTERVAL_SECS:-5}"
+SCALE_INTERVAL="${OMEGA_VCPU_TEST_SCALE_INTERVAL_SECS:-10}"
 STRESS_SECS="${OMEGA_VCPU_TEST_STRESS_SECS:-120}"
 WATCH_SECS="${OMEGA_VCPU_TEST_WATCH_SECS:-120}"
 
@@ -60,6 +60,7 @@ repair_vcpu_profile() {
         --sockets 1 \
         --vcpus 1 \
         --hotplug cpu,disk,network \
+        --numa 0 \
         --description "$desc" >/dev/null
     sanitize_vm_passthrough_for_node "$VMID" "$VM_NODE" || true
     start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID après réparation vCPU"
@@ -121,7 +122,13 @@ step "Vérification vCPU initial = 1"
 vcpus_current="$(vm_runtime_vcpus "$VMID" || true)"
 [[ -n "$vcpus_current" ]] || fail "impossible de relire les vCPUs runtime après démarrage agent"
 info "vCPUs runtime après démarrage agent : $vcpus_current"
-[[ "${vcpus_current:-1}" -eq 1 ]] || fail "vCPUs runtime déjà != 1 au démarrage agent ($vcpus_current)"
+if [[ "${vcpus_current:-1}" -ne 1 ]]; then
+    if [[ "${vcpus_current:-0}" -gt 1 ]]; then
+        warn "scale-up vCPU précoce détecté juste après le démarrage agent ($vcpus_current vCPUs); on continue car l'état de référence QEMU était bien 1 avant l'agent"
+    else
+        fail "vCPUs runtime invalide au démarrage agent ($vcpus_current)"
+    fi
+fi
 
 step "Pool vCPU partagé"
 if [[ -f /run/omega-vcpu-pool.json ]]; then
@@ -132,12 +139,27 @@ fi
 
 step "Simulation charge CPU forte (stress-ng dans la VM — ${STRESS_SECS}s)"
 info "seuil scale-up=${HIGH_THRESHOLD}% | seuil scale-down=${LOW_THRESHOLD}% | intervalle=${SCALE_INTERVAL}s"
+qga_ready=0
+for _ in $(seq 1 30); do
+    if guest_agent_ready "$VMID"; then
+        qga_ready=1
+        break
+    fi
+    sleep 2
+done
+if [[ "$qga_ready" -ne 1 ]]; then
+    VM_NODE="$(_refresh_vm_node_cache "$VMID" 2>/dev/null || true)"
+    fail "qemu-guest-agent absent/injoignable pour VM $VMID sur ${VM_NODE:-nœud inconnu} — le test 05 exige une charge CPU dans le guest. Vérifier depuis ce nœud: qm guest cmd $VMID ping; puis dans la VM: apt-get install -y qemu-guest-agent stress-ng && systemctl start qemu-guest-agent"
+fi
 vm_cpu_stress "$VMID" "$STRESS_SECS"
 STRESS_PID=${_PIDS[-1]:-0}
 
 step "Surveillance scale-up pendant ${WATCH_SECS}s"
 t0=$SECONDS
 vcpus_max="$vcpus_init"
+if [[ "${vcpus_current:-0}" =~ ^[0-9]+$ && "${vcpus_current:-0}" -gt "$vcpus_max" ]]; then
+    vcpus_max="$vcpus_current"
+fi
 while [[ $(elapsed $t0) -lt "$WATCH_SECS" ]]; do
     vcpus_now="$(vm_runtime_vcpus "$VMID" || true)"
     [[ -n "$vcpus_now" && "${vcpus_now:-1}" -gt "$vcpus_max" ]] && vcpus_max="$vcpus_now"

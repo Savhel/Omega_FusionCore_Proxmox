@@ -12,7 +12,7 @@ VMID="$SELECTED_VMID"
 header "Test 25 — Réseau VM invitée (VM $VMID)"
 
 step "Vérification qemu-guest-agent"
-if ! qm guest cmd "$VMID" ping &>/dev/null; then
+if ! guest_agent_ready "$VMID"; then
     cfg="$(qm config "$VMID" 2>/dev/null || true)"
     if ! printf '%s\n' "$cfg" | grep -q '^agent:.*enabled=1'; then
         warn "agent Proxmox non activé dans la config — activation côté Proxmox"
@@ -27,6 +27,10 @@ guest_exec() {
     local cmd="$1"
     local started pid status
     started=$(qm guest exec "$VMID" -- bash -lc "$cmd" 2>/dev/null || true)
+    if printf '%s' "$started" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("exited") else 1)' 2>/dev/null; then
+        printf '%s' "$started" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("out-data","") + d.get("err-data",""), end="")' 2>/dev/null
+        return 0
+    fi
     pid=$(printf '%s' "$started" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("pid",""))' 2>/dev/null || true)
     [[ -n "$pid" ]] || return 1
     for _ in $(seq 1 30); do
@@ -41,7 +45,7 @@ guest_exec() {
 }
 
 step "Interfaces et route"
-ip_out=$(guest_exec "ip -br addr; echo ---; ip route")
+ip_out=$(guest_exec "ip -br addr; echo ---; ip route") || fail "impossible d'exécuter les commandes réseau via qemu-guest-agent dans la VM $VMID"
 echo "$ip_out"
 echo "$ip_out" | grep -Eq "UP|UNKNOWN" || fail "aucune interface réseau visible dans la VM"
 echo "$ip_out" | grep -q "default" || fail "pas de route par défaut dans la VM"

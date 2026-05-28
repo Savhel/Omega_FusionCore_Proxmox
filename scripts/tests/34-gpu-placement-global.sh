@@ -91,7 +91,9 @@ PY
 }
 
 submit_cuda_smoke() {
-    local proxy_node="$1" proxy_url="http://${proxy_node}:9400" job_json job_id result backend device
+    local proxy_node="$1"
+    local proxy_url="http://${proxy_node}:9400"
+    local job_json job_id result backend device
     curl_gpu -fsS -X POST "$proxy_url/v1/vm/$VMID/budget" \
         -H "Content-Type: application/json" \
         -d "{\"vram_budget_mib\":$((GPU_BUDGET_MIB * 2))}" >/dev/null

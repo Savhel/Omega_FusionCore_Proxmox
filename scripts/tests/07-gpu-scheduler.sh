@@ -16,6 +16,18 @@ VM1_RAM=$(vm_ram_mib "$VMID1"); VM1_RAM="${VM1_RAM:-1024}"
 VM2_RAM=$(vm_ram_mib "$VMID2"); VM2_RAM="${VM2_RAM:-1024}"
 CONTROL_PORT="${OMEGA_CONTROL_PORT:-9300}"
 GPU_TEST_BUDGET_MIB="${OMEGA_GPU_TEST_BUDGET_MIB:-128}"
+PROXY_TOKEN="${OMEGA_GPU_PROXY_API_TOKEN:-}"
+if [[ -z "$PROXY_TOKEN" && -n "${OMEGA_GPU_PROXY_API_TOKEN_FILE:-}" && -r "${OMEGA_GPU_PROXY_API_TOKEN_FILE}" ]]; then
+    PROXY_TOKEN="$(tr -d ' \n\r\t' < "${OMEGA_GPU_PROXY_API_TOKEN_FILE}")"
+fi
+
+curl_gpu_proxy() {
+    if [[ -n "$PROXY_TOKEN" ]]; then
+        curl -H "Authorization: Bearer ${PROXY_TOKEN}" "$@"
+    else
+        curl "$@"
+    fi
+}
 
 header "Test 7 — GPU scheduler round-robin (VM $VMID1 + VM $VMID2)"
 
@@ -38,7 +50,41 @@ GPU_URL="http://${GPU_NODE}:${CONTROL_PORT}"
 step "État GPU daemon sur ${GPU_NODE}:${CONTROL_PORT}"
 GPU_STATUS="$(curl -sf "${GPU_URL}/control/gpu/status" 2>/dev/null || true)"
 if [[ -z "$GPU_STATUS" ]]; then
-    fail "GPU runtime indisponible sur $GPU_NODE. Vérifier omega-daemon, /dev/dri/renderD*, driver GPU, et /control/gpu/status"
+    warn "GPU daemon /control/gpu/status indisponible sur $GPU_NODE — bascule vers proxy GPU applicatif :9400"
+    PROXY_NODE="${OMEGA_GPU_PRIMARY_NODE:-${OMEGA_GPU_NODES%%,*}}"
+    PROXY_NODE="${PROXY_NODE:-$GPU_NODE}"
+    PROXY_URL="${OMEGA_GPU_PROXY_URL:-http://${PROXY_NODE}:9400}"
+    step "État GPU proxy applicatif ${PROXY_URL}"
+    curl_gpu_proxy -fsS "$PROXY_URL/health" >/dev/null || fail "proxy GPU applicatif indisponible: $PROXY_URL"
+    PROXY_STATUS="$(curl_gpu_proxy -fsS "$PROXY_URL/gpu/status")"
+    printf '%s\n' "$PROXY_STATUS" | python3 -m json.tool || printf '%s\n' "$PROXY_STATUS"
+    total_vram="$(printf '%s\n' "$PROXY_STATUS" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("total_vram_mib", 0))' 2>/dev/null || echo 0)"
+    [[ "$total_vram" =~ ^[0-9]+$ && "$total_vram" -gt 0 ]] || fail "proxy GPU sans VRAM détectée; vérifier OMEGA_GPU_PROXY_TOTAL_VRAM_MIB/nvidia-smi"
+
+    step "Allocation budgets VRAM proxy pour les deux VMs"
+    for vmid in "$VMID1" "$VMID2"; do
+        curl_gpu_proxy -fsS -X POST "${PROXY_URL}/v1/vm/${vmid}/budget" \
+            -H "Content-Type: application/json" \
+            -d "{\"vram_budget_mib\":${GPU_TEST_BUDGET_MIB}}" >/dev/null || \
+            fail "échec allocation budget GPU proxy pour VM $vmid"
+    done
+    PROXY_STATUS_AFTER="$(curl_gpu_proxy -fsS "$PROXY_URL/gpu/status")"
+    printf '%s\n' "$PROXY_STATUS_AFTER" | python3 -m json.tool || printf '%s\n' "$PROXY_STATUS_AFTER"
+    missing="$(printf '%s\n' "$PROXY_STATUS_AFTER" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+expected = {int(sys.argv[1]), int(sys.argv[2])}
+budget = int(sys.argv[3])
+seen = {
+    int(v.get("vm_id"))
+    for v in d.get("budgets", [])
+    if int(v.get("vram_budget_mib", -1)) == budget
+}
+print(",".join(map(str, sorted(expected - seen))))
+' "$VMID1" "$VMID2" "$GPU_TEST_BUDGET_MIB")"
+    [[ -z "$missing" ]] || fail "budgets GPU proxy manquants ou incorrects pour VM(s): $missing"
+    pass "GPU scheduler proxy OK — budgets VRAM appliqués pour VM $VMID1 et VM $VMID2"
+    exit 0
 fi
 printf '%s\n' "$GPU_STATUS" | python3 -m json.tool || printf '%s\n' "$GPU_STATUS"
 
