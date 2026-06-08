@@ -112,6 +112,15 @@ clean_body() { cat <<'BODY'
     rm -rf /etc/omega-store/tls
     rm -rf @@OMEGA_RUN_DIR@@ @@OMEGA_LOG_DIR@@
     rm -f /run/omega-gpu-scheduler-*.lock 2>/dev/null || true
+
+    # sysctl.d (userfaultfd)
+    rm -f /etc/sysctl.d/99-omega.conf
+    sysctl -w vm.unprivileged_userfaultfd=0 >/dev/null 2>&1 || true
+
+    # Paquet Debian (si installé via .deb)
+    if dpkg -s omega-remote-paging >/dev/null 2>&1; then
+        dpkg -P omega-remote-paging 2>/dev/null || true
+    fi
 BODY
 }
 

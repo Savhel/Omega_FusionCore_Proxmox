@@ -199,6 +199,7 @@ ENVEOF
         OMEGA_GPU_PROXY_API_TOKEN='${OMEGA_GPU_PROXY_API_TOKEN}' \
         OMEGA_GPU_MIGRATE_TO_GPU_NODE='${OMEGA_GPU_MIGRATE_TO_GPU_NODE}' \
         OMEGA_GPU_FALLBACK_NETWORK='${OMEGA_GPU_FALLBACK_NETWORK}' \
+        OMEGA_NET_PFSENSE_WAN_IP='${OMEGA_NET_PFSENSE_WAN_IP:-}' \
         INSTALL_DIR=/opt/omega-remote-paging/bin \
         LAUNCHER_SRC=/opt/omega-remote-paging/bin/omega-qemu-launcher \
         AGENT_SRC=/opt/omega-remote-paging/bin/node-a-agent \

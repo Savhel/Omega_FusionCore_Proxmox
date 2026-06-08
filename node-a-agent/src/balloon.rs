@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -137,20 +136,33 @@ impl BalloonManager {
 }
 
 async fn set_balloon(vm_id: u32, mib: u64) -> anyhow::Result<()> {
-    let mut child = Command::new("qm")
-        .args(["monitor", &vm_id.to_string()])
-        .stdin(Stdio::piped())
+    let monitor_script = format!(
+        r#"set -e
+vmid={vm_id}
+mib={mib}
+owner=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null | python3 -c 'import json,sys; vmid=str(sys.argv[1]);
+try: data=json.load(sys.stdin)
+except Exception: data=[]
+print(next((str(v.get("node","")) for v in data if str(v.get("vmid","")) == vmid), ""))' "$vmid" 2>/dev/null || true)
+local_node=$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)
+cmd="printf '%s\nquit\n' 'balloon $mib' | qm monitor '$vmid'"
+if [ -n "$owner" ] && [ "$owner" != "$local_node" ]; then
+    target=$(getent hosts "$owner" 2>/dev/null | awk '{{print $1; exit}}')
+    [ -n "$target" ] || target="$owner"
+    exec ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "root@$target" "$cmd"
+fi
+exec sh -c "$cmd"
+"#
+    );
+
+    let out = Command::new("bash")
+        .arg("-lc")
+        .arg(monitor_script)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .output()
+        .await?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(format!("balloon {mib}\nquit\n").as_bytes())
-            .await?;
-    }
-
-    let out = child.wait_with_output().await?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -163,6 +175,7 @@ async fn set_balloon(vm_id: u32, mib: u64) -> anyhow::Result<()> {
     if combined_lower.contains("unknown command")
         || combined_lower.contains("error:")
         || combined_lower.contains("failed")
+        || combined_lower.contains("does not exist")
     {
         anyhow::bail!("qm monitor {vm_id} balloon {mib}: {}", combined.trim());
     }

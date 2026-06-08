@@ -141,3 +141,70 @@ impl Config {
         format!("{}:{}", self.node_addr, self.api_port)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_parse() {
+        let cfg = Config::try_parse_from(["omega-daemon"]).expect("defaults");
+        assert_eq!(cfg.store_port, 9100);
+        assert_eq!(cfg.api_port, 9200);
+        assert!(cfg.monitor_vms);
+        assert_eq!(cfg.qemu_pid_dir, "/var/run/qemu-server");
+        assert_eq!(cfg.qemu_conf_dir, "/etc/pve/qemu-server");
+        assert!((cfg.evict_threshold_pct - 75.0).abs() < f64::EPSILON);
+        assert!(cfg.gpu_enabled);
+    }
+
+    #[test]
+    fn addresses_use_node_addr() {
+        let cfg = Config::try_parse_from([
+            "omega-daemon",
+            "--node-addr",
+            "10.10.0.11",
+            "--store-port",
+            "9100",
+            "--api-port",
+            "9200",
+        ])
+        .expect("parse");
+        assert_eq!(cfg.store_addr(), "0.0.0.0:9100");
+        assert_eq!(cfg.api_addr(), "0.0.0.0:9200");
+        assert_eq!(cfg.store_public_addr(), "10.10.0.11:9100");
+        assert_eq!(cfg.api_public_addr(), "10.10.0.11:9200");
+    }
+
+    #[test]
+    fn peers_csv_parse() {
+        let cfg = Config::try_parse_from([
+            "omega-daemon",
+            "--peers",
+            "10.0.0.1:9200,10.0.0.2:9200",
+        ])
+        .expect("parse");
+        assert_eq!(cfg.peers.len(), 2);
+        assert_eq!(cfg.peers[0], "10.0.0.1:9200");
+        assert_eq!(cfg.peers[1], "10.0.0.2:9200");
+    }
+
+    #[test]
+    fn invalid_port_rejected() {
+        let res = Config::try_parse_from(["omega-daemon", "--store-port", "not-a-port"]);
+        assert!(res.is_err());
+        let res = Config::try_parse_from(["omega-daemon", "--store-port", "99999"]);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn evict_threshold_pct_parses() {
+        let cfg = Config::try_parse_from([
+            "omega-daemon",
+            "--evict-threshold-pct",
+            "85.5",
+        ])
+        .expect("parse");
+        assert!((cfg.evict_threshold_pct - 85.5).abs() < f64::EPSILON);
+    }
+}

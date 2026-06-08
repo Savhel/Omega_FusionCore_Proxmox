@@ -13,6 +13,7 @@ def make_node(
     mem_free_mib:     int,
     local_vms:        list[VmEntry] | None = None,
     reachable:        bool = True,
+    kvm_capable:      bool = True,
 ) -> NodeInfo:
     return NodeInfo(
         node_id          = node_id,
@@ -26,6 +27,7 @@ def make_node(
         local_vms        = local_vms or [],
         timestamp_secs   = 0,
         reachable        = reachable,
+        kvm_capable      = kvm_capable,
     )
 
 
@@ -270,3 +272,44 @@ class TestFindAllMigrations:
         # Toutes les VMs qualifient et pve-c a assez de RAM
         assert len(decisions) == 3
         assert all(d.target_node == "pve-c" for d in decisions)
+
+
+# ─── Éligibilité KVM (placement exclut les nœuds sans /dev/kvm) ─────────────────
+
+class TestKvmEligibility:
+    def test_non_kvm_node_jamais_cible(self, engine):
+        """Un nœud joignable mais sans KVM ne doit jamais être choisi comme cible."""
+        source = make_node("pve-a", 16384, 2000, local_vms=[make_vm(100, 2048, 500)])
+        # gros nœud libre MAIS sans KVM → doit être ignoré
+        no_kvm = make_node("pve-b", 65536, 60000, kvm_capable=False)
+        ok_kvm = make_node("pve-c", 16384, 8000, kvm_capable=True)
+        cluster = make_cluster(source, no_kvm, ok_kvm)
+        target = engine.find_target(cluster, "pve-a", make_vm(100, 2048, 500))
+        assert target is not None
+        assert target.node_id == "pve-c"  # jamais pve-b malgré sa RAM
+
+    def test_aucune_cible_si_seuls_non_kvm(self, engine):
+        source = make_node("pve-a", 16384, 2000, local_vms=[make_vm(100, 2048, 500)])
+        no_kvm = make_node("pve-b", 65536, 60000, kvm_capable=False)
+        cluster = make_cluster(source, no_kvm)
+        assert engine.find_target(cluster, "pve-a", make_vm(100, 2048, 500)) is None
+
+    def test_vm_evacuee_du_noeud_sans_kvm_sans_pages(self, engine):
+        """Une VM SANS pages distantes sur un nœud sans KVM doit être évacuée."""
+        vm = make_vm(100, 2048, remote_pages=0)  # 0 page → pas de migration par pression
+        no_kvm = make_node("pve-a", 16384, 8000, local_vms=[vm], kvm_capable=False)
+        target = make_node("pve-b", 16384, 8000, kvm_capable=True)
+        cluster = make_cluster(no_kvm, target)
+        decisions = engine.find_all_migrations(cluster)
+        assert len(decisions) == 1
+        assert decisions[0].vmid == 100
+        assert decisions[0].source_node == "pve-a"
+        assert decisions[0].target_node == "pve-b"
+
+    def test_pas_devacuation_si_noeud_kvm_ok(self, engine):
+        """VM sans pages sur un nœud KVM normal → pas de migration."""
+        vm = make_vm(100, 2048, remote_pages=0)
+        a = make_node("pve-a", 16384, 8000, local_vms=[vm], kvm_capable=True)
+        b = make_node("pve-b", 16384, 8000, kvm_capable=True)
+        cluster = make_cluster(a, b)
+        assert engine.find_all_migrations(cluster) == []

@@ -54,6 +54,11 @@ pub const STEAL_THRESHOLD_PCT: f64 = 10.0;
 /// Seuil d'utilisation CPU déclenchant un hotplug de vCPU (%).
 pub const HOTPLUG_TRIGGER_PCT: f64 = 80.0;
 
+/// Durée minimale de FORTE charge soutenue avant d'ajouter un vCPU (hystérésis).
+/// Évite le ping-pong sur les micro-pics (JVM/GC) : seule une charge réelle qui
+/// dure ≥ ce délai déclenche un hotplug ; un pic d'1 ms ne fait plus rien.
+pub const HOTPLUG_STABLE_SECS: u64 = 4;
+
 /// Seuil d'utilisation CPU sous lequel on peut envisager un retrait progressif.
 pub const DOWNSCALE_TRIGGER_PCT: f64 = 35.0;
 
@@ -109,6 +114,8 @@ pub struct VmVcpuState {
     pub local_share_active: bool,
     /// Depuis quand la VM est en faible charge prolongée.
     pub low_load_since: Option<u64>,
+    /// Depuis quand la VM est en FORTE charge soutenue (hystérésis hotplug).
+    pub high_load_since: Option<u64>,
     /// Timestamp de la dernière mise à jour
     pub updated_at: u64,
 }
@@ -126,6 +133,7 @@ impl VmVcpuState {
             cpu_weight: DEFAULT_CPU_WEIGHT,
             local_share_active: false,
             low_load_since: None,
+            high_load_since: None,
             updated_at: now_secs(),
         }
     }
@@ -136,8 +144,28 @@ impl VmVcpuState {
     }
 
     /// La VM est-elle sous pression CPU (dépasse le seuil de hotplug) ?
+    /// Utilisation MOYENNE par vCPU actuellement alloué (%).
+    ///
+    /// `cpu_usage_pct` est le total (% d'un cœur, peut dépasser 100 = somme de tous
+    /// les vCPU). Le diviser par `current_vcpus` donne la saturation réelle de
+    /// l'allocation. C'est la bonne base pour hotplug/downscale : sinon une VM à 6
+    /// vCPU peu chargée (ex. 44% total = ~7%/vCPU) repasse au-dessus du seuil 35% au
+    /// moindre pic JVM/GC → `low_load_since` se remet à zéro → JAMAIS de downscale.
+    pub fn utilization_pct(&self) -> f64 {
+        self.cpu_usage_pct / (self.current_vcpus.max(1) as f64)
+    }
+
     pub fn needs_more_vcpus(&self) -> bool {
-        self.cpu_usage_pct >= HOTPLUG_TRIGGER_PCT && !self.at_max_vcpus()
+        !self.at_max_vcpus()
+            && self.utilization_pct() >= HOTPLUG_TRIGGER_PCT
+            && self.high_load_duration_secs() >= HOTPLUG_STABLE_SECS
+    }
+
+    /// Depuis combien de secondes la VM est en forte charge soutenue.
+    pub fn high_load_duration_secs(&self) -> u64 {
+        self.high_load_since
+            .map(|started| now_secs().saturating_sub(started))
+            .unwrap_or(0)
     }
 
     /// La VM souffre-t-elle de steal time excessif ?
@@ -148,7 +176,7 @@ impl VmVcpuState {
     /// La VM peut-elle perdre 1 vCPU sans passer sous son minimum ?
     pub fn can_downscale(&self) -> bool {
         self.current_vcpus > self.safe_vcpu_floor()
-            && self.cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT
+            && self.utilization_pct() <= DOWNSCALE_TRIGGER_PCT
             && self.low_load_duration_secs() >= DOWNSCALE_STABLE_SECS
     }
 
@@ -547,12 +575,26 @@ impl VcpuScheduler {
         if let Some(state) = vms.get_mut(&vm_id) {
             state.cpu_usage_pct = cpu_usage_pct;
             state.steal_pct = steal_pct;
-            if state.current_vcpus > state.min_vcpus && cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT {
+            // Seuil sur l'utilisation PAR vCPU (total / current), pas le total brut :
+            // un pic JVM/GC qui pousse le total au-dessus de 35% ne doit pas remettre
+            // le minuteur de faible charge à zéro tant que chaque vCPU reste peu chargé.
+            let utilization = cpu_usage_pct / (state.current_vcpus.max(1) as f64);
+            if state.current_vcpus > state.min_vcpus && utilization <= DOWNSCALE_TRIGGER_PCT {
                 if state.low_load_since.is_none() {
                     state.low_load_since = Some(now_secs());
                 }
             } else {
                 state.low_load_since = None;
+            }
+            // Symétrique : minuteur de FORTE charge soutenue pour l'hystérésis hotplug.
+            // Un micro-pic isolé met high_load_since puis le reset au tick suivant →
+            // jamais ≥ HOTPLUG_STABLE_SECS → pas de hotplug intempestif.
+            if !state.at_max_vcpus() && utilization >= HOTPLUG_TRIGGER_PCT {
+                if state.high_load_since.is_none() {
+                    state.high_load_since = Some(now_secs());
+                }
+            } else {
+                state.high_load_since = None;
             }
             state.updated_at = now_secs();
 
@@ -678,7 +720,7 @@ impl VcpuScheduler {
             .read()
             .unwrap()
             .values()
-            .filter(|s| s.cpu_usage_pct <= DOWNSCALE_TRIGGER_PCT && !s.needs_local_cpu_share())
+            .filter(|s| s.utilization_pct() <= DOWNSCALE_TRIGGER_PCT && !s.needs_local_cpu_share())
             .map(|s| (s.vm_id, s.low_load_duration_secs(), s.cpu_usage_pct))
             .collect();
 
@@ -874,14 +916,44 @@ mod tests {
     #[test]
     fn test_hotplug_increases_vcpu_count() {
         let s = make_scheduler(4);
-        s.admit_vm(1, 2, 4);
-        s.update_vm_metrics(1, 85.0, 0.0); // > HOTPLUG_TRIGGER_PCT
+        s.admit_vm(1, 2, 4); // current=2
+        // 170% total / 2 vCPU = 85% par vCPU > HOTPLUG_TRIGGER_PCT (seuil par vCPU)
+        s.update_vm_metrics(1, 170.0, 0.0);
+        // Hystérésis : simule une forte charge SOUTENUE (≥ HOTPLUG_STABLE_SECS).
+        {
+            let mut vms = s.vms.write().unwrap();
+            vms.get_mut(&1).unwrap().high_load_since =
+                Some(now_secs().saturating_sub(HOTPLUG_STABLE_SECS + 1));
+        }
 
         let vms_to_hotplug = s.vms_needing_hotplug();
         assert!(vms_to_hotplug.contains(&1));
 
         let d = s.try_hotplug(1);
         assert!(matches!(d, VcpuDecision::Hotplugged { new_count: 3, .. }));
+    }
+
+    #[test]
+    fn test_hotplug_requires_sustained_load_not_brief_spike() {
+        // Hystérésis : un pic bref (forte util mais high_load_since tout récent) ne doit
+        // PAS hotplugger — c'est ce qui causait le ping-pong sur les micro-pics JVM/GC.
+        let s = make_scheduler(4);
+        s.admit_vm(1, 2, 4);
+        s.update_vm_metrics(1, 200.0, 0.0); // 100%/vCPU mais high_load_since = maintenant
+        assert!(
+            !s.vms_needing_hotplug().contains(&1),
+            "un pic bref ne doit pas déclencher de hotplug"
+        );
+        // Charge maintenue ≥ HOTPLUG_STABLE_SECS → hotplug autorisé
+        {
+            let mut vms = s.vms.write().unwrap();
+            vms.get_mut(&1).unwrap().high_load_since =
+                Some(now_secs().saturating_sub(HOTPLUG_STABLE_SECS + 1));
+        }
+        assert!(
+            s.vms_needing_hotplug().contains(&1),
+            "une forte charge soutenue doit déclencher le hotplug"
+        );
     }
 
     #[test]
@@ -916,6 +988,30 @@ mod tests {
         }
         let d = s.try_downscale(1, false);
         assert!(matches!(d, VcpuDecision::Downscaled { new_count: 1, .. }));
+    }
+
+    #[test]
+    fn test_downscale_eligible_when_per_vcpu_idle_despite_high_total() {
+        // Régression (cas réel VM 3001) : 6 vCPU, total=120% = 20%/vCPU. Le total
+        // dépasse 35% mais PAS l'utilisation par vCPU → doit rester downscalable.
+        // Avant le fix : le total >35% remettait low_load_since à zéro → JAMAIS de
+        // downscale, la VM idle gardait ses 6 vCPU indéfiniment.
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 6);
+        {
+            let mut vms = s.vms.write().unwrap();
+            vms.get_mut(&1).unwrap().current_vcpus = 6;
+        }
+        s.update_vm_metrics(1, 120.0, 0.0); // 120/6 = 20%/vCPU ≤ 35
+        {
+            let mut vms = s.vms.write().unwrap();
+            vms.get_mut(&1).unwrap().low_load_since =
+                Some(now_secs().saturating_sub(DOWNSCALE_STABLE_SECS + 1));
+        }
+        assert!(
+            s.vms_needing_downscale().contains(&1),
+            "VM idle par vCPU (20%) doit être downscalable malgré un total à 120%"
+        );
     }
 
     #[test]
@@ -961,6 +1057,14 @@ mod tests {
         s.admit_vm(2, 1, 2);
         s.update_vm_metrics(1, 95.0, 0.0);
         s.update_vm_metrics(2, 90.0, 20.0);
+        // Hystérésis : charge forte SOUTENUE pour les deux (sinon needs_more_vcpus=false).
+        {
+            let mut vms = s.vms.write().unwrap();
+            for id in [1u32, 2u32] {
+                vms.get_mut(&id).unwrap().high_load_since =
+                    Some(now_secs().saturating_sub(HOTPLUG_STABLE_SECS + 1));
+            }
+        }
 
         let borrowers = s.local_share_borrowers();
         assert_eq!(borrowers, vec![2, 1]);

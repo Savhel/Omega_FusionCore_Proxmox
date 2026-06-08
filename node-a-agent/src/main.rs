@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     let status_addrs = if cfg.status_addrs.is_empty() || cfg.status_addrs == [""] {
         cfg.stores
             .iter()
-            .map(|s| format!("{}:9200", s.splitn(2, ':').next().unwrap_or("127.0.0.1")))
+            .map(|s| format!("{}:9200", s.split(':').next().unwrap_or("127.0.0.1")))
             .collect()
     } else {
         cfg.status_addrs.clone()
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
         MemoryRegion::allocate(
             region_size,
             cfg.vm_id,
-            cfg.vm_requested_mib as u64,
+            cfg.vm_requested_mib,
             store.clone(),
             metrics.clone(),
             tokio_handle.clone(),
@@ -208,7 +208,7 @@ async fn main() -> Result<()> {
             cfg.vm_id,
             cfg.current_node.clone(),
             cluster.clone(),
-            cfg.vm_requested_mib as u64,
+            cfg.vm_requested_mib,
             cfg.gpu_placement_interval_secs,
         ));
         let sd = shutdown_flag.clone();
@@ -721,7 +721,7 @@ fn spawn_migration_daemon(
         cfg.migration_interval_secs,
         cfg.compaction_enabled,
         cfg.vm_vcpus,
-        cfg.vm_requested_mib as u64,
+        cfg.vm_requested_mib,
         needs_gpu,
         uffd_fd,
         cpu_pressure,
@@ -748,8 +748,8 @@ async fn run_demo(
     for page_id in 0..demo_pages as u64 {
         let mut data = [0u8; PAGE_SIZE];
         data[..8].copy_from_slice(&page_id.to_be_bytes());
-        for i in 8..PAGE_SIZE {
-            data[i] = ((page_id as u8).wrapping_add(i as u8)) & 0xFF;
+        for (i, byte) in data.iter_mut().enumerate().take(PAGE_SIZE).skip(8) {
+            *byte = (page_id as u8).wrapping_add(i as u8);
         }
         region.write_page_local(page_id, &data)?;
     }
@@ -786,7 +786,7 @@ async fn run_demo(
             errors += 1;
         }
         let ok = (8..24usize).all(|i| {
-            let expected = ((page_id as u8).wrapping_add(i as u8)) & 0xFF;
+            let expected = (page_id as u8).wrapping_add(i as u8);
             let got = unsafe { *ptr.add(i) };
             got == expected
         });
@@ -903,7 +903,7 @@ async fn detect_vm_gpu_passthrough(vm_id: u32) -> bool {
             continue;
         }
         // hostpci0: 0000:02:00.0,pcie=1,rombar=0
-        let value = match line.splitn(2, ':').nth(1) {
+        let value = match line.split_once(':').map(|x| x.1) {
             Some(v) => v.trim(),
             None => continue,
         };

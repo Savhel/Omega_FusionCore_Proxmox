@@ -338,8 +338,7 @@ impl BatchPutResponse {
             }
             Opcode::Error => {
                 let detail = String::from_utf8_lossy(&msg.payload).to_string();
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
+                Err(io::Error::other(
                     format!("BATCH_PUT erreur store : {detail}"),
                 ))
             }

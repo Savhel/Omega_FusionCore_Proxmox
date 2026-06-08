@@ -33,6 +33,13 @@ Options:
   --gpu-vram-mib N        Budget VRAM declare. Defaut: 0.
   --nodes A,B,C           Nœuds Proxmox autorisés. Défaut: découverte cluster.
   --root-password PASS    Mot de passe root cloud-init. Défaut: root.
+  --vm-ip-prefix PREFIX   Préfixe IP fixe. Ex: 10.50.30. Vide = DHCP.
+  --vm-ip-start N         Dernier octet IP pour le VMID de base. Défaut: 101.
+  --vm-vmid-base N        VMID correspondant à --vm-ip-start. Défaut: 2300.
+  --vm-gateway GW         Passerelle injectée via cloud-init. Ex: 10.50.30.1.
+  --vm-netmask N          Masque CIDR. Défaut: 24.
+  --vm-dns-ip IP          DNS injecté via cloud-init.
+  --vm-vlan-tag N         Tag VLAN 802.1q (1-4094). Vide = pas de tag.
   --randomize             Profils VM aléatoires mais conformes Omega.
   --bootstrap-wait SECS   Compatibilité ancienne option; la validation invité se fait au deuxième tour.
   --recreate-bad          Supprime/recrée toute VM non conforme une fois, même si elle existait déjà.
@@ -85,6 +92,13 @@ DISK_MAX_GIB=20
 GPU_VRAM_MIB=0
 NODES_CSV=""
 ROOT_PASSWORD="root"
+VM_IP_PREFIX=""
+VM_IP_START=101
+VM_VMID_BASE=2300
+VM_GATEWAY=""
+VM_NETMASK=24
+VM_DNS_IP=""
+VM_VLAN_TAG=""
 RANDOMIZE=false
 BOOTSTRAP_WAIT=180
 RECREATE_BAD=false
@@ -115,6 +129,13 @@ while [[ $# -gt 0 ]]; do
         --gpu-vram-mib) GPU_VRAM_MIB="$2"; shift 2 ;;
         --nodes) NODES_CSV="$2"; shift 2 ;;
         --root-password) ROOT_PASSWORD="$2"; shift 2 ;;
+        --vm-ip-prefix) VM_IP_PREFIX="$2"; shift 2 ;;
+        --vm-ip-start) VM_IP_START="$2"; shift 2 ;;
+        --vm-vmid-base) VM_VMID_BASE="$2"; shift 2 ;;
+        --vm-gateway) VM_GATEWAY="$2"; shift 2 ;;
+        --vm-netmask) VM_NETMASK="$2"; shift 2 ;;
+        --vm-dns-ip) VM_DNS_IP="$2"; shift 2 ;;
+        --vm-vlan-tag) VM_VLAN_TAG="$2"; shift 2 ;;
         --randomize) RANDOMIZE=true; shift ;;
         --bootstrap-wait) BOOTSTRAP_WAIT="$2"; shift 2 ;;
         --recreate-bad) RECREATE_BAD=true; shift ;;
@@ -341,7 +362,7 @@ wait_vm_absent() {
 cleanup_cloudinit_remote() {
     local node="$1" vmid="$2"
     ssh_node "$node" "
-qm set '$vmid' --delete ide2 >/dev/null 2>&1 || true
+qm set '$vmid' --delete scsi1 >/dev/null 2>&1 || true
 for i in 1 2 3 4 5 6; do
     if ! pvesm list '${STORAGE}' 2>/dev/null | grep -q "vm-${vmid}-cloudinit"; then
         exit 0
@@ -672,7 +693,7 @@ virt-customize -a '$prepared_image' \
         ssh_node "$node" "test -f '$EFFECTIVE_SSHKEY_REMOTE' && qm set '$TEMPLATE_ID' --sshkeys '$EFFECTIVE_SSHKEY_REMOTE' || true"
     fi
     ssh_node "$node" "qm set '$TEMPLATE_ID' --delete hookscript >/dev/null 2>&1 || true
-qm set '$TEMPLATE_ID' --delete ide2 >/dev/null 2>&1 || true
+qm set '$TEMPLATE_ID' --delete scsi1 >/dev/null 2>&1 || true
 qm set '$TEMPLATE_ID' --tags omega-template >/dev/null
 qm set '$TEMPLATE_ID' --description omega_template_prepared=1 >/dev/null"
     ssh_node "$node" "qm template '$TEMPLATE_ID'"
@@ -854,6 +875,26 @@ create_one_vm() {
         fi
     fi
 
+    # Calcul IP fixe par position dans la liste (fonctionne avec n'importe quelle plage de VMIDs)
+    local ipconfig0_arg="ip=dhcp"
+    local nameserver_arg="8.8.8.8"
+    if [[ -n "$VM_IP_PREFIX" && -n "$VM_GATEWAY" ]]; then
+        local ip_idx=0
+        local v
+        for v in "${VMID_ARR[@]}"; do
+            [[ "$v" == "$vmid" ]] && break
+            ip_idx=$(( ip_idx + 1 ))
+        done
+        local ip_last=$(( VM_IP_START + ip_idx ))
+        if [[ "$ip_last" -gt 254 ]]; then
+            echo "WARN: IP calculée 10.x.x.${ip_last} invalide pour VM $vmid (position $ip_idx) — fallback DHCP" >&2
+            ipconfig0_arg="ip=dhcp"
+        else
+            ipconfig0_arg="ip=${VM_IP_PREFIX}.${ip_last}/${VM_NETMASK},gw=${VM_GATEWAY}"
+        fi
+        [[ -n "$VM_DNS_IP" ]] && nameserver_arg="$VM_DNS_IP"
+    fi
+
     local create_args=(
         --vmid "$vmid"
         --name "$NAME_PREFIX"
@@ -868,8 +909,11 @@ create_one_vm() {
         --disk-max-gib "$DISK_MAX_GIB"
         --gpu-vram-mib "$p_gpu"
         --root-password "$ROOT_PASSWORD"
+        --ipconfig0 "$ipconfig0_arg"
+        --nameserver "$nameserver_arg"
         --bootstrap-guest
     )
+    [[ -n "$VM_VLAN_TAG" ]] && create_args+=(--vlan-tag "$VM_VLAN_TAG")
     if [[ -n "$TEMPLATE_ID" ]]; then
         create_args+=(--template-id "$TEMPLATE_ID")
         create_args+=(--template-prepared)
@@ -933,11 +977,59 @@ ensure_vm_conform_now() {
 echo "[5/7] Création distribuée des VMs Omega"
 bad_vmids=()
 declare -A VM_TARGET_NODE=()
+
+# Distribution contrôlée : OMEGA_VM_NODE_DISTRIBUTION="IP:max,IP:max,..."
+# Exemple : "192.168.123.100:1,192.168.123.101:3,192.168.123.102:3"
+# Nœuds absents de la liste → OMEGA_VM_NODE_DEFAULT_MAX VMs chacun (défaut: 2)
+declare -A _node_max=()
+declare -A _node_count=()
+for node in "${CLUSTER_NODES[@]}"; do _node_count["$node"]=0; done
+
+if [[ -n "${OMEGA_VM_NODE_DISTRIBUTION:-}" ]]; then
+    IFS=',' read -ra _dist_entries <<< "$OMEGA_VM_NODE_DISTRIBUTION"
+    for entry in "${_dist_entries[@]}"; do
+        _n="${entry%%:*}"; _m="${entry##*:}"
+        [[ "$_m" =~ ^[0-9]+$ ]] && _node_max["$_n"]="$_m"
+    done
+fi
+_default_max="${OMEGA_VM_NODE_DEFAULT_MAX:-2}"
+
+# Assigner les VMIDs aux nœuds en respectant les quotas
+_node_queue=("${CLUSTER_NODES[@]}")
+for vmid in "${VMID_ARR[@]}"; do
+    [[ -n "$vmid" ]] || continue
+    # Trouver le premier nœud qui a encore de la capacité
+    assigned=""
+    for node in "${_node_queue[@]}"; do
+        _max="${_node_max[$node]:-$_default_max}"
+        _cur="${_node_count[$node]:-0}"
+        if [[ "$_cur" -lt "$_max" ]]; then
+            assigned="$node"
+            _node_count["$node"]=$(( _cur + 1 ))
+            break
+        fi
+    done
+    # Si tous les nœuds sont pleins, round-robin classique
+    if [[ -z "$assigned" ]]; then
+        assigned="${CLUSTER_NODES[$(( ${#VM_TARGET_NODE[@]} % ${#CLUSTER_NODES[@]} ))]}"
+    fi
+    VM_TARGET_NODE["$vmid"]="$assigned"
+done
+
+# Afficher la distribution choisie
+echo "  Distribution VMs:"
+for node in "${CLUSTER_NODES[@]}"; do
+    vms_on_node=()
+    for vmid in "${VMID_ARR[@]}"; do
+        [[ "${VM_TARGET_NODE[$vmid]:-}" == "$node" ]] && vms_on_node+=("$vmid")
+    done
+    [[ "${#vms_on_node[@]}" -gt 0 ]] && echo "    $node : ${vms_on_node[*]}"
+done
+
 idx=0
 for vmid in "${VMID_ARR[@]}"; do
     [[ -n "$vmid" ]] || continue
-    node="${CLUSTER_NODES[$((idx % ${#CLUSTER_NODES[@]}))]}"
-    VM_TARGET_NODE["$vmid"]="$node"
+    node="${VM_TARGET_NODE[$vmid]}"
     if ! create_one_vm "$vmid" "$node"; then
         echo "VM $vmid: création/adoption initiale échouée — recréation immédiate"
         if ! recreate_one_vm "$vmid" "$node"; then

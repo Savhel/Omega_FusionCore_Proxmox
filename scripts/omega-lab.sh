@@ -52,6 +52,7 @@ _warn() { echo -e "${YELLOW}[WRN]${RESET} $*"; }
 _sep()  { echo -e "${DIM}────────────────────────────────────────────────────────────${RESET}"; }
 _hdr()  { echo -e "\n${BOLD}${BLUE}$*${RESET}"; }
 _ask()  { echo -en "${YELLOW}  → ${RESET}$* : "; }
+fail()  { _err "$*"; return 1; }
 
 # ── Chargement/rechargement de la configuration ───────────────────────────────
 # Appelé à chaque modification de cluster.conf et au démarrage.
@@ -147,6 +148,17 @@ _load_config() {
     OMEGA_PROVISION_RECREATE_BAD="${OMEGA_PROVISION_RECREATE_BAD:-1}"
     OMEGA_PROVISION_RESOURCE_ONLY="${OMEGA_PROVISION_RESOURCE_ONLY:-0}"
     OMEGA_PROVISION_BOOT_WAIT_SECS="${OMEGA_PROVISION_BOOT_WAIT_SECS:-180}"
+    # Réseau privé VMs
+    OMEGA_NET_VM_BRIDGE="${OMEGA_NET_VM_BRIDGE:-}"
+    OMEGA_NET_VM_VLAN_TAG="${OMEGA_NET_VM_VLAN_TAG:-}"
+    OMEGA_NET_VM_IP_PREFIX="${OMEGA_NET_VM_IP_PREFIX:-}"
+    OMEGA_NET_VM_IP_START="${OMEGA_NET_VM_IP_START:-101}"
+    OMEGA_NET_VM_GATEWAY="${OMEGA_NET_VM_GATEWAY:-}"
+    OMEGA_NET_VM_NETMASK="${OMEGA_NET_VM_NETMASK:-24}"
+    OMEGA_NET_VM_DNS_IP="${OMEGA_NET_VM_DNS_IP:-}"
+    # Distribution des VMs par nœud
+    OMEGA_VM_NODE_DISTRIBUTION="${OMEGA_VM_NODE_DISTRIBUTION:-}"
+    OMEGA_VM_NODE_DEFAULT_MAX="${OMEGA_VM_NODE_DEFAULT_MAX:-2}"
     OMEGA_QGA_WATCHDOG_NODES="${OMEGA_QGA_WATCHDOG_NODES:-${OMEGA_NODES}}"
     OMEGA_QGA_WATCHDOG_VMIDS="${OMEGA_QGA_WATCHDOG_VMIDS:-}"
     OMEGA_QGA_WATCHDOG_ROOT_PASSWORD="${OMEGA_QGA_WATCHDOG_ROOT_PASSWORD:-${OMEGA_VM_ROOT_PASSWORD:-root}}"
@@ -372,6 +384,22 @@ except Exception:
     node_ip=$(_node_ip_for_pve_name "$pve_name" || true)
     [[ -n "$node_ip" ]] || return 1
     printf '%s' "$node_ip"
+}
+
+# Déploie vm-isolation.sh sur tous les nœuds (chemin de secours /opt/vm-isolation.sh).
+# Idempotent : ne dépend pas du paquet .deb, mais ne l'écrase pas s'il est déjà là.
+# Permet d'avoir l'isolation OVS/iptables sans aucune étape manuelle (scp).
+_deploy_isolation_script() {
+    local src="${SCRIPT_DIR}/vm-isolation.sh"
+    [[ -f "$src" ]] || return 0
+    local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+    local node
+    for node in "${nodes_arr[@]}"; do
+        scp "${SSH_OPTS[@]/#-i/-i}" "$src" \
+            "${DEPLOY_USER}@${node}:/opt/vm-isolation.sh" 2>/dev/null \
+            && ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "chmod +x /opt/vm-isolation.sh" 2>/dev/null \
+            || true
+    done
 }
 
 _normalize_vmids_spec() {
@@ -995,6 +1023,9 @@ do_configure() {
         return 1
     fi
 
+    # Sauvegarder la section réseau avant écrasement
+    cp "$CONF_FILE" "${CONF_FILE}.pre_c" 2>/dev/null || true
+
     # Sauvegarder dans cluster.conf
     cat > "$CONF_FILE" <<EOF
 # Configuration du cluster omega-remote-paging.
@@ -1078,6 +1109,15 @@ OMEGA_PROVISION_RANDOMIZE="${input_provision_randomize}"
 OMEGA_PROVISION_RECREATE_BAD="${input_provision_recreate_bad}"
 OMEGA_PROVISION_BOOT_WAIT_SECS="${input_provision_boot_wait}"
 EOF
+
+    # Réinjecter les sections personnalisées (réseau, etc.) qui survivent à [c]
+    # Tout ce qui commence par "# ──" après la ligne SSH_KEY est préservé.
+    if [[ -f "${CONF_FILE}.pre_c" ]]; then
+        local preserved
+        preserved="$(awk '/^# ── Réseau/,0' "${CONF_FILE}.pre_c" 2>/dev/null || true)"
+        [[ -n "$preserved" ]] && printf '\n%s\n' "$preserved" >> "$CONF_FILE"
+        rm -f "${CONF_FILE}.pre_c"
+    fi
 
     _ok "Configuration sauvegardée dans ${CONF_FILE}"
     echo ""
@@ -1199,6 +1239,16 @@ do_provision_vms() {
     local randomize="${OMEGA_PROVISION_RANDOMIZE:-1}"
     local recreate_bad="${OMEGA_PROVISION_RECREATE_BAD:-1}"
     local resource_only="${OMEGA_PROVISION_RESOURCE_ONLY:-0}"
+    local net_bridge="${OMEGA_NET_VM_BRIDGE:-}"
+    local net_vlan_tag="${OMEGA_NET_VM_VLAN_TAG:-}"
+    local net_ip_prefix="${OMEGA_NET_VM_IP_PREFIX:-}"
+    local net_ip_start="${OMEGA_NET_VM_IP_START:-101}"
+    local net_vmid_base="${OMEGA_NET_VM_VMID_BASE:-2300}"
+    local net_gateway="${OMEGA_NET_VM_GATEWAY:-}"
+    local net_netmask="${OMEGA_NET_VM_NETMASK:-24}"
+    local net_dns_ip="${OMEGA_NET_VM_DNS_IP:-}"
+    # Le bridge réseau privé (OMEGA_NET_VM_BRIDGE) prend le dessus sur OMEGA_VM_BRIDGE quand défini
+    [[ -n "$net_bridge" ]] && bridge="$net_bridge"
 
     if ! $AUTO; then
         _ask "VMIDs à créer [${provision_vmids}]"
@@ -1289,7 +1339,7 @@ do_provision_vms() {
     fi
 
     [[ -n "$storage" ]] || { _err "Storage vide"; return 1; }
-    [[ -n "$image_remote" ]] || { _err "Image distante vide"; return 1; }
+    [[ -n "$image_remote" || -n "$template_id" ]] || { _err "Image distante vide (ou configurer OMEGA_VM_TEMPLATE_ID)"; return 1; }
     [[ -n "$provision_vmids" ]] || { _err "VMIDs provisioning vides"; return 1; }
     [[ "$cores" =~ ^[0-9]+$ && "$sockets" =~ ^[0-9]+$ && "$vcpus" =~ ^[0-9]+$ && "$randomize" =~ ^[0-9]+$ && "$recreate_bad" =~ ^[0-9]+$ && "$resource_only" =~ ^[0-9]+$ && "$image_prepared" =~ ^[0-9]+$ && "$linked_clone" =~ ^[0-9]+$ ]] || { _err "cores/sockets/vcpus/randomize/recreate/resource_only/image_prepared/linked doivent être numériques"; return 1; }
     if [[ -n "$template_id" && ! "$template_id" =~ ^[0-9]+$ ]]; then
@@ -1373,9 +1423,74 @@ do_provision_vms() {
     [[ "$resource_only" == "1" ]] && args+=(--resource-only)
     [[ -n "$image_local" ]] && args+=(--image-local "$image_local")
     [[ -f "${SSH_KEY:-}" ]] && args+=(--ssh-key "$SSH_KEY")
+    [[ -n "$net_vlan_tag" ]] && args+=(--vm-vlan-tag "$net_vlan_tag")
+    [[ -n "$net_ip_prefix" ]] && args+=(--vm-ip-prefix "$net_ip_prefix" --vm-ip-start "$net_ip_start" --vm-netmask "$net_netmask")
+    [[ -n "$net_gateway" ]] && args+=(--vm-gateway "$net_gateway")
+    [[ -n "$net_dns_ip" ]] && args+=(--vm-dns-ip "$net_dns_ip")
 
+    OMEGA_VM_NODE_DISTRIBUTION="${OMEGA_VM_NODE_DISTRIBUTION}" \
+    OMEGA_VM_NODE_DEFAULT_MAX="${OMEGA_VM_NODE_DEFAULT_MAX}" \
     bash "${SCRIPT_DIR}/provision-omega-vms-remote.sh" "${args[@]}"
     _ok "Provisioning VM terminé"
+
+    # ── Enregistrement DNS automatique des VMs provisionnées ─────────────────
+    # Chaque VM omega reçoit son nom dans la zone pfSense Unbound (idempotent).
+    # Évite l'oubli manuel qui laissait des VMs (ex. omega-test-3001) non résolvables.
+    # Best-effort : n'échoue jamais le provisioning. Le DNS suit le NOM réel de la VM.
+    if [[ -n "${OMEGA_NET_PFSENSE_WAN_IP:-}" ]]; then
+        _info "Enregistrement DNS automatique (zone ${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal})..."
+        local _dns_list dns_vmid v_node v_name v_ip v_label
+        _dns_list="$(_normalize_vmids_spec "$provision_vmids" 2>/dev/null || echo "$provision_vmids")"
+        local _dns_vmids; IFS=',' read -ra _dns_vmids <<< "$_dns_list"
+        for dns_vmid in "${_dns_vmids[@]}"; do
+            [[ "$dns_vmid" =~ ^[0-9]+$ ]] || continue
+            v_node="$(_vm_host_node "$dns_vmid" || true)"
+            [[ -n "$v_node" ]] || { _warn "DNS: VM ${dns_vmid} introuvable, ignorée"; continue; }
+            v_name="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 -o BatchMode=yes \
+                "${DEPLOY_USER}@${v_node}" "qm config ${dns_vmid} 2>/dev/null | sed -n 's/^name: //p'" 2>/dev/null)"
+            [[ -n "$v_name" ]] || v_name="omega-${dns_vmid}"
+            v_ip="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 -o BatchMode=yes \
+                "${DEPLOY_USER}@${v_node}" "qm config ${dns_vmid} 2>/dev/null | sed -n 's/^ipconfig0:.*ip=\([0-9.]*\).*/\1/p'" 2>/dev/null | head -1)"
+            if [[ -z "$v_ip" && -n "${OMEGA_NET_VM_IP_PREFIX:-}" ]]; then
+                v_ip="${OMEGA_NET_VM_IP_PREFIX}.$(( ${OMEGA_NET_VM_IP_START:-101} + dns_vmid - ${OMEGA_NET_VM_VMID_BASE:-3000} ))"
+            fi
+            [[ -n "$v_ip" ]] || { _warn "DNS: pas d'IP pour VM ${dns_vmid} (DHCP ?), ignorée"; continue; }
+            v_label="$(_dns_label "$v_name")"
+            if _dns_pf_a_register "$v_label" "$v_ip"; then
+                _ok "DNS: ${v_label}.${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal} → ${v_ip}"
+            else
+                _warn "DNS: échec enregistrement ${v_label} (${v_ip}) — réessayer via [D]"
+            fi
+        done
+    else
+        _info "DNS: pfSense non configuré (OMEGA_NET_PFSENSE_WAN_IP vide) — enregistrement ignoré"
+    fi
+
+    # Isolation automatique sur tous les nœuds (backend OVS ou iptables auto-détecté).
+    # On déploie d'abord vm-isolation.sh pour ne dépendre d'aucune étape manuelle.
+    _info "Initialisation automatique de l'isolation sur les nœuds (OVS/iptables auto)..."
+    local subnet="${OMEGA_NET_VM_IP_PREFIX:-10.50.30}.0/${OMEGA_NET_VM_NETMASK:-24}"
+    local iso_gw="${OMEGA_NET_VM_GATEWAY:-10.50.30.1}"
+    local iso_bridge="${OMEGA_NET_VM_BRIDGE:-${OMEGA_VM_BRIDGE:-vmbr1}}"
+    _deploy_isolation_script   # déploie vm-isolation.sh sur tous les nœuds
+    local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+    for node in "${nodes_arr[@]}"; do
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+            script=/opt/omega-remote-paging/scripts/vm-isolation.sh
+            [[ -x \"\$script\" ]] || script=/opt/vm-isolation.sh
+            if [[ -x \"\$script\" ]]; then
+                bash \"\$script\" --action init --subnet '${subnet}' --gateway '${iso_gw}' --bridge '${iso_bridge}' 2>/dev/null || true
+                bash \"\$script\" --action save --bridge '${iso_bridge}' 2>/dev/null || true
+            fi
+        " 2>/dev/null || true
+    done
+
+    # Synchroniser automatiquement /etc/hosts + routes + pfSense Unbound
+    _info "Synchronisation DNS/hosts automatique après provisioning..."
+    AUTO=true do_sync_hosts
+
+    # Placement automatique (migration hors nœud sans KVM) : assuré en continu par
+    # le contrôleur Omega (migration_daemon + policy_engine, éligibilité kvm_capable).
 }
 
 do_build() {
@@ -1404,10 +1519,24 @@ do_install_qga_watchdog() {
     _need_config || return
     _hdr "══ Installation watchdog QGA ══"
     local nodes="${OMEGA_QGA_WATCHDOG_NODES:-$OMEGA_NODES}"
-    local vmids="${OMEGA_QGA_WATCHDOG_VMIDS:-}"
+    # Par défaut on garde les VMs de test prêtes (conformes + démarrées).
+    local vmids="${OMEGA_QGA_WATCHDOG_VMIDS:-${OMEGA_TEST_VMIDS:-}}"
     local root_password="${OMEGA_QGA_WATCHDOG_ROOT_PASSWORD:-${OMEGA_VM_ROOT_PASSWORD:-root}}"
     local reset_stuck="${OMEGA_QGA_WATCHDOG_RESET_STUCK:-0}"
     local interval="${OMEGA_QGA_WATCHDOG_INTERVAL_SECS:-60}"
+    local ensure_conformant="${OMEGA_QGA_WATCHDOG_ENSURE_CONFORMANT:-1}"
+    local autostart="${OMEGA_QGA_WATCHDOG_AUTOSTART:-}"
+    local vcpu_max="${OMEGA_QGA_WATCHDOG_VCPU_MAX:-${OMEGA_VM_CORES:-4}}"
+    local balloon_min="${OMEGA_QGA_WATCHDOG_BALLOON_MIN:-${OMEGA_VM_BALLOON:-512}}"
+    # VMs d'infra (pfSense/DNS) : autostart-only — gardées allumées, config jamais touchée.
+    # Tout le réseau OMEGA (gateway/DNS/internet) en dépend.
+    local infra_vmids="${OMEGA_QGA_WATCHDOG_INFRA_VMIDS:-}"
+    if [[ -z "$infra_vmids" ]]; then
+        local _iv=()
+        [[ -n "${OMEGA_NET_PFSENSE_VMID:-}" ]] && _iv+=("$OMEGA_NET_PFSENSE_VMID")
+        [[ -n "${OMEGA_NET_DNS_VMID:-}" ]] && _iv+=("$OMEGA_NET_DNS_VMID")
+        infra_vmids="$(IFS=,; echo "${_iv[*]}")"
+    fi
 
     echo -e "  Agent systemd installé sur les nœuds Proxmox ciblés."
     echo -e "  Il vérifie QGA périodiquement et répare l'invité via SSH si une IP est visible."
@@ -1455,6 +1584,7 @@ do_install_qga_watchdog() {
     echo -e "  ${BOLD}Résumé watchdog QGA${RESET}"
     echo -e "    Nœuds      : ${CYAN}${nodes}${RESET}"
     echo -e "    VMIDs      : ${CYAN}${vmids:-tags omega locaux}${RESET}"
+    echo -e "    Infra      : ${CYAN}${infra_vmids:-aucune}${RESET} ${DIM}(autostart-only — pfSense/DNS)${RESET}"
     echo -e "    Intervalle : ${CYAN}${interval}s${RESET}"
     echo -e "    Reset auto : ${CYAN}${reset_stuck}${RESET}"
     echo ""
@@ -1464,14 +1594,22 @@ do_install_qga_watchdog() {
         [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Installation watchdog annulée."; return; }
     fi
 
-    bash "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" \
-        --nodes "$nodes" \
-        --user "$DEPLOY_USER" \
-        --root-password "$root_password" \
-        --vmids "$vmids" \
-        --reset-stuck "$reset_stuck" \
+    local wd_args=(
+        --nodes "$nodes"
+        --user "$DEPLOY_USER"
+        --root-password "$root_password"
+        --vmids "$vmids"
+        --infra-vmids "$infra_vmids"
+        --reset-stuck "$reset_stuck"
         --interval "$interval"
-    _ok "Watchdog QGA installé"
+        --ensure-conformant "$ensure_conformant"
+        --vcpu-max "$vcpu_max"
+        --balloon-min "$balloon_min"
+    )
+    [[ -n "$autostart" ]] && wd_args+=(--autostart "$autostart")
+    [[ -f "${SSH_KEY:-}" ]] && wd_args+=(--ssh-key "$SSH_KEY")
+    bash "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" "${wd_args[@]}"
+    _ok "Watchdog readiness/conformité installé (VMs: ${vmids:-auto omega}, conformant=${ensure_conformant}, vcpu_max=${vcpu_max})"
 }
 
 do_uninstall() {
@@ -1515,6 +1653,1103 @@ do_deploy() {
     bash "${SCRIPT_DIR}/deploy.sh"
     _ok "Déploiement terminé"
     _sync
+}
+
+do_vm_internet() {
+    _need_config || return
+    _hdr "══ Accès internet d'une VM ══"
+    echo -e "  pfSense : ${CYAN}${OMEGA_NET_PFSENSE_WAN_IP:-?}${RESET}"
+    echo ""
+    local action vmid
+    _ask "Action [enable/disable/list]"
+    read -r action
+    action="${action:-list}"
+    case "$action" in
+        list)
+            bash "${SCRIPT_DIR}/vm-internet.sh" --list ;;
+        enable|disable)
+            _ask "VMID de la VM (ex: 2300) ou IP directe"
+            read -r vmid
+            if [[ "$vmid" =~ ^[0-9]{1,4}$ ]]; then
+                bash "${SCRIPT_DIR}/vm-internet.sh" --vmid "$vmid" "--${action}"
+            else
+                bash "${SCRIPT_DIR}/vm-internet.sh" --ip "$vmid" "--${action}"
+            fi ;;
+        *) _warn "Action invalide : $action" ;;
+    esac
+}
+
+do_vm_link() {
+    _need_config || return
+    _hdr "══ Liens entre VMs ══"
+    echo -e "  ${BOLD}Paire${RESET}  : A↔B sans que A↔C ou B↔C ne soient affectés."
+    echo -e "  ${BOLD}Groupe${RESET} : maillage complet entre N VMs (toutes les paires du groupe)."
+    echo -e "  pfSense : ${CYAN}${OMEGA_NET_PFSENSE_WAN_IP:-?}${RESET}"
+    echo ""
+    local action mode
+    _ask "Action [enable/disable/list]"
+    read -r action
+    action="${action:-list}"
+
+    case "$action" in
+        list)
+            _ask "Filtrer par VMID (laisser vide = tout) ou nom de groupe"
+            read -r filter
+            if [[ -z "$filter" ]]; then
+                bash "${SCRIPT_DIR}/vm-link.sh" --list
+            elif [[ "$filter" =~ ^[0-9] ]]; then
+                bash "${SCRIPT_DIR}/vm-link.sh" --list --vmid "$filter"
+            else
+                bash "${SCRIPT_DIR}/vm-link.sh" --list --group-name "$filter"
+            fi ;;
+
+        enable|disable)
+            _ask "Mode [paire/groupe]"
+            read -r mode
+            mode="${mode:-paire}"
+            local args=("--${action}")
+
+            case "$mode" in
+                groupe|group)
+                    _ask "VMIDs ou IPs séparés par virgule (ex: 2300,2301,2302)"
+                    read -r members
+                    args+=(--group "$members")
+                    _ask "Nom du groupe (optionnel, recommandé pour le désactiver plus tard)"
+                    read -r gname
+                    [[ -n "$gname" ]] && args+=(--group-name "$gname")
+                    bash "${SCRIPT_DIR}/vm-link.sh" "${args[@]}"
+                    ;;
+                paire|pair|*)
+                    _ask "VMID ou IP de la VM A"
+                    read -r a
+                    _ask "VMID ou IP de la VM B"
+                    read -r b
+                    [[ "$a" =~ ^[0-9]+\. ]] && args+=(--ip-a "$a") || args+=(--vmid-a "$a")
+                    [[ "$b" =~ ^[0-9]+\. ]] && args+=(--ip-b "$b") || args+=(--vmid-b "$b")
+                    bash "${SCRIPT_DIR}/vm-link.sh" "${args[@]}"
+                    ;;
+            esac ;;
+
+        *) _warn "Action invalide : $action" ;;
+    esac
+}
+
+# ── Modifier les caractéristiques d'une VM existante ──────────────────────────
+# Reconfigure vCPU max (cores), RAM max, balloon, disque, VRAM GPU, nom — et
+# RÉÉCRIT les métadonnées omega_* de la description de façon cohérente, sinon le
+# watchdog de conformité (ensure_conformant) réverterait les changements.
+do_vm_reconfigure() {
+    _need_config || return
+    _hdr "══ Modifier les caractéristiques d'une VM ══"
+
+    local vmid node cfg
+    _ask "VMID de la VM à modifier"
+    read -r vmid
+    [[ "$vmid" =~ ^[0-9]+$ ]] || { _warn "VMID invalide : '$vmid'"; return; }
+
+    node="$(_vm_host_node "$vmid" || true)"
+    [[ -n "$node" ]] || { _warn "VM $vmid introuvable dans le cluster."; return; }
+
+    cfg="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 "${DEPLOY_USER}@${node}" \
+        "qm config $vmid" 2>/dev/null || true)"
+    [[ -n "$cfg" ]] || { _warn "Impossible de lire la config de la VM $vmid sur $node."; return; }
+
+    # ── Valeurs actuelles ─────────────────────────────────────────────────────
+    local cur_name cur_cores cur_sockets cur_mem cur_balloon cur_desc cur_status
+    cur_name="$(printf '%s\n' "$cfg"    | awk -F': ' '$1=="name"{print $2; exit}')"
+    cur_cores="$(printf '%s\n' "$cfg"   | awk '/^cores:/{print $2; exit}')";     cur_cores="${cur_cores:-1}"
+    cur_sockets="$(printf '%s\n' "$cfg" | awk '/^sockets:/{print $2; exit}')";   cur_sockets="${cur_sockets:-1}"
+    cur_mem="$(printf '%s\n' "$cfg"     | awk '/^memory:/{print $2; exit}')";    cur_mem="${cur_mem:-2048}"
+    cur_balloon="$(printf '%s\n' "$cfg" | awk '/^balloon:/{print $2; exit}')";   cur_balloon="${cur_balloon:-0}"
+    cur_desc="$(printf '%s\n' "$cfg"    | awk -F': ' '$1=="description"{print $2; exit}')"
+    local cur_maxvcpu=$(( cur_cores * cur_sockets ))
+    local cur_disk cur_vram
+    cur_disk="$(printf '%s\n' "$cur_desc" | grep -o 'omega_disk_max_gib=[0-9]*' | head -1 | cut -d= -f2)"; cur_disk="${cur_disk:-20}"
+    cur_vram="$(printf '%s\n' "$cur_desc" | grep -o 'omega_gpu_vram_mib=[0-9]*' | head -1 | cut -d= -f2)"; cur_vram="${cur_vram:-0}"
+    cur_status="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 "${DEPLOY_USER}@${node}" \
+        "qm status $vmid" 2>/dev/null | awk '{print $2}')"
+
+    echo ""
+    echo -e "  VM ${CYAN}${vmid}${RESET} (${cur_name:-sans-nom}) sur nœud ${CYAN}${node}${RESET} — état ${CYAN}${cur_status:-?}${RESET}"
+    echo -e "    vCPU max   : ${CYAN}${cur_maxvcpu}${RESET} ${DIM}(cores=${cur_cores} × sockets=${cur_sockets})${RESET}"
+    echo -e "    RAM max    : ${CYAN}${cur_mem} MiB${RESET}    balloon (min) : ${CYAN}${cur_balloon} MiB${RESET}"
+    echo -e "    Disque max : ${CYAN}${cur_disk} GiB${RESET}   VRAM GPU : ${CYAN}${cur_vram} MiB${RESET}"
+    echo -e "  ${DIM}Laisser vide = conserver la valeur actuelle.${RESET}"
+    echo ""
+
+    local new_name new_maxvcpu new_mem new_balloon new_disk new_vram
+    _ask "Nom [${cur_name:-—}]";                 read -r new_name;    new_name="${new_name:-$cur_name}"
+    _ask "vCPU max / cores [${cur_maxvcpu}]";     read -r new_maxvcpu; new_maxvcpu="${new_maxvcpu:-$cur_maxvcpu}"
+    _ask "RAM max MiB [${cur_mem}]";              read -r new_mem;     new_mem="${new_mem:-$cur_mem}"
+    _ask "Balloon min MiB [${cur_balloon}]";      read -r new_balloon; new_balloon="${new_balloon:-$cur_balloon}"
+    _ask "Disque max GiB (≥ actuel, ${cur_disk})";read -r new_disk;    new_disk="${new_disk:-$cur_disk}"
+    _ask "VRAM GPU MiB [${cur_vram}]";            read -r new_vram;    new_vram="${new_vram:-$cur_vram}"
+
+    # Validation numérique.
+    local v
+    for v in new_maxvcpu new_mem new_balloon new_disk new_vram; do
+        [[ "${!v}" =~ ^[0-9]+$ ]] || { _warn "Valeur non numérique pour $v : '${!v}'"; return; }
+    done
+    [[ "$new_maxvcpu" -ge 1 ]] || { _warn "vCPU max doit être ≥ 1."; return; }
+    [[ "$new_balloon" -le "$new_mem" ]] || { _warn "balloon ($new_balloon) > RAM max ($new_mem) — impossible."; return; }
+    if [[ "$new_disk" -lt "$cur_disk" ]]; then
+        _warn "Le disque ne peut que grandir (actuel ${cur_disk} GiB, demandé ${new_disk} GiB). Réduction ignorée."
+        new_disk="$cur_disk"
+    fi
+
+    # Description omega_* cohérente (consommée par le watchdog de conformité + test 30).
+    local new_desc="omega_min_vcpus=1 omega_max_vcpus=${new_maxvcpu} omega_memory_min_mib=${new_balloon} omega_memory_max_mib=${new_mem} omega_disk_max_gib=${new_disk} omega_gpu_vram_mib=${new_vram}"
+
+    echo ""
+    echo -e "  ${BOLD}Nouvelle configuration :${RESET}"
+    echo -e "    Nom        : ${CYAN}${new_name:-—}${RESET}"
+    echo -e "    vCPU max   : ${CYAN}${new_maxvcpu}${RESET}  RAM max : ${CYAN}${new_mem} MiB${RESET}  balloon : ${CYAN}${new_balloon} MiB${RESET}"
+    echo -e "    Disque max : ${CYAN}${new_disk} GiB${RESET}  VRAM GPU : ${CYAN}${new_vram} MiB${RESET}"
+    echo -e "    ${DIM}(hotplug cpu,disk,network conservé · vcpus=1 au boot · description omega_* réécrite)${RESET}"
+    echo ""
+    if [[ "$new_maxvcpu" != "$cur_maxvcpu" || "$new_mem" != "$cur_mem" ]] && [[ "$cur_status" == "running" ]]; then
+        echo -e "  ${YELLOW}Note :${RESET} changer vCPU max / RAM max prend effet au ${BOLD}prochain démarrage${RESET} (un redémarrage sera proposé)."
+        echo ""
+    fi
+
+    if ! $AUTO; then
+        read -rp "  Appliquer ces changements sur VM ${vmid} (${node}) ? [oui/N] " confirm
+        [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Modification annulée."; return; }
+    fi
+
+    # qm set : on impose hotplug + vcpus=1 + agent, comme le profil omega standard.
+    local set_args=(set "$vmid"
+        --cores "$new_maxvcpu" --sockets 1 --vcpus 1
+        --hotplug cpu,disk,network --numa 0
+        --memory "$new_mem" --balloon "$new_balloon"
+        --agent enabled=1
+        --description "$new_desc")
+    [[ -n "$new_name" ]] && set_args+=(--name "$new_name")
+
+    if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=20 "${DEPLOY_USER}@${node}" \
+        "qm $(printf '%q ' "${set_args[@]}")" >/dev/null 2>&1; then
+        _ok "Caractéristiques mises à jour (cores=${new_maxvcpu} mem=${new_mem} balloon=${new_balloon})."
+    else
+        _warn "Échec de qm set sur ${node}. Vérifier l'état de la VM."
+        return
+    fi
+
+    # ── Synchronisation DNS sur changement de nom ─────────────────────────────
+    # L'IP de la VM est stable (ipconfig0 / dérivée du VMID) : on déplace le
+    # A-record <ancien-nom> → <nouveau-nom> vers la même IP, et on met à jour
+    # registre + /etc/hosts sur tous les nœuds.
+    if [[ -n "$new_name" && "$new_name" != "$cur_name" ]]; then
+        local domain="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
+        local vm_ip old_label new_label
+        vm_ip="$(printf '%s\n' "$cfg" | sed -n 's/^ipconfig0:.*ip=\([0-9.]*\).*/\1/p' | head -1)"
+        if [[ -z "$vm_ip" && -n "${OMEGA_NET_VM_IP_PREFIX:-}" ]]; then
+            local last=$(( ${OMEGA_NET_VM_IP_START:-101} + vmid - ${OMEGA_NET_VM_VMID_BASE:-3000} ))
+            vm_ip="${OMEGA_NET_VM_IP_PREFIX}.${last}"
+        fi
+        new_label="$(_dns_label "$new_name")"
+        old_label="$(_dns_label "${cur_name:-}")"
+        if [[ -z "$vm_ip" ]]; then
+            _warn "IP de la VM indéterminée — DNS non synchronisé (enregistrer à la main via [D])."
+        elif [[ -z "$new_label" ]]; then
+            _warn "Nouveau nom non convertible en label DNS — DNS non synchronisé."
+        else
+            [[ "$new_label" != "$new_name" ]] && _info "Nom DNS normalisé : ${new_name} → ${new_label}"
+            [[ -n "$old_label" && "$old_label" != "$new_label" ]] && _dns_pf_a_delete "$old_label"
+            if _dns_pf_a_register "$new_label" "$vm_ip"; then
+                _ok "DNS synchronisé : ${new_label}.${domain} → ${vm_ip}"
+            else
+                _warn "Sync DNS échouée (pfSense joignable ? SSH configuré via [F] ?)."
+            fi
+        fi
+    fi
+
+    # Resize disque (croissance uniquement) si demandé.
+    if [[ "$new_disk" -gt "$cur_disk" ]]; then
+        if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 "${DEPLOY_USER}@${node}" \
+            "qm resize $vmid scsi0 ${new_disk}G" >/dev/null 2>&1; then
+            _ok "Disque scsi0 agrandi à ${new_disk} GiB."
+        else
+            _warn "Échec du resize disque (scsi0 → ${new_disk}G). À vérifier manuellement."
+        fi
+    fi
+
+    # Redémarrage si nécessaire pour appliquer maxcpus/maxmem.
+    if [[ "$new_maxvcpu" != "$cur_maxvcpu" || "$new_mem" != "$cur_mem" ]] && [[ "$cur_status" == "running" ]] && ! $AUTO; then
+        read -rp "  Redémarrer la VM ${vmid} maintenant pour appliquer vCPU/RAM max ? [oui/N] " reboot
+        if [[ "$reboot" =~ ^[Oo]([Uu][Ii])?$ ]]; then
+            ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 "${DEPLOY_USER}@${node}" \
+                "qm reboot $vmid" >/dev/null 2>&1 \
+                && _ok "Redémarrage demandé." \
+                || _warn "Échec du reboot — redémarrer manuellement (qm reboot $vmid)."
+        else
+            _info "Changements vCPU/RAM max actifs au prochain démarrage."
+        fi
+    fi
+}
+
+do_build_images() {
+    _need_config || return
+    _hdr "══ Construction du template VM base (VMID ${OMEGA_VM_TEMPLATE_ID:-9001}) ══"
+    echo -e "  Télécharge Debian 12 cloud image sur le contrôleur, patch QGA/cloud-init, crée template RBD."
+    echo -e "  Contrôleur : ${CYAN}${CONTROLLER_NODE}${RESET}"
+    echo -e "  Template   : ${CYAN}VMID ${OMEGA_VM_TEMPLATE_ID:-9001}${RESET} → clone en ~4s, QGA en ~50s"
+    echo ""
+
+    local tmpl_id="${OMEGA_VM_TEMPLATE_ID:-9001}"
+    local storage="${OMEGA_VM_STORAGE:-local}"
+    local img_remote="${OMEGA_VM_IMAGE_REMOTE:-/var/lib/vz/template/iso/omega-base-debian12.qcow2}"
+    local img_url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+
+    # Vérifier si le template existe déjà
+    if ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+        "qm status ${tmpl_id} 2>/dev/null" >/dev/null 2>&1; then
+        if ! $AUTO; then
+            read -rp "  Template ${tmpl_id} déjà présent. Reconstruire ? [o/N] " rebuild
+            [[ "${rebuild,,}" =~ ^o ]] || { _info "Template conservé."; return; }
+        fi
+    fi
+
+    if ! $AUTO; then
+        read -rp "  Lancer la construction du template ? [oui/N] " confirm
+        [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Annulé."; return; }
+    fi
+
+    _info "Construction du template sur ${CONTROLLER_NODE}..."
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${CONTROLLER_NODE}" "
+set -e
+IMG='${img_remote}'
+TMPL_ID='${tmpl_id}'
+STORAGE='${storage}'
+
+# 1. Télécharger l'image si absente
+if [ ! -f \"\$IMG\" ]; then
+    echo '[1/5] Téléchargement Debian 12 cloud image...'
+    wget -q -O \"\$IMG\" '${img_url}' && echo 'Téléchargé ✓' || { echo 'ERREUR téléchargement'; exit 1; }
+else
+    echo '[1/5] Image Debian 12 déjà présente'
+fi
+
+# 2. libguestfs
+echo '[2/5] Vérification libguestfs...'
+command -v virt-customize >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y libguestfs-tools -qq
+
+# 3. Télécharger .deb bookworm compatibles et patcher l'image
+echo '[3/5] Patch image (QGA + cloud-init + sr_mod + net.ifnames=0)...'
+mkdir -p /tmp/omega-bookworm-debs && cd /tmp/omega-bookworm-debs
+[ -f qemu-guest-agent*.deb ] || wget -q \"\$(curl -s 'https://packages.debian.org/bookworm/amd64/qemu-guest-agent/download' | grep -o 'http://[^\"]*amd64.deb' | head -1)\" -O qga.deb
+[ -f cloud-init*.deb ] || wget -q \"\$(curl -s 'https://packages.debian.org/bookworm/all/cloud-init/download' | grep -o 'http://[^\"]*all.deb' | head -1)\" -O cloud-init.deb
+tar -cf /tmp/omega-bookworm-debs.tar -C /tmp/omega-bookworm-debs .
+
+LIBGUESTFS_BACKEND=direct virt-customize -a \"\$IMG\" \\
+    --upload /tmp/omega-bookworm-debs.tar:/tmp/debs.tar \\
+    --run-command 'mkdir -p /tmp/debs && tar -xf /tmp/debs.tar -C /tmp/debs' \\
+    --run-command 'dpkg -i /tmp/debs/qga.deb || true' \\
+    --run-command 'dpkg -i /tmp/debs/cloud-init.deb || true' \\
+    --run-command 'systemctl enable qemu-guest-agent' \\
+    --run-command 'ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service 2>/dev/null || true' \\
+    --run-command 'echo sr_mod >> /etc/initramfs-tools/modules; echo cdrom >> /etc/initramfs-tools/modules; update-initramfs -u -k all 2>/dev/null || true' \\
+    --edit '/etc/default/grub:s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"net.ifnames=0 biosdevname=0 /' \\
+    --run-command 'update-grub 2>/dev/null || true' \\
+    --run-command 'mkdir -p /etc/cloud/cloud.cfg.d && echo \"datasource_list: [NoCloud, None]\" > /etc/cloud/cloud.cfg.d/99-proxmox.cfg' \\
+    --run-command 'rm -rf /tmp/debs /tmp/debs.tar' \\
+    2>&1 | grep -E 'Finishing|error|Error' || true
+echo 'Image patchée ✓'
+
+# 4. Créer le template Proxmox
+echo '[4/5] Création template Proxmox VMID \$TMPL_ID...'
+qm destroy \$TMPL_ID --purge --destroy-unreferenced-disks 1 2>/dev/null || true
+qm create \$TMPL_ID \\
+    --name omega-template-base --ostype l26 --machine q35 \\
+    --agent enabled=1 --cpu kvm64 --cores 2 --memory 2048 \\
+    --scsihw virtio-scsi-single \\
+    --net0 'virtio,bridge=vmbr1,firewall=0' \\
+    --serial0 socket --vga serial0 --tags 'omega,template' --ciupgrade 0
+qm importdisk \$TMPL_ID \"\$IMG\" \$STORAGE 2>&1 | tail -1
+qm set \$TMPL_ID --scsi0 \"\$STORAGE:vm-\${TMPL_ID}-disk-0,discard=on,iothread=1\" \\
+    --boot order=scsi0
+# Marquer comme préparé pour provision-omega-vms-remote.sh
+qm set \$TMPL_ID --description 'omega_template_prepared=1'
+qm template \$TMPL_ID
+echo '[5/5] Template \$TMPL_ID prêt ✓'
+qm list | grep \$TMPL_ID
+" 2>&1 | grep -v "% complete" | grep -v "^$"
+
+    local rc=$?
+    [[ $rc -eq 0 ]] && _ok "Template ${tmpl_id} opérationnel — clones via [p]" || _err "Échec construction template (rc=$rc)"
+}
+
+do_sync_hosts() {
+    _need_config || return
+    _hdr "══ Sync /etc/hosts + routes Omega sur tous les nœuds ══"
+
+    local domain="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
+    local prefix="${OMEGA_NET_VM_IP_PREFIX:-10.50.30}"
+    local netmask="${OMEGA_NET_VM_NETMASK:-24}"
+    local pfsense_wan="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+    local vmid_base="${OMEGA_NET_VM_VMID_BASE:-3000}"
+    local ip_start="${OMEGA_NET_VM_IP_START:-101}"
+    local vmids_str="${OMEGA_PROVISION_VMIDS:-}"
+    local storage="${OMEGA_VM_STORAGE:-stockage.ceph}"
+
+    # Découvrir les VMs omega réellement présentes dans le cluster
+    _info "Découverte des VMs omega dans le cluster..."
+    local vm_list
+    vm_list="$(ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${CONTROLLER_NODE}" "
+pvesh get /cluster/resources --type vm --output-format json 2>/dev/null
+" 2>/dev/null | python3 -c "
+import json,sys
+vms=json.load(sys.stdin)
+for v in sorted(vms, key=lambda x:x.get('vmid',0)):
+    if v.get('tags','') and 'omega' in v.get('tags','') and v.get('vmid',0) >= 3000:
+        print(v['vmid'], v.get('name','?'))
+" 2>/dev/null || true)"
+
+    if [[ -z "$vm_list" ]]; then
+        _warn "Aucune VM omega trouvée dans le cluster (tags:omega, VMID>=3000)"
+        return
+    fi
+
+    echo -e "  VMs omega détectées :"
+    local hosts_block="# omega-${domain}-begin"
+    while IFS=' ' read -r vmid name; do
+        local ip_last=$(( ip_start + vmid - vmid_base ))
+        local ip="${prefix}.${ip_last}"
+        echo -e "    ${CYAN}${vmid}${RESET}  ${name}.${domain}  →  ${ip}"
+        hosts_block+=$'\n'"${ip}  ${name}.${domain}  ${name}"
+    done <<< "$vm_list"
+    hosts_block+=$'\n'"# omega-${domain}-end"
+
+    echo ""
+    if ! $AUTO; then
+        read -rp "  Mettre à jour /etc/hosts sur tous les nœuds Proxmox ? [oui/N] " confirm
+        [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Annulé."; return; }
+    fi
+
+    # Pousser sur tous les nœuds
+    local nodes_arr
+    IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+    for node in "${nodes_arr[@]}"; do
+        echo -n "  ${node} : "
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+# Supprimer ancienne section omega
+sed -i '/# omega-${domain}-begin/,/# omega-${domain}-end/d' /etc/hosts 2>/dev/null || true
+# Ajouter nouvelle section
+printf '%s\n' '${hosts_block}' >> /etc/hosts
+# Route vers VMs omega via pfSense
+ip route replace ${prefix}.0/${netmask} via ${pfsense_wan} 2>/dev/null || true
+# Persister la route
+grep -q '${prefix}.0' /etc/network/interfaces 2>/dev/null || \
+    printf '\nup ip route add ${prefix}.0/${netmask} via ${pfsense_wan} 2>/dev/null || true\n' \
+    >> /etc/network/interfaces 2>/dev/null || true
+echo OK
+" 2>/dev/null && echo -e "${GREEN}OK${RESET}" || echo -e "${RED}ECHEC${RESET}"
+    done
+
+    # Mettre aussi à jour pfSense Unbound
+    _info "Mise à jour pfSense Unbound host overrides..."
+    local pf_script="/tmp/omega_pf_hosts_$$.php"
+    {
+    echo "<?php"
+    echo "require_once('config.inc'); require_once('unbound.inc'); require_once('util.inc');"
+    echo "if (!isset(\$config['unbound']['hosts'])) \$config['unbound']['hosts'] = array();"
+    echo "\$domain = '${domain}';"
+    echo "\$added = 0;"
+    while IFS=' ' read -r vmid name; do
+        local ip_last=$(( ip_start + vmid - vmid_base ))
+        local ip="${prefix}.${ip_last}"
+        echo "\$vms[] = array('host'=>'${name}','ip'=>'${ip}');"
+    done <<< "$vm_list"
+    cat << 'PHPEOF'
+foreach ($vms as $vm) {
+    $exists = false;
+    foreach ($config['unbound']['hosts'] as $h) {
+        if ($h['host']===$vm['host'] && $h['domain']===$domain) { $exists=true; break; }
+    }
+    if (!$exists) {
+        $config['unbound']['hosts'][] = array(
+            'host'=>$vm['host'],'domain'=>$domain,'ip'=>$vm['ip'],
+            'descr'=>'Omega VM '.$vm['host'],'aliases'=>'');
+        $added++;
+        echo "Ajouté: ".$vm['host'].".".$domain." -> ".$vm['ip']."\n";
+    }
+}
+if ($added>0) { write_config("Omega VM hosts"); services_unbound_configure(); echo "Unbound rechargé\n"; }
+else { echo "Déjà à jour\n"; }
+PHPEOF
+    } > "$pf_script"
+    scp "${SSH_OPTS[@]/#-i/-i}" "$pf_script" \
+        "${OMEGA_NET_PFSENSE_SSH_USER:-admin}@${pfsense_wan}:/tmp/omega_pf_hosts.php" 2>/dev/null && \
+    ssh "${SSH_OPTS[@]}" "${OMEGA_NET_PFSENSE_SSH_USER:-admin}@${pfsense_wan}" \
+        "php /tmp/omega_pf_hosts.php && rm /tmp/omega_pf_hosts.php" 2>/dev/null \
+        && _ok "pfSense Unbound mis à jour" \
+        || _warn "pfSense Unbound non mis à jour (SSH non configuré ? → [F])"
+    rm -f "$pf_script"
+
+    _ok "Synchronisation terminée — nœuds Proxmox peuvent résoudre les VMs omega par nom"
+}
+
+do_setup_pfsense_ssh() {
+    _need_config || return
+    _hdr "══ Configuration SSH pfSense (clé omega) ══"
+    local pfsense_ip="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+    local pfsense_user="${OMEGA_NET_PFSENSE_SSH_USER:-admin}"
+    local pub_key="${SSH_KEY}.pub"
+    [[ -f "$pub_key" ]] || fail "Clé publique introuvable : $pub_key"
+    echo -e "  pfSense : ${CYAN}${pfsense_ip}${RESET}"
+    echo -e "  Clé     : ${CYAN}${pub_key}${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Prérequis${RESET} : SSH doit être activé sur pfSense."
+    echo -e "  Console pfSense → option ${BOLD}14${RESET} (Enable Secure Shell)"
+    echo ""
+    _ask "Mot de passe admin pfSense"
+    read -rs pf_pass
+    echo ""
+    if command -v sshpass >/dev/null 2>&1; then
+        sshpass -p "$pf_pass" ssh-copy-id \
+            -i "$pub_key" \
+            -o StrictHostKeyChecking=accept-new \
+            -p "${OMEGA_NET_PFSENSE_SSH_PORT:-22}" \
+            "${pfsense_user}@${pfsense_ip}" 2>/dev/null \
+            && _ok "Clé SSH copiée sur pfSense" \
+            || _err "Échec — vérifier que SSH est activé sur pfSense (option 14)"
+    else
+        # Sans sshpass : copie manuelle via pipe
+        local key_content; key_content="$(cat "$pub_key")"
+        echo "$pf_pass" | ssh \
+            -o StrictHostKeyChecking=accept-new \
+            -o PasswordAuthentication=yes \
+            -p "${OMEGA_NET_PFSENSE_SSH_PORT:-22}" \
+            "${pfsense_user}@${pfsense_ip}" \
+            "mkdir -p /root/.ssh && echo '${key_content}' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" 2>/dev/null \
+            && _ok "Clé SSH copiée sur pfSense" \
+            || {
+                _warn "sshpass absent — copie manuelle."
+                echo -e "  Lance dans pfSense console (option 8 Shell) :"
+                echo -e "  ${CYAN}mkdir -p /root/.ssh && echo '$(cat "$pub_key")' >> /root/.ssh/authorized_keys${RESET}"
+            }
+    fi
+    # Tester la connexion
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+        -p "${OMEGA_NET_PFSENSE_SSH_PORT:-22}" \
+        "${pfsense_user}@${pfsense_ip}" "hostname" 2>/dev/null \
+        && _ok "Connexion SSH pfSense fonctionnelle — [w] et [k] opérationnels" \
+        || _warn "Test SSH échoué — relancer après avoir activé SSH sur pfSense"
+}
+
+# Normalise une chaîne en label DNS valide (minuscules, [a-z0-9-], pas de tiret en bord).
+_dns_label() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+        | sed 's/-\{2,\}/-/g; s/^-*//; s/-*$//'
+}
+
+# Crée/met à jour un A-record <name> → <ip> sur pfSense Unbound + registre + /etc/hosts.
+# Idempotent (retire d'abord tout A-record existant pour ce host). Réutilisé par [m].
+_dns_pf_a_register() {  # <name> <ip>
+    local name="$1" ip="$2"
+    [[ -n "$name" && -n "$ip" ]] || return 1
+    local domain="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
+    local pfsense_ip="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+    local pfsense_user="${OMEGA_NET_PFSENSE_SSH_USER:-admin}"
+    local registry="/etc/omega/dns-registry.json"
+    local pf; pf=$(mktemp)
+    cat > "$pf" << PHPEOF
+<?php
+require_once('config.inc'); require_once('unbound.inc'); require_once('util.inc');
+if (!isset(\$config['unbound']['hosts'])) \$config['unbound']['hosts'] = [];
+\$domain='${domain}'; \$host='${name}'; \$ip='${ip}';
+\$config['unbound']['hosts'] = array_values(array_filter(\$config['unbound']['hosts'],
+    fn(\$h) => !(\$h['host']===\$host && \$h['domain']===\$domain)));
+\$config['unbound']['hosts'][] = ['host'=>\$host,'domain'=>\$domain,'ip'=>\$ip,
+    'descr'=>'Omega VM '.\$host,'aliases'=>''];
+write_config("DNS sync \$host.\$domain");
+services_unbound_configure();
+echo "A: \$host.\$domain -> \$ip\n";
+PHPEOF
+    local rc=1
+    scp "${SSH_OPTS[@]/#-i/-i}" "$pf" "${pfsense_user}@${pfsense_ip}:/tmp/dns_sync.php" 2>/dev/null \
+        && ssh "${SSH_OPTS[@]}" "${pfsense_user}@${pfsense_ip}" \
+            "php /tmp/dns_sync.php && rm -f /tmp/dns_sync.php" >/dev/null 2>&1 && rc=0
+    rm -f "$pf"
+    local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+    local node
+    for node in "${nodes_arr[@]}"; do
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+            mkdir -p /etc/omega
+            python3 -c \"
+import json,os
+f='${registry}'
+reg=json.load(open(f)) if os.path.exists(f) else []
+reg=[e for e in reg if e.get('name')!='${name}']
+reg.append({'name':'${name}','ip':'${ip}','port':None,'proto':'tcp'})
+json.dump(reg,open(f,'w'),indent=2)
+\" 2>/dev/null || true
+            sed -i '/ ${name}\$/d; /${name}\\.${domain}/d' /etc/hosts 2>/dev/null || true
+            echo '${ip}  ${name}.${domain}  ${name}' >> /etc/hosts
+        " 2>/dev/null || true
+    done
+    return $rc
+}
+
+# Supprime un A-record <name> de pfSense Unbound + registre + /etc/hosts. Réutilisé par [m].
+_dns_pf_a_delete() {  # <name>
+    local name="$1"
+    [[ -n "$name" ]] || return 0
+    local domain="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
+    local pfsense_ip="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+    local pfsense_user="${OMEGA_NET_PFSENSE_SSH_USER:-admin}"
+    local registry="/etc/omega/dns-registry.json"
+    local pf; pf=$(mktemp)
+    cat > "$pf" << PHPEOF
+<?php
+require_once('config.inc'); require_once('unbound.inc'); require_once('util.inc');
+\$domain='${domain}'; \$host='${name}';
+\$config['unbound']['hosts'] = array_values(array_filter(\$config['unbound']['hosts']??[],
+    fn(\$h) => !(\$h['host']===\$host && \$h['domain']===\$domain)));
+write_config("DNS unsync \$host.\$domain");
+services_unbound_configure();
+echo "del A: \$host.\$domain\n";
+PHPEOF
+    scp "${SSH_OPTS[@]/#-i/-i}" "$pf" "${pfsense_user}@${pfsense_ip}:/tmp/dns_unsync.php" 2>/dev/null \
+        && ssh "${SSH_OPTS[@]}" "${pfsense_user}@${pfsense_ip}" \
+            "php /tmp/dns_unsync.php && rm -f /tmp/dns_unsync.php" >/dev/null 2>&1 || true
+    rm -f "$pf"
+    local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+    local node
+    for node in "${nodes_arr[@]}"; do
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+            sed -i '/${name}\\.${domain}/d; / ${name}\$/d' /etc/hosts 2>/dev/null || true
+            python3 -c \"
+import json,os
+f='${registry}'
+if os.path.exists(f):
+    reg=[e for e in json.load(open(f)) if e.get('name')!='${name}']
+    json.dump(reg,open(f,'w'),indent=2)
+\" 2>/dev/null || true
+        " 2>/dev/null || true
+    done
+}
+
+do_vm_autostart() {
+    # Rend une VM "always-on" : onboot=1 (démarre au boot du nœud) + ajout au
+    # watchdog Omega (la relance si elle s'arrête/plante EN COURS de vie, après grâce).
+    # off = désactive les deux. Le VMID est mis sur TOUS les nœuds (le watchdog n'agit
+    # qu'en local → où qu'elle migre, elle reste surveillée).
+    _need_config || return
+    _hdr "══ Redémarrage automatique d'une VM (always-on) ══"
+    local vmid action
+    if ${AUTO:-false}; then
+        vmid="${OMEGA_AUTOSTART_VMID:-}"; action="${OMEGA_AUTOSTART_ACTION:-on}"
+    else
+        _ask "VMID de la VM"; read -r vmid
+        _ask "Activer ou désactiver le redémarrage auto ? [on/off] (on)"; read -r action
+        action="${action:-on}"
+    fi
+    [[ "$vmid" =~ ^[0-9]+$ ]] || { _err "VMID invalide"; return 1; }
+    local node_ip; node_ip="$(_vm_host_node "$vmid" || true)"
+    [[ -n "$node_ip" ]] || { _err "VM $vmid introuvable dans le cluster"; return 1; }
+
+    local wd_key=(); [[ -f "${SSH_KEY:-}" ]] && wd_key=(--ssh-key "$SSH_KEY")
+    if [[ "$action" == "off" ]]; then
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node_ip}" "qm set $vmid --onboot 0" >/dev/null 2>&1 \
+            && _ok "onboot=0" || _warn "échec onboot=0"
+        bash "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" --nodes "$OMEGA_NODES" \
+            --user "$DEPLOY_USER" "${wd_key[@]}" --remove-vmid "$vmid" \
+            && _ok "retirée du watchdog" || _warn "échec retrait watchdog"
+        _info "VM $vmid : redémarrage automatique DÉSACTIVÉ."
+        return 0
+    fi
+    ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node_ip}" "qm set $vmid --onboot 1" >/dev/null 2>&1 \
+        && _ok "onboot=1 (démarre au boot du nœud)" || _warn "échec onboot=1"
+    bash "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" --nodes "$OMEGA_NODES" \
+        --user "$DEPLOY_USER" "${wd_key[@]}" --add-vmid "$vmid" \
+        && _ok "ajoutée au watchdog (relance si arrêtée/plantée)" || _warn "échec ajout watchdog"
+    _info "VM $vmid est maintenant ${GREEN}always-on${RESET} (onboot + watchdog)."
+}
+
+do_dns_reconcile() {
+    # Filet de sécurité DNS (côté orchestrateur, choix design juin 2026).
+    # Scanne toutes les VMs omega du cluster et (ré)enregistre dans pfSense Unbound
+    # celles qui manquent ou dont l'IP a dérivé. Rattrape les VMs créées hors
+    # omega-lab. Les nœuds ne pouvant pas joindre pfSense, la réconciliation vit ici.
+    #
+    # Conception en 2 phases pour robustesse :
+    #   1. COLLECTE : pour chaque VM omega, lire le NOM (qm config, autoritaire) +
+    #      l'IP (ipconfig0 sinon formule). Si le nom est illisible (ssh transitoire),
+    #      on SKIP la VM (jamais de nom inventé type omega-<vmid>).
+    #   2. APPLICATION : un SEUL appel pfSense applique tous les ajouts/màj puis
+    #      write_config + services_unbound_configure UNE fois (pas de tempête de
+    #      reload Unbound, pas de dig pendant que le DNS redémarre).
+    _need_config || return
+    _hdr "══ Réconciliation DNS (zone ${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}) ══"
+    if [[ -z "${OMEGA_NET_PFSENSE_WAN_IP:-}" ]]; then
+        _err "pfSense non configuré (OMEGA_NET_PFSENSE_WAN_IP vide)"; return 1
+    fi
+    local domain="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
+    local pfip="${OMEGA_NET_PFSENSE_WAN_IP}"
+    local pfuser="${OMEGA_NET_PFSENSE_SSH_USER:-admin}"
+    _info "Inventaire des VMs omega du cluster (via ${CONTROLLER_NODE})..."
+    local inv
+    inv="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 -o BatchMode=yes "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+        "pvesh get /cluster/resources --type vm --output-format json" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for v in rows:
+    if v.get("type") != "qemu":
+        continue
+    if v.get("template"):
+        continue
+    tags = (v.get("tags", "") or "").replace(";", " ").replace(",", " ").split()
+    if "omega" not in tags:
+        continue
+    print("%s\t%s\t%s" % (v.get("vmid"), v.get("node", ""), v.get("name", "") or ""))
+' 2>/dev/null)"
+    if [[ -z "$inv" ]]; then
+        _warn "Aucune VM omega trouvée dans le cluster"; return 0
+    fi
+    # ── Phase 1 : collecte (tableau AVANT boucle : les ssh internes mangeraient
+    # le stdin d'un while-read et n'itéreraient qu'une VM). ──
+    local _rows; mapfile -t _rows <<< "$inv"
+    local n_skip=0 vmid pve_name vname node_ip label ip cfg qname _row
+    local -a want_labels=() want_ips=()
+    for _row in "${_rows[@]}"; do
+        IFS=$'\t' read -r vmid pve_name vname <<< "$_row"
+        [[ "$vmid" =~ ^[0-9]+$ ]] || continue
+        node_ip="$(_node_ip_for_pve_name "$pve_name" || true)"
+        [[ -n "$node_ip" ]] || { _warn "VM $vmid : nœud '$pve_name' introuvable, ignorée"; n_skip=$((n_skip+1)); continue; }
+        cfg="$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 -o BatchMode=yes "${DEPLOY_USER}@${node_ip}" \
+            "qm config ${vmid} 2>/dev/null" 2>/dev/null)"
+        qname="$(printf '%s\n' "$cfg" | sed -n 's/^name: //p' | head -1)"
+        # Nom autoritaire requis : si illisible (ssh transitoire), on SKIP (jamais inventer).
+        if [[ -z "$qname" ]]; then
+            _warn "VM $vmid : nom illisible (qm config vide ?), ignorée ce passage"; n_skip=$((n_skip+1)); continue
+        fi
+        label="$(_dns_label "$qname")"
+        [[ -n "$label" ]] || { _warn "VM $vmid : nom '$qname' sans label DNS, ignorée"; n_skip=$((n_skip+1)); continue; }
+        ip="$(printf '%s\n' "$cfg" | sed -n 's/^ipconfig0:.*ip=\([0-9.]*\).*/\1/p' | head -1)"
+        if [[ -z "$ip" && -n "${OMEGA_NET_VM_IP_PREFIX:-}" ]]; then
+            ip="${OMEGA_NET_VM_IP_PREFIX}.$(( ${OMEGA_NET_VM_IP_START:-101} + vmid - ${OMEGA_NET_VM_VMID_BASE:-3000} ))"
+        fi
+        [[ -n "$ip" ]] || { _warn "VM $vmid ($label) : pas d'IP (DHCP ?), ignorée"; n_skip=$((n_skip+1)); continue; }
+        want_labels+=("$label"); want_ips+=("$ip")
+    done
+    if [[ "${#want_labels[@]}" -eq 0 ]]; then
+        _warn "Aucune entrée à réconcilier (toutes ignorées). ${n_skip} skip."; return 0
+    fi
+    # ── Phase 2 : application atomique côté pfSense (1 write_config + 1 reload). ──
+    local pf; pf="$(mktemp)"
+    {
+        echo "<?php"
+        echo "require_once('config.inc'); require_once('unbound.inc'); require_once('util.inc');"
+        echo "\$domain='${domain}';"
+        echo "if (!isset(\$config['unbound']['hosts'])) \$config['unbound']['hosts']=[];"
+        echo "\$want=["
+        local i
+        for i in "${!want_labels[@]}"; do
+            echo "  ['${want_labels[$i]}','${want_ips[$i]}'],"
+        done
+        cat <<'PHPBODY'
+];
+$hosts =& $config['unbound']['hosts'];
+$changed=0;
+foreach ($want as $w) {
+  list($h,$ip)=$w; $found=false;
+  foreach ($hosts as $k=>$e) {
+    if (($e['host']??'')===$h && ($e['domain']??'')===$domain) {
+      $found=true;
+      if (($e['ip']??'')!==$ip) { $hosts[$k]['ip']=$ip; echo "UPD $h -> $ip\n"; $changed++; }
+      else echo "OK $h -> $ip\n";
+      break;
+    }
+  }
+  if (!$found) { $hosts[]=['host'=>$h,'domain'=>$domain,'ip'=>$ip,'descr'=>'Omega VM '.$h,'aliases'=>'']; echo "ADD $h -> $ip\n"; $changed++; }
+}
+if ($changed>0) { write_config("DNS reconcile bulk ($changed)"); services_unbound_configure(); }
+echo "CHANGED $changed\n";
+PHPBODY
+    } > "$pf"
+    _info "Application de ${#want_labels[@]} entrée(s) sur pfSense (1 reload)..."
+    local out
+    if out="$(scp "${SSH_OPTS[@]}" -o ConnectTimeout=8 -o BatchMode=yes "$pf" "${pfuser}@${pfip}:/tmp/dns_reconcile.php" 2>/dev/null \
+        && ssh "${SSH_OPTS[@]}" -n -o ConnectTimeout=12 -o BatchMode=yes "${pfuser}@${pfip}" \
+            "php /tmp/dns_reconcile.php && rm -f /tmp/dns_reconcile.php" 2>/dev/null)"; then
+        local n_add n_upd
+        n_add="$(grep -c '^ADD ' <<< "$out" || true)"
+        n_upd="$(grep -c '^UPD ' <<< "$out" || true)"
+        grep -E '^(ADD|UPD) ' <<< "$out" | sed 's/^ADD /  + /; s/^UPD /  ~ /' | while read -r l; do _ok "$l"; done
+        _info "Réconciliation : ${n_add} ajoutée(s) · ${n_upd} corrigée(s) · $(( ${#want_labels[@]} - n_add - n_upd )) déjà OK · ${n_skip} ignorée(s)"
+    else
+        _err "échec application pfSense (${pfuser}@${pfip}) — vérifier SSH"; rm -f "$pf"; return 1
+    fi
+    rm -f "$pf"
+}
+
+do_dns_register() {
+    _need_config || return
+    local domain="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
+    local pfsense_ip="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+    local pfsense_user="${OMEGA_NET_PFSENSE_SSH_USER:-admin}"
+    local registry="/etc/omega/dns-registry.json"
+    _hdr "══ DNS pfSense Unbound — zone ${domain} ══"
+    echo -e "  Assigne un nom à une IP (et un port optionnel)."
+    echo -e "  Le domaine ${CYAN}${domain}${RESET} est ajouté automatiquement."
+    echo -e "  Ex: ${DIM}monapp.${domain} → 10.50.30.110${RESET}"
+    echo -e "      ${DIM}api.${domain}   → 10.50.30.110:8080${RESET}"
+    echo ""
+
+    local action name ip port proto
+    _ask "Action [register/delete/list]"
+    read -r action
+    action="${action:-list}"
+
+    case "$action" in
+        list)
+            _info "Entrées DNS pour ${domain} :"
+            # Depuis le registre local
+            local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+            ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${nodes_arr[0]}" "
+cat '${registry}' 2>/dev/null | python3 -c \"
+import json,sys
+try:
+    reg=json.load(sys.stdin)
+    for e in reg:
+        port_str=(':'+str(e['port'])) if e.get('port') else ''
+        proto_str='('+e.get('proto','tcp')+')' if e.get('port') else ''
+        print(f\\\"  {e['name']}.${domain}{port_str}  →  {e['ip']}{port_str}  {proto_str}\\\")
+    print(f\\\"Total: {len(reg)} entrée(s)\\\")
+except: print('  (registre vide ou absent)')
+\"" 2>/dev/null || _warn "Nœud non accessible — SSH pfSense :"
+            # Depuis pfSense Unbound aussi
+            ssh "${SSH_OPTS[@]}" "${pfsense_user}@${pfsense_ip}" "
+php -r \"
+require_once('config.inc');
+\\\$d='${domain}';
+foreach (\\\$config['unbound']['hosts']??[] as \\\$h) {
+    if (\\\$h['domain']===\\\$d) echo '  A  '.\\\$h['host'].'.'.\\\$d.' -> '.\\\$h['ip'].PHP_EOL;
+}
+\\\$opts=base64_decode(\\\$config['unbound']['custom_options']??'');
+foreach (explode(PHP_EOL,\\\$opts) as \\\$line) {
+    if (str_contains(\\\$line,'SRV') && str_contains(\\\$line,\\\$d)) echo '  SRV '.\\\$line.PHP_EOL;
+}
+\"" 2>/dev/null || true ;;
+
+        register)
+            _ask "Nom du service (ex: monapp, api, database)"
+            read -r name
+            [[ -n "$name" ]] || { _err "Nom requis"; return 1; }
+
+            _ask "IP (ex: 10.50.30.110)"
+            read -r ip
+
+            _ask "Port (laisser vide si aucun, ex: 8080)"
+            read -r port
+            port="${port//[^0-9]/}"
+
+            proto="tcp"
+            if [[ -n "$port" ]]; then
+                _ask "Protocole [tcp/udp] (défaut: tcp)"
+                read -r proto_input
+                [[ "$proto_input" == "udp" ]] && proto="udp" || proto="tcp"
+            fi
+            [[ -n "$name" && -n "$ip" ]] || { _err "Nom et IP requis"; return 1; }
+
+            # Préparer le script PHP
+            local pf_script; pf_script=$(mktemp)
+            local srv_line=""
+            if [[ -n "$port" ]]; then
+                # SRV: _nom._proto.domaine. SRV priorité poids port cible.
+                srv_line="local-data: \\\"_${name}._${proto}.${domain}. SRV 0 0 ${port} ${name}.${domain}.\\\""
+            fi
+
+            cat > "$pf_script" << PHPEOF
+<?php
+require_once('config.inc'); require_once('unbound.inc'); require_once('util.inc');
+if (!isset(\$config['unbound']['hosts'])) \$config['unbound']['hosts'] = [];
+\$domain='${domain}'; \$host='${name}'; \$ip='${ip}';
+
+// Enregistrement A
+\$exists=false;
+foreach (\$config['unbound']['hosts'] as \$h) {
+    if (\$h['host']===\$host && \$h['domain']===\$domain) { \$exists=true; break; }
+}
+if (!\$exists) {
+    \$config['unbound']['hosts'][] = ['host'=>\$host,'domain'=>\$domain,'ip'=>\$ip,
+        'descr'=>'Omega service '.(\$port??\$host),'aliases'=>''];
+    echo "A: \$host.\$domain -> \$ip\n";
+}
+
+// Enregistrement SRV si port fourni
+// NB: pfSense stocke custom_options encodé base64 (unbound.inc fait base64_decode).
+\$srv='${srv_line}';
+if (\$srv) {
+    \$opts = base64_decode(\$config['unbound']['custom_options'] ?? '');
+    if (strpos(\$opts, \$srv) === false) {
+        \$merged = (trim(\$opts) === '') ? \$srv : trim(\$opts)."\n".\$srv;
+        \$config['unbound']['custom_options'] = base64_encode(\$merged);
+        echo "SRV: _${name}._${proto}.${domain} -> \$ip:${port}\n";
+    }
+}
+
+write_config("DNS register \$host.\$domain");
+services_unbound_configure();
+echo "OK\n";
+PHPEOF
+            scp "${SSH_OPTS[@]/#-i/-i}" "$pf_script" "${pfsense_user}@${pfsense_ip}:/tmp/dns_reg.php" 2>/dev/null && \
+            ssh "${SSH_OPTS[@]}" "${pfsense_user}@${pfsense_ip}" "php /tmp/dns_reg.php && rm /tmp/dns_reg.php" 2>/dev/null \
+                && _ok "${name}.${domain}${port:+:$port} → ${ip}${port:+:$port} enregistré" \
+                || _err "Échec pfSense — SSH configuré ? Lancer [F] d'abord."
+            rm -f "$pf_script"
+
+            # /etc/hosts sur les nœuds (IP uniquement, le port est dans le SRV)
+            local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+            for node in "${nodes_arr[@]}"; do
+                ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+                    mkdir -p /etc/omega
+                    grep -q '\"${name}\"' '${registry}' 2>/dev/null && true || {
+                        python3 -c \"
+import json,os
+f='${registry}'
+reg=json.load(open(f)) if os.path.exists(f) else []
+reg=[e for e in reg if e.get('name')!='${name}']
+reg.append({'name':'${name}','ip':'${ip}','port':${port:-null},'proto':'${proto}'})
+json.dump(reg,open(f,'w'),indent=2)
+print('registre mis à jour')
+\"
+                    }
+                    grep -q '${ip}.*${name}' /etc/hosts || echo '${ip}  ${name}.${domain}  ${name}' >> /etc/hosts
+                " 2>/dev/null || true
+            done ;;
+
+        delete)
+            _ask "Nom à supprimer (sans le domaine)"
+            read -r name
+            [[ -n "$name" ]] || { _err "Nom requis"; return 1; }
+
+            local pf_del; pf_del=$(mktemp)
+            cat > "$pf_del" << PHPEOF
+<?php
+require_once('config.inc'); require_once('unbound.inc'); require_once('util.inc');
+\$domain='${domain}'; \$host='${name}';
+// Supprimer A record
+\$config['unbound']['hosts'] = array_values(array_filter(
+    \$config['unbound']['hosts']??[],
+    fn(\$h) => !(\$h['host']===\$host && \$h['domain']===\$domain)
+));
+// Supprimer SRV dans custom_options (stocké base64 par pfSense)
+\$opts = base64_decode(\$config['unbound']['custom_options'] ?? '');
+\$lines = array_filter(explode("\n", \$opts), fn(\$l) => strpos(\$l, "_\$host.") === false);
+\$config['unbound']['custom_options'] = base64_encode(implode("\n", \$lines));
+write_config("DNS delete \$host.\$domain");
+services_unbound_configure();
+echo "Supprimé: \$host.\$domain\n";
+PHPEOF
+            scp "${SSH_OPTS[@]/#-i/-i}" "$pf_del" "${pfsense_user}@${pfsense_ip}:/tmp/dns_del.php" 2>/dev/null && \
+            ssh "${SSH_OPTS[@]}" "${pfsense_user}@${pfsense_ip}" "php /tmp/dns_del.php && rm /tmp/dns_del.php" 2>/dev/null \
+                && _ok "${name}.${domain} supprimé" || _warn "pfSense non accessible"
+            rm -f "$pf_del"
+
+            # Retirer des /etc/hosts et du registre sur les nœuds
+            local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+            for node in "${nodes_arr[@]}"; do
+                ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+                    sed -i '/${name}\\.${domain}/d; / ${name}$/d' /etc/hosts 2>/dev/null || true
+                    python3 -c \"
+import json,os
+f='${registry}'
+if os.path.exists(f):
+    reg=[e for e in json.load(open(f)) if e.get('name')!='${name}']
+    json.dump(reg,open(f,'w'),indent=2)
+\" 2>/dev/null || true
+                " 2>/dev/null || true
+            done ;;
+
+        *) _warn "Action invalide : '$action' — utiliser register / delete / list" ;;
+    esac
+}
+
+do_clean_infra_vms() {
+    _need_config || return
+    _hdr "══ Nettoyage VMs infra réseau existantes ══"
+
+    # VMIDs infra à supprimer (depuis cluster.conf + valeurs par défaut)
+    local infra_vmids=(
+        "${OMEGA_NET_PFSENSE_VMID:-2290}"
+        "${OMEGA_NET_DNS_VMID:-2291}"
+        "${OMEGA_NET_ROUTER_VMID:-}"
+        "${OMEGA_NET_GW_VMID:-}"
+        "${OMEGA_NET_DHCP_VMID:-}"
+    )
+    # Filtrer les vides
+    local to_check=()
+    for v in "${infra_vmids[@]}"; do
+        [[ -n "$v" ]] && to_check+=("$v")
+    done
+
+    echo -e "  Contrôleur : ${CYAN}${CONTROLLER_NODE}${RESET}"
+    echo -e "  VMIDs à vérifier/supprimer : ${CYAN}${to_check[*]}${RESET}"
+    echo -e "  ${RED}ATTENTION${RESET} : cette action arrête et supprime ces VMs définitivement."
+    echo ""
+
+    # Découvrir les VMs infra qui existent réellement dans le cluster
+    local existing=()
+    local existing_info
+    existing_info="$(ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+        "pvesh get /cluster/resources --type vm --output-format json 2>/dev/null" 2>/dev/null \
+        | python3 -c "
+import json,sys
+vms={str(v['vmid']):(v.get('node','?'),v.get('name','?')) for v in json.load(sys.stdin)}
+for vmid in sys.argv[1:]:
+    if vmid in vms:
+        print(vmid, vms[vmid][0], vms[vmid][1])
+" "${to_check[@]}" 2>/dev/null || true)"
+
+    if [[ -z "$existing_info" ]]; then
+        _info "Aucune VM infra trouvée dans le cluster — rien à supprimer."
+        return 0
+    fi
+
+    echo -e "  VMs infra présentes dans le cluster :"
+    while IFS=' ' read -r vmid node name; do
+        echo -e "    ${RED}✗${RESET}  VMID ${CYAN}${vmid}${RESET}  nœud=${CYAN}${node}${RESET}  nom=${CYAN}${name}${RESET}"
+        existing+=("${vmid}:${node}")
+    done <<< "$existing_info"
+    echo ""
+
+    if ! $AUTO; then
+        read -rp "  Supprimer ces VMs ? [oui/N] " confirm
+        [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Annulé."; return; }
+    fi
+
+    for entry in "${existing[@]}"; do
+        local vmid="${entry%%:*}"
+        local node="${entry##*:}"
+        local node_ip
+        node_ip="$(ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+            "getent hosts '${node}' | awk '{print \$1; exit}'" 2>/dev/null || echo "$node")"
+        echo -n "  Suppression VM ${vmid} sur ${node}… "
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node_ip}" bash <<SSHEOF 2>/dev/null
+qm stop ${vmid} --skiplock 2>/dev/null || true
+sleep 2
+# Détacher le disque cloudinit avant destroy pour éviter les erreurs Ceph
+qm set ${vmid} --delete scsi1 2>/dev/null || true
+qm destroy ${vmid} --purge --destroy-unreferenced-disks 1 2>/dev/null \
+    || qm destroy ${vmid} --purge 2>/dev/null \
+    || qm destroy ${vmid} 2>/dev/null \
+    || echo "WARN: destroy échoué pour VMID ${vmid}"
+SSHEOF
+        echo -e "${GREEN}OK${RESET}"
+    done
+
+    _ok "VMs infra supprimées — prêt pour [N] Créer VMs infra"
+}
+
+do_setup_network() {
+    _need_config || return
+    _hdr "══ Setup réseau privé VMs (vmbr1) ══"
+    echo -e "  Crée ${CYAN}vmbr1${RESET} (bridge VLAN-aware, sans port physique) sur chaque nœud Proxmox."
+    echo -e "  ${BOLD}Ne touche pas${RESET} à vmbr0 ni au réseau de gestion Proxmox."
+    echo -e "  Nœuds cibles : ${CYAN}${OMEGA_NODES}${RESET}"
+    echo ""
+
+    local dry_run=false
+    if ! $AUTO; then
+        read -rp "  Mode dry-run (voir les commandes sans appliquer) ? [o/N] " dr
+        [[ "${dr,,}" =~ ^o ]] && dry_run=true
+        read -rp "  Confirmer le setup réseau ? [oui/N] " confirm
+        [[ "$confirm" =~ ^[Oo]([Uu][Ii])?$ ]] || { _info "Annulé."; return; }
+    fi
+
+    local args=(--nodes "$OMEGA_NODES" --user "$DEPLOY_USER")
+    [[ -f "${SSH_KEY:-}" ]] && args+=(--ssh-key "$SSH_KEY")
+    $dry_run && args+=(--dry-run)
+    bash "${SCRIPT_DIR}/setup-network.sh" "${args[@]}"
+    _ok "Setup réseau terminé — vmbr1 présent sur tous les nœuds"
+
+    # Initialiser l'isolation sur tous les nœuds (backend OVS ou iptables auto-détecté)
+    _info "Initialisation isolation sur tous les nœuds (OVS/iptables auto)..."
+    local subnet="${OMEGA_NET_VM_IP_PREFIX:-10.50.30}.0/${OMEGA_NET_VM_NETMASK:-24}"
+    local iso_gw="${OMEGA_NET_VM_GATEWAY:-10.50.30.1}"
+    local iso_bridge="${OMEGA_NET_VM_BRIDGE:-${OMEGA_VM_BRIDGE:-vmbr1}}"
+    _deploy_isolation_script
+    local nodes_arr; IFS=',' read -ra nodes_arr <<< "$OMEGA_NODES"
+    for node in "${nodes_arr[@]}"; do
+        echo -n "  ${node} isolation : "
+        ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${node}" "
+            script=/opt/omega-remote-paging/scripts/vm-isolation.sh
+            [[ -x \"\$script\" ]] || script=/opt/vm-isolation.sh
+            [[ -x \"\$script\" ]] || exit 1
+            bash \"\$script\" --action init --subnet '${subnet}' --gateway '${iso_gw}' --bridge '${iso_bridge}' 2>/dev/null
+            # iptables-persistent seulement utile pour le backend Linux bridge
+            command -v iptables-save >/dev/null && \
+            (DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent netfilter-persistent -qq 2>/dev/null || true)
+            bash \"\$script\" --action save --bridge '${iso_bridge}' 2>/dev/null
+        " 2>/dev/null && echo -e "${GREEN}OK${RESET}" || echo -e "${RED}ECHEC${RESET}"
+    done
+
+    # Pfizer : ajouter règle pfSense pour accès 192.168.123.x → VMs omega
+    _info "Règle pfSense accès management → VMs..."
+    _add_pfsense_mgmt_rule 2>/dev/null || _warn "pfSense non configuré — accès management via [F] + [N]"
+
+    echo ""
+    _info "Étape suivante : [N] Créer les VMs infra (pfSense)"
+}
+
+# Ajoute la règle pfSense WAN → OMEGA pour le réseau de management
+_add_pfsense_mgmt_rule() {
+    local pfsense_ip="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+    local pfsense_user="${OMEGA_NET_PFSENSE_SSH_USER:-admin}"
+    local pf_script; pf_script=$(mktemp)
+    cat > "$pf_script" << 'PHPEOF'
+<?php
+require_once('config.inc'); require_once('filter.inc'); require_once('util.inc');
+$descr = 'omega-mgmt-to-vms';
+foreach ($config['filter']['rule'] ?? [] as $r) {
+    if (($r['descr'] ?? '') === $descr) { echo "exists\n"; exit(0); }
+}
+if (!isset($config['filter']['rule'])) $config['filter']['rule'] = [];
+array_unshift($config['filter']['rule'], [
+    'type'=>'pass','interface'=>'wan','ipprotocol'=>'inet','protocol'=>'any',
+    'source'=>['network'=>'192.168.123.0/24'],
+    'destination'=>['network'=>'10.50.30.0/24'],
+    'descr'=>$descr,'tracker'=>(string)time(),
+]);
+write_config("Allow mgmt to omega VMs"); filter_configure();
+echo "added\n";
+PHPEOF
+    scp "${SSH_OPTS[@]/#-i/-i}" "$pf_script" "${pfsense_user}@${pfsense_ip}:/tmp/pf_mgmt.php" 2>/dev/null && \
+    ssh "${SSH_OPTS[@]}" "${pfsense_user}@${pfsense_ip}" "php /tmp/pf_mgmt.php && rm /tmp/pf_mgmt.php" 2>/dev/null
+    rm -f "$pf_script"
+}
+
+do_create_infra_vms() {
+    _need_config || return
+    _hdr "══ Création VMs infra réseau ══"
+    echo -e "  ${BOLD}pfSense${RESET} VMID ${CYAN}${OMEGA_NET_PFSENSE_VMID:-2290}${RESET} — routeur/firewall (WAN=vmbr0, LAN=vmbr1)"
+    echo -e "  ${BOLD}DNS${RESET} : pfSense Unbound — zone ${CYAN}${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}${RESET} (pas de VM DNS séparée)"
+    echo -e "  Contrôleur : ${CYAN}${CONTROLLER_NODE}${RESET}"
+    echo ""
+
+    local do_pf=false
+    if ! $AUTO; then
+        read -rp "  Créer VM pfSense ${OMEGA_NET_PFSENSE_VMID:-2290} ? [o/N] " pf
+        [[ "${pf,,}" =~ ^o ]] && do_pf=true
+    else
+        do_pf=true
+    fi
+    $do_pf || { _info "Rien à créer."; return; }
+
+    local args=(--pfsense --controller "$CONTROLLER_NODE" --user "$DEPLOY_USER")
+    [[ -f "${SSH_KEY:-}" ]] && args+=(--ssh-key "$SSH_KEY")
+
+    bash "${SCRIPT_DIR}/create-infra-vms.sh" "${args[@]}"
+    _ok "VM pfSense créée"
+    echo ""
+    _info "Configurer pfSense : VLANs, interfaces, règles firewall."
+    _info "Voir docs/architecture-reseau.md pour les étapes détaillées."
+    _info "DNS omega.local → pfSense Unbound : Services → DNS Resolver → Host Overrides"
+    _info "Une fois pfSense configuré, lancer [H] pour synchroniser /etc/hosts + routes."
 }
 
 do_install_full() {
@@ -1851,13 +3086,35 @@ show_menu() {
     echo -e "   ${BOLD}[c]${RESET}  Configurer les nœuds du cluster (IPs, VM test, user SSH)"
     echo ""
 
+    # ── Réseau privé VMs ──────────────────────────────────────────────────────
+    echo -e "  ${BOLD}${MAG}── Réseau privé VMs (10.50.0.0/16) ──────────────────────────${RESET}"
+    if [[ -n "${OMEGA_NET_VM_IP_PREFIX:-}" ]]; then
+        echo -e "   ${GREEN}●${RESET} Réseau activé : bridge=${CYAN}${OMEGA_NET_VM_BRIDGE:-vmbr1}${RESET} vlan=${CYAN}${OMEGA_NET_VM_VLAN_TAG:-30}${RESET} préfixe=${CYAN}${OMEGA_NET_VM_IP_PREFIX}.x${RESET} gw=${CYAN}${OMEGA_NET_VM_GATEWAY:-?}${RESET}"
+    else
+        echo -e "   ${YELLOW}●${RESET} Réseau désactivé ${DIM}(OMEGA_NET_VM_IP_PREFIX vide → DHCP)${RESET}"
+    fi
+    echo -e "   ${BOLD}[n]${RESET}  Setup réseau           (vmbr1 VLAN-aware + isolation iptables + règle pfSense mgmt)"
+    echo -e "   ${BOLD}[v]${RESET}  ${RED}Supprimer VMs infra${RESET}    (pfSense + toutes VMs infra)"
+    echo -e "   ${BOLD}[N]${RESET}  Créer VM pfSense       (VMID ${OMEGA_NET_PFSENSE_VMID:-2290} — routeur/firewall WAN+OMEGA)"
+    echo -e "   ${BOLD}[G]${RESET}  Construire template    (Debian 12 + QGA + cloud-init → template RBD VMID ${OMEGA_VM_TEMPLATE_ID:-9001})"
+    echo -e "   ${BOLD}[F]${RESET}  Setup SSH pfSense      (copier la clé omega sur pfSense — à faire une fois)"
+    echo -e "   ${BOLD}[H]${RESET}  Sync hosts/DNS         (/etc/hosts + routes sur tous les nœuds + pfSense Unbound)"
+    echo -e "   ${BOLD}[w]${RESET}  Internet VM            (${GREEN}ISOLÉE PAR DÉFAUT${RESET} — activer/désactiver/lister accès WAN d'une VM)"
+    echo -e "   ${BOLD}[k]${RESET}  Lier des VMs           (${GREEN}ISOLÉES PAR DÉFAUT${RESET} — créer canal A↔B ou groupe — C reste isolée de A,B)"
+    echo -e "   ${BOLD}[m]${RESET}  Modifier une VM        (vCPU max · RAM/balloon · disque · VRAM GPU · nom → ${GREEN}DNS suivi${RESET} — métadonnées omega_* réécrites)"
+    echo -e "   ${BOLD}[o]${RESET}  Redémarrage auto VM    (${GREEN}always-on${RESET} : onboot=1 + watchdog la relance si arrêtée/plantée — on/off)"
+    echo -e "   ${BOLD}[D]${RESET}  DNS                    (enregistrer/supprimer/lister un nom ${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal})"
+    echo -e "   ${BOLD}[R]${RESET}  Réconcilier DNS        (scan VMs omega → ${GREEN}enregistre les manquantes/divergentes${RESET} — filet de sécurité)"
+    echo -e "   ${DIM}Placement KVM auto : assuré par le contrôleur Omega (migration_daemon + policy_engine).${RESET}"
+    echo ""
+
     # ── Installation ──────────────────────────────────────────────────────────
-    echo -e "  ${BOLD}${MAG}── Installation ─────────────────────────────────────────────${RESET}"
+    echo -e "  ${BOLD}${MAG}── Installation Omega ────────────────────────────────────────${RESET}"
     echo -e "   ${BOLD}[I]${RESET}  Installation complète  (désinstaller → build → déployer → watchdog QGA)"
-    echo -e "   ${BOLD}[u]${RESET}  Désinstaller           (arrêter services + supprimer fichiers)"
+    echo -e "   ${BOLD}[u]${RESET}  Désinstaller           (arrêter services + supprimer fichiers + dpkg purge + sysctl)"
     echo -e "   ${BOLD}[b]${RESET}  Build                  (cargo build --release --workspace)"
     echo -e "   ${BOLD}[d]${RESET}  Déployer               (copier binaires + démarrer services)"
-    echo -e "   ${BOLD}[p]${RESET}  Créer les VMs physiques Omega sur Proxmox"
+    echo -e "   ${BOLD}[p]${RESET}  Créer les VMs physiques Omega  (IP fixe + VLAN si configurés)"
     echo ""
 
     # ── Tests par section ─────────────────────────────────────────────────────
@@ -1899,6 +3156,18 @@ main_loop() {
         echo ""
         case "${choice}" in
             c|C) do_configure ;;
+            n)   do_setup_network ;;
+            v)   do_clean_infra_vms ;;
+            N)   do_create_infra_vms ;;
+            G)   do_build_images ;;
+            F)   do_setup_pfsense_ssh ;;
+            H)   do_sync_hosts ;;
+            w)   do_vm_internet ;;
+            k)   do_vm_link ;;
+            m)   do_vm_reconfigure ;;
+            o)   do_vm_autostart ;;
+            D)   do_dns_register ;;
+            R)   do_dns_reconcile ;;
             I)   do_install_full ;;
             u|U) do_uninstall ;;
             b|B) do_build ;;

@@ -177,8 +177,8 @@ impl DrmGpuBackend {
 
         if !driver.supports_render_node() {
             bail!(
-                "driver {} ne supporte pas les render nodes (SR-IOV requis)",
-                format!("{:?}", driver)
+                "driver {:?} ne supporte pas les render nodes (SR-IOV requis)",
+                driver
             );
         }
 

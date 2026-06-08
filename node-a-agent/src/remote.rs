@@ -44,6 +44,11 @@ const CONN_POOL_SIZE: usize = 4;
 
 /// Enveloppe le stream de transport : TCP clair ou TCP+TLS.
 /// Les deux variants sont `Unpin` donc on peut utiliser `Pin::new()` directement.
+//
+// Note: le variant Tls est volontairement non-boxé pour garder un `Pin::new(s)`
+// trivial dans les impls AsyncRead/AsyncWrite. Une connexion par store seulement
+// est conservée à la fois, donc l'écart de taille n'a pas d'impact mémoire réel.
+#[allow(clippy::large_enum_variant)]
 enum AnyBufStream {
     Plain(BufStream<TcpStream>),
     Tls(BufStream<TlsStream<TcpStream>>),

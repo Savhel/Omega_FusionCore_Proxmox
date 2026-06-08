@@ -120,7 +120,7 @@ class PlacementEngine:
         required = self.required_free_mib(vm)
 
         candidates = [
-            n for n in cluster.reachable_nodes
+            n for n in cluster.placeable_nodes
             if n.node_id != source_node
             and n.mem_free_mib >= required
             and self._gpu_ok(n, vm)
@@ -128,8 +128,8 @@ class PlacementEngine:
 
         if not candidates:
             logger.debug(
-                "aucun candidat pour vmid=%d (requis=%d Mio, %d nœuds en lice)",
-                vm.vmid, required, len(cluster.reachable_nodes),
+                "aucun candidat pour vmid=%d (requis=%d Mio, %d nœuds plaçables)",
+                vm.vmid, required, len(cluster.placeable_nodes),
             )
             return None
 
@@ -152,10 +152,14 @@ class PlacementEngine:
         cluster:     ClusterState,
         source_node: str,
         vm:          VmEntry,
+        force_evacuation: bool = False,
     ) -> PlacementDecision:
-        """Évalue si et où migrer une VM. Retourne une PlacementDecision."""
+        """Évalue si et où migrer une VM. Retourne une PlacementDecision.
 
-        if vm.remote_pages < self.min_remote_pages:
+        force_evacuation=True ignore le seuil de pages distantes : utilisé pour
+        évacuer une VM d'un nœud devenu non plaçable (ex: sans KVM)."""
+
+        if not force_evacuation and vm.remote_pages < self.min_remote_pages:
             return PlacementDecision(
                 vmid=vm.vmid, source_node=source_node, target_node="",
                 target_api_addr="", target_store_addr="",
@@ -169,7 +173,7 @@ class PlacementEngine:
         if target is None:
             required = self.required_free_mib(vm)
             best_available = max(
-                (n.mem_free_mib for n in cluster.reachable_nodes if n.node_id != source_node),
+                (n.mem_free_mib for n in cluster.placeable_nodes if n.node_id != source_node),
                 default=0,
             )
             return PlacementDecision(
@@ -217,7 +221,35 @@ class PlacementEngine:
         (i.e., où la migration est réalisable).
         """
         decisions = []
+        seen: set[int] = set()
+
+        # ── Évacuation prioritaire : VMs sur un nœud joignable mais NON plaçable
+        #    (ex: sans KVM). Elles doivent partir indépendamment des pages distantes,
+        #    sinon elles ne pourront jamais tourner sur ce nœud. ────────────────────
+        for node in cluster.nodes:
+            if not node.reachable or node.kvm_capable:
+                continue
+            for vm in node.local_vms:
+                decision = self.evaluate_migration(
+                    cluster, node.node_id, vm, force_evacuation=True
+                )
+                seen.add(vm.vmid)
+                if decision.target_node:
+                    decisions.append(decision)
+                    logger.warning(
+                        "évacuation : vmid=%d quitte %s (nœud sans KVM) → %s",
+                        vm.vmid, node.node_id, decision.target_node,
+                    )
+                else:
+                    logger.error(
+                        "vmid=%d bloquée sur %s (sans KVM) — aucune cible : %s",
+                        vm.vmid, node.node_id, decision.reason,
+                    )
+
+        # ── Migrations par pression mémoire (pages distantes) ─────────────────────
         for source_node, vm in cluster.vms_with_remote_pages(self.min_remote_pages):
+            if vm.vmid in seen:
+                continue
             decision = self.evaluate_migration(cluster, source_node, vm)
             if decision.target_node:
                 decisions.append(decision)

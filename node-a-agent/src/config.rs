@@ -265,3 +265,66 @@ pub struct Config {
     #[arg(long, default_value = "0.0.0.0:9300", env = "AGENT_METRICS_LISTEN")]
     pub metrics_listen: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_defaults_without_args() {
+        let cfg = Config::try_parse_from(["node-a-agent"]).expect("defaults");
+        assert_eq!(cfg.vm_id, 1);
+        assert_eq!(cfg.vm_requested_mib, 2048);
+        assert_eq!(cfg.region_mib, 2048);
+        assert_eq!(cfg.backend, "anonymous");
+        assert_eq!(cfg.eviction_threshold_mib, 512);
+        assert_eq!(cfg.eviction_batch_size, 64);
+        assert_eq!(cfg.metrics_listen, "0.0.0.0:9300");
+        assert_eq!(cfg.stores, vec!["127.0.0.1:9100", "127.0.0.1:9101"]);
+    }
+
+    #[test]
+    fn parses_stores_csv() {
+        let cfg = Config::try_parse_from([
+            "node-a-agent",
+            "--stores",
+            "10.0.0.1:9100,10.0.0.2:9100,10.0.0.3:9100",
+        ])
+        .expect("parse");
+        assert_eq!(cfg.stores.len(), 3);
+        assert_eq!(cfg.stores[2], "10.0.0.3:9100");
+    }
+
+    #[test]
+    fn parses_vm_id_and_region() {
+        let cfg = Config::try_parse_from([
+            "node-a-agent",
+            "--vm-id",
+            "9001",
+            "--region-mib",
+            "4096",
+            "--vm-requested-mib",
+            "4096",
+        ])
+        .expect("parse");
+        assert_eq!(cfg.vm_id, 9001);
+        assert_eq!(cfg.region_mib, 4096);
+        assert_eq!(cfg.vm_requested_mib, 4096);
+    }
+
+    #[test]
+    fn rejects_invalid_vm_id() {
+        let res = Config::try_parse_from(["node-a-agent", "--vm-id", "not-a-number"]);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn empty_status_addrs_default() {
+        let cfg = Config::try_parse_from(["node-a-agent"]).expect("defaults");
+        // default_value = "" => csv split returns vec![""] mais value_delimiter sur ""
+        // donne soit une liste vide soit une liste avec un élément vide selon clap.
+        // L'invariant qui compte : pas de panic au parse.
+        let _ = cfg.status_addrs;
+    }
+}

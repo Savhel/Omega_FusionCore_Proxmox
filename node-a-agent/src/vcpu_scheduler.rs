@@ -397,6 +397,7 @@ where
 fn acquire_pool_lock() -> Result<std::fs::File> {
     let f = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(POOL_LOCK_PATH)?;
     let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };

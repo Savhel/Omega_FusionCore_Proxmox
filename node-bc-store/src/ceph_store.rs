@@ -466,6 +466,10 @@ impl CephStore {
     pub fn len(&self) -> usize {
         self.metrics.pages_stored.load(Ordering::Relaxed) as usize
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

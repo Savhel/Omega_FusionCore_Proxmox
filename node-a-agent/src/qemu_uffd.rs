@@ -4,14 +4,14 @@
 //!
 //! 1. L'agent crée `{run_dir}/vm-{vmid}/uffd.sock` et y écoute.
 //! 2. Quand QEMU démarre avec LD_PRELOAD=omega-uffd-bridge.so :
-//!    – bridge.c intercepte le mmap() de `/dev/shm/omega-vm-{vmid}`
+//!    - bridge.c intercepte le mmap() de `/dev/shm/omega-vm-{vmid}`
 //!      ou du memfd `omega-vm-{vmid}-...`
-//!    – bridge.c crée un uffd, enregistre la plage QEMU (MISSING mode)
-//!    – bridge.c se connecte au socket et envoie le fd via SCM_RIGHTS
+//!    - bridge.c crée un uffd, enregistre la plage QEMU (MISSING mode)
+//!    - bridge.c se connecte au socket et envoie le fd via SCM_RIGHTS
 //!      avec payload `[base: u64, len: u64]`
 //! 3. Ce module spawne un thread de gestion des fautes QEMU :
-//!    – lit les événements uffd (bloquant)
-//!    – pour chaque PAGEFAULT : GET_PAGE depuis le store → UFFDIO_COPY
+//!    - lit les événements uffd (bloquant)
+//!    - pour chaque PAGEFAULT : GET_PAGE depuis le store → UFFDIO_COPY
 //!
 //! # Éviction
 //!

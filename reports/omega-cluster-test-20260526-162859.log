@@ -1,0 +1,688 @@
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Tests cluster — omega-remote-paging[0m
+[1m[0;34m══════════════════════════════════════════[0m
+[0;34m[INFO][0m Nœuds       : 192.168.123.100 192.168.123.101 192.168.123.102
+[0;34m[INFO][0m Contrôleur  : 192.168.123.100
+[0;34m[INFO][0m Stores      : 192.168.123.100 192.168.123.101 192.168.123.102 (3 nœuds)
+[0;34m[INFO][0m STORES_CSV  : 192.168.123.100:9100,192.168.123.101:9100,192.168.123.102:9100
+[0;34m[INFO][0m STATUS_CSV  : 192.168.123.100:9200,192.168.123.101:9200,192.168.123.102:9200
+[0;34m[INFO][0m VM test      : 2301
+[0;34m[INFO][0m GPU          : false
+[0;34m[INFO][0m Ceph         : true
+[0;34m[INFO][0m Long         : false
+[0;34m[INFO][0m Scale        : false
+[0;34m[INFO][0m Fleet        : false
+[0;34m[INFO][0m Destructif   : false
+[0;34m[INFO][0m Skip         : M7
+[0;34m[INFO][0m Nœuds        : 3 (3 store(s))
+
+[1m  Preflight[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Preflight — omega-remote-paging[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Binaires compilés[0m
+[0;32m[PASS][0m node-a-agent : /home/blhack/Projets/Omega/Proxmox/RAM/omega-remote-paging/target/release/node-a-agent
+[0;32m[PASS][0m node-bc-store : /home/blhack/Projets/Omega/Proxmox/RAM/omega-remote-paging/target/release/node-bc-store
+
+[1m▶ userfaultfd[0m
+[0;32m[PASS][0m 192.168.123.100 : vm.unprivileged_userfaultfd=1
+[0;32m[PASS][0m 192.168.123.101 : vm.unprivileged_userfaultfd=1
+[0;32m[PASS][0m 192.168.123.102 : vm.unprivileged_userfaultfd=1
+
+[1m▶ Outils locaux[0m
+[0;32m[PASS][0m curl trouvé
+[0;32m[PASS][0m nc trouvé
+[0;32m[PASS][0m python3 trouvé
+[0;32m[PASS][0m jq trouvé
+[0;32m[PASS][0m stress-ng trouvé
+
+[1m▶ Stores réseau[0m
+[0;32m[PASS][0m store 192.168.123.100:9100 accessible
+[0;32m[PASS][0m store 192.168.123.101:9100 accessible
+[0;32m[PASS][0m store 192.168.123.102:9100 accessible
+
+[1m▶ HTTP status stores[0m
+[0;32m[PASS][0m status HTTP 192.168.123.100:9200/api/health OK
+    {
+        "api_addr": "192.168.123.100:9200",
+        "disk_pressure_pct": 77.15,
+        "gpu": null,
+        "local_vms": [
+            {
+                "avg_cpu_pct": 2.029219968642959,
+                "disk_io_control_reason": "io.weight non disponible dans le cgroup VM (backend/cgroup non support\u00e9)",
+[0;32m[PASS][0m status HTTP 192.168.123.101:9200/api/health OK
+    {
+        "api_addr": "192.168.123.101:9200",
+        "disk_pressure_pct": 6.88,
+        "gpu": null,
+        "local_vms": [
+            {
+                "avg_cpu_pct": 101.896,
+                "disk_io_control_reason": "io.weight non disponible dans le cgroup VM (backend/cgroup non support\u00e9)",
+[0;32m[PASS][0m status HTTP 192.168.123.102:9200/api/health OK
+    {
+        "api_addr": "192.168.123.102:9200",
+        "disk_pressure_pct": 73.15,
+        "gpu": null,
+        "local_vms": [
+            {
+                "avg_cpu_pct": 180.416,
+                "disk_io_control_reason": "io.weight non disponible dans le cgroup VM (backend/cgroup non support\u00e9)",
+
+[1m▶ Proxmox CLI (sur les nœuds)[0m
+[0;32m[PASS][0m 192.168.123.100 : qm disponible
+[0;32m[PASS][0m 192.168.123.101 : qm disponible
+[0;32m[PASS][0m 192.168.123.102 : qm disponible
+[0;34m[INFO][0m 20 VMs dans le cluster (via 192.168.123.100)
+
+[1m▶ Pool vCPU[0m
+[0;34m[INFO][0m /run/omega-vcpu-pool.json absent (normal si premier démarrage)
+
+[1m▶ Ceph[0m
+[1;33m[WARN][0m /etc/ceph/ceph.conf absent — Ceph non disponible (store RAM sera utilisé)
+
+[0;34m[INFO][0m Preflight terminé.
+[1m  → Lancer les tests cluster : ./run-cluster.sh[0m
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 00 — Tests unitaires[0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 0 — Tests unitaires[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Compilation workspace[0m
+[0;32m[PASS][0m compilation OK
+
+[1m▶ Exécution tests unitaires[0m
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests node_a_agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests node_bc_store
+
+running 2 tests
+test node-bc-store/src/tls.rs - tls::build_tls_acceptor (line 349) ... ignored
+test node-bc-store/src/persistent_store.rs - persistent_store (line 35) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests omega_daemon
+
+running 2 tests
+test omega-daemon/src/tls.rs - tls::build_tls_acceptor (line 349) ... ignored
+test omega-daemon/src/fault_bus.rs - fault_bus::AdaptiveInterval (line 237) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests omega_gpu_proxy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+[0;34m[INFO][0m Total : 275 tests
+[0;32m[PASS][0m tous les tests unitaires passent (275 tests)
+[0;34m[INFO][0m Synchronisation vers 192.168.123.100...
+[0;32m[PASS][0m scripts + binaires synchronisés sur 192.168.123.100
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 01 — Smoke test  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 1 — Smoke test (VM 2301, 6144 MiB)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Vérification userfaultfd[0m
+[0;32m[PASS][0m userfaultfd OK
+
+[1m▶ Démarrage du store[0m
+[0;34m[INFO][0m store smoke démarré sur :9100 (log: /tmp/omega-store-smoke.log)
+
+[1m▶ Exécution agent en mode demo[0m
+2026-05-26T15:29:11.704043Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9100"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:29:11.704058Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:29:11.704130Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:11.704205Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9100
+2026-05-26T15:29:11.704553Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+2026-05-26T15:29:11.704563Z  INFO région mémoire allouée base="0x7a6820000000" size_bytes=6442450944 num_pages=1572864 backend=Anonymous
+2026-05-26T15:29:11.705603Z  INFO userfaultfd ouvert fd=10
+2026-05-26T15:29:11.705608Z  INFO API userfaultfd négociée features=131071 ioctls=9223372036854775811
+2026-05-26T15:29:11.705618Z  INFO région enregistrée avec userfaultfd addr="0x7a6820000000" size=6442450944 ioctls=316
+2026-05-26T15:29:11.705700Z  INFO serveur métriques démarré addr=0.0.0.0:9300
+2026-05-26T15:29:11.705734Z  INFO thread uffd-handler démarré tid=ThreadId(8)
+2026-05-26T15:29:12.379184Z  INFO scheduler vCPU élastique activé vm_id=2301 initial_vcpus=1 max_vcpus=1 overcommit=3 scale_interval=30
+2026-05-26T15:29:12.379195Z  INFO === début du scénario de démonstration === demo_pages=64
+2026-05-26T15:29:12.379197Z  INFO étape 1/5 : écriture des valeurs initiales dans 64 pages
+2026-05-26T15:29:12.380353Z  INFO étape 1/5 : ok
+2026-05-26T15:29:12.380361Z  INFO étape 2/5 : éviction des pages paires
+2026-05-26T15:29:12.380559Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:12.380696Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:12.380816Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:12.381945Z  INFO étape 2/5 : ok evicted=32 elapsed_ms=1
+2026-05-26T15:29:12.381951Z  INFO étape 3/5 : lecture + vérification d'intégrité
+2026-05-26T15:29:12.383297Z  INFO étape 3/5 : ok pages=64 elapsed_ms=1 errors=0
+2026-05-26T15:29:12.383304Z  INFO étape 4/5 : recall LIFO des pages évinvées
+2026-05-26T15:29:12.383306Z  INFO étape 4/5 : ok recalled=0 elapsed_ms=0
+2026-05-26T15:29:12.383308Z  INFO étape 5/5 : résultats pages_evicted=32 pages_recalled=0 faults_caught=96 faults_served=96 fetch_zeros=64 integrity_ok=true
+2026-05-26T15:29:12.383311Z  INFO SUCCÈS : toutes les pages lues avec intégrité correcte
+2026-05-26T15:29:12.383313Z  INFO métriques finales faults=96 served=96 errors=0 evicted=32 fetched=32 recalled=0 zeros=64 local_present=64 alerts=0 migrations=0
+
+[1m▶ Vérification résultats[0m
+
+[1m▶ Vérification status store[0m
+[0;34m[INFO][0m pages stockées dans le store : 32
+[0;32m[PASS][0m smoke test OK (1s) — integrity_ok=true, errors=0
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 02 — Réplication 2 stores  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 2 — Réplication 2 stores (VM 2301, 6144 MiB)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage stores s0 et s1[0m
+[0;34m[INFO][0m store s0 démarré sur :9100 (log: /tmp/omega-store-s0.log)
+[0;34m[INFO][0m store s1 démarré sur :9101 (log: /tmp/omega-store-s1.log)
+
+[1m▶ Agent demo avec réplication activée[0m
+2026-05-26T15:29:20.955869Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9100", "127.0.0.1:9101"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:29:20.955889Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:29:20.956029Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:20.956306Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:20.956416Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9100
+2026-05-26T15:29:20.956419Z  INFO store: PONG ok store_idx=1 addr=127.0.0.1:9101
+2026-05-26T15:29:20.956735Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+2026-05-26T15:29:20.956746Z  INFO GPU détecté sur ce store idx=1 addr=127.0.0.1:9201 gpu_count=1
+2026-05-26T15:29:20.956754Z  INFO région mémoire allouée base="0x7f6ad0000000" size_bytes=6442450944 num_pages=1572864 backend=Anonymous
+2026-05-26T15:29:20.957813Z  INFO userfaultfd ouvert fd=11
+2026-05-26T15:29:20.957819Z  INFO API userfaultfd négociée features=131071 ioctls=9223372036854775811
+2026-05-26T15:29:20.957825Z  INFO région enregistrée avec userfaultfd addr="0x7f6ad0000000" size=6442450944 ioctls=316
+2026-05-26T15:29:20.957944Z  INFO thread uffd-handler démarré tid=ThreadId(8)
+2026-05-26T15:29:20.957958Z  INFO serveur métriques démarré addr=0.0.0.0:9300
+2026-05-26T15:29:21.635599Z  INFO scheduler vCPU élastique activé vm_id=2301 initial_vcpus=1 max_vcpus=1 overcommit=3 scale_interval=30
+2026-05-26T15:29:21.635612Z  INFO === début du scénario de démonstration === demo_pages=64
+2026-05-26T15:29:21.635614Z  INFO étape 1/5 : écriture des valeurs initiales dans 64 pages
+2026-05-26T15:29:21.636386Z  INFO étape 1/5 : ok
+2026-05-26T15:29:21.636391Z  INFO étape 2/5 : éviction des pages paires
+2026-05-26T15:29:21.636608Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:21.636732Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:21.636876Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:21.636976Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:21.637079Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:21.637184Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:29:21.639170Z  INFO étape 2/5 : ok evicted=32 elapsed_ms=2
+2026-05-26T15:29:21.639176Z  INFO étape 3/5 : lecture + vérification d'intégrité
+2026-05-26T15:29:21.640477Z  INFO étape 3/5 : ok pages=64 elapsed_ms=1 errors=0
+2026-05-26T15:29:21.640484Z  INFO étape 4/5 : recall LIFO des pages évinvées
+2026-05-26T15:29:21.640486Z  INFO étape 4/5 : ok recalled=0 elapsed_ms=0
+2026-05-26T15:29:21.640488Z  INFO étape 5/5 : résultats pages_evicted=32 pages_recalled=0 faults_caught=96 faults_served=96 fetch_zeros=64 integrity_ok=true
+2026-05-26T15:29:21.640491Z  INFO SUCCÈS : toutes les pages lues avec intégrité correcte
+2026-05-26T15:29:21.640493Z  INFO métriques finales faults=96 served=96 errors=0 evicted=32 fetched=32 recalled=0 zeros=64 local_present=64 alerts=0 migrations=0
+
+[1m▶ Vérification intégrité[0m
+
+[1m▶ Vérification pages sur les deux stores[0m
+[0;34m[INFO][0m store s0 : 32 pages
+[0;34m[INFO][0m store s1 : 32 pages
+[0;32m[PASS][0m réplication OK (1s) — s0=32 pages, s1=32 pages
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 03 — Failover store  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 3 — Failover store (VM 2301, 6144 MiB)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage stores s0 (primaire) et s1 (secondaire)[0m
+[0;34m[INFO][0m store fa0 démarré sur :9100 (log: /tmp/omega-store-fa0.log)
+[0;34m[INFO][0m store fa1 démarré sur :9101 (log: /tmp/omega-store-fa1.log)
+
+[1m▶ Phase 1 : éviction des pages vers les 2 stores (réplication)[0m
+[0;34m[INFO][0m pages sur s1 avant failover : 32
+
+[1m▶ Phase 2 : arrêt brutal du store primaire s0[0m
+[0;34m[INFO][0m store s0 tué
+
+[1m▶ Phase 3 : vérification que s1 répond encore[0m
+[0;34m[INFO][0m pages sur s1 après failover : 32
+
+[1m▶ Phase 4 : lecture depuis le store survivant (agent demo sans s0)[0m
+2026-05-26T15:29:32.002853Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9101"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:29:32.002890Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:29:32.003035Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:32.003150Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9101
+2026-05-26T15:29:32.003229Z  WARN status inaccessible idx=0 addr=127.0.0.1:9200 error=connexion 127.0.0.1:9200 : Connection refused (os error 111)
+2026-05-26T15:29:32.003239Z  INFO région mémoire allouée base="0x7017a8000000" size_bytes=6442450944 num_pages=1572864 backend=Anonymous
+2026-05-26T15:29:32.004202Z  INFO userfaultfd ouvert fd=10
+2026-05-26T15:29:32.004207Z  INFO API userfaultfd négociée features=131071 ioctls=9223372036854775811
+2026-05-26T15:29:32.004217Z  INFO région enregistrée avec userfaultfd addr="0x7017a8000000" size=6442450944 ioctls=316
+2026-05-26T15:29:32.004334Z  INFO serveur métriques démarré addr=0.0.0.0:9300
+2026-05-26T15:29:32.004336Z  INFO thread uffd-handler démarré tid=ThreadId(8)
+2026-05-26T15:29:32.673932Z  INFO scheduler vCPU élastique activé vm_id=2301 initial_vcpus=1 max_vcpus=1 overcommit=3 scale_interval=30
+2026-05-26T15:29:32.673943Z  INFO === début du scénario de démonstration === demo_pages=64
+2026-05-26T15:29:32.673945Z  INFO étape 1/5 : écriture des valeurs initiales dans 64 pages
+2026-05-26T15:29:32.674763Z  INFO étape 1/5 : ok
+2026-05-26T15:29:32.674770Z  INFO étape 2/5 : éviction des pages paires
+2026-05-26T15:29:32.674923Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:32.675037Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:32.675137Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9101
+2026-05-26T15:29:32.676099Z  INFO étape 2/5 : ok evicted=32 elapsed_ms=1
+2026-05-26T15:29:32.676104Z  INFO étape 3/5 : lecture + vérification d'intégrité
+2026-05-26T15:29:32.677404Z  INFO étape 3/5 : ok pages=64 elapsed_ms=1 errors=0
+2026-05-26T15:29:32.677411Z  INFO étape 4/5 : recall LIFO des pages évinvées
+2026-05-26T15:29:32.677413Z  INFO étape 4/5 : ok recalled=0 elapsed_ms=0
+2026-05-26T15:29:32.677415Z  INFO étape 5/5 : résultats pages_evicted=32 pages_recalled=0 faults_caught=96 faults_served=96 fetch_zeros=64 integrity_ok=true
+2026-05-26T15:29:32.677419Z  INFO SUCCÈS : toutes les pages lues avec intégrité correcte
+2026-05-26T15:29:32.677421Z  INFO métriques finales faults=96 served=96 errors=0 evicted=32 fetched=32 recalled=0 zeros=64 local_present=64 alerts=0 migrations=0
+[0;32m[PASS][0m failover OK — les pages sont accessibles depuis s1 malgré la perte de s0
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 04 — Éviction daemon  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 4 — Éviction daemon (VM 2301, 6144 MiB, 20s)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage store[0m
+[0;34m[INFO][0m store evict démarré sur :9100 (log: /tmp/omega-store-evict.log)
+
+[1m▶ Démarrage agent daemon (éviction forcée toutes les 2s)[0m
+
+[1m▶ Observation des métriques pendant 20s[0m
+  [  0s] pages_evicted=0       store.pages=0       [  2s] pages_evicted=16      store.pages=16      [  4s] pages_evicted=32      store.pages=32      [  6s] pages_evicted=48      store.pages=48      [  8s] pages_evicted=64      store.pages=64      [ 10s] pages_evicted=80      store.pages=80      [ 12s] pages_evicted=96      store.pages=96      [ 14s] pages_evicted=112     store.pages=112     [ 16s] pages_evicted=128     store.pages=128     [ 18s] pages_evicted=144     store.pages=144   
+[0;34m[INFO][0m pages évincées pendant le test : 160
+
+[1m▶ Vérification métriques[0m
+[0;34m[INFO][0m pages rappelées (attendu ~0) : 0
+
+[1m▶ Arrêt agent[0m
+
+[1m▶ Logs agent (dernières lignes)[0m
+2026-05-26T15:29:53.775276Z  INFO éviction batch terminée evicted=16 failed=0 cap_hit=false avail_before_mib=48222 avail_after_mib=48222 threshold_mib=999999
+2026-05-26T15:29:55.775353Z  INFO éviction batch terminée evicted=16 failed=0 cap_hit=false avail_before_mib=48125 avail_after_mib=48125 threshold_mib=999999
+2026-05-26T15:29:56.774828Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+2026-05-26T15:29:57.775187Z  INFO éviction batch terminée evicted=16 failed=0 cap_hit=false avail_before_mib=48079 avail_after_mib=48079 threshold_mib=999999
+2026-05-26T15:29:59.775233Z  INFO éviction batch terminée evicted=16 failed=0 cap_hit=false avail_before_mib=48246 avail_after_mib=48246 threshold_mib=999999
+2026-05-26T15:30:00.919479Z  INFO SIGTERM reçu — arrêt
+2026-05-26T15:30:00.919490Z  INFO arrêt — purge des pages distantes sur les stores
+2026-05-26T15:30:00.919600Z  INFO purge des pages distantes count=160 vm_id=2301
+2026-05-26T15:30:00.923932Z  INFO purge terminée vm_id=2301
+2026-05-26T15:30:00.923950Z  INFO métriques finales faults=160 served=160 errors=0 evicted=160 fetched=0 recalled=0 zeros=160 local_present=18446744073709551456 alerts=0 migrations=0
+[0;32m[PASS][0m éviction daemon OK — 160 pages évincées en 20s
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 10 — Multi-VM 3 agents  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 10 — Charge multi-VM (3 stores × 3 VMs : 2301 2302 2303)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage 3 stores[0m
+[0;34m[INFO][0m store m0 démarré sur :9100 (log: /tmp/omega-store-m0.log)
+[0;34m[INFO][0m store m1 démarré sur :9101 (log: /tmp/omega-store-m1.log)
+[0;34m[INFO][0m store m2 démarré sur :9102 (log: /tmp/omega-store-m2.log)
+
+[1m▶ Lancement 3 agents simultanés[0m
+
+[1m▶ Attente fin des 3 agents[0m
+[0;32m[PASS][0m agent vmid=2301 : SUCCÈS
+[0;32m[PASS][0m agent vmid=2302 : SUCCÈS
+[0;32m[PASS][0m agent vmid=2303 : SUCCÈS
+
+[1m▶ Vérification isolation : pas de collision de pages entre VMs[0m
+[0;34m[INFO][0m store :9200 — 33 pages
+[0;34m[INFO][0m store :9201 — 33 pages
+[0;34m[INFO][0m store :9202 — 30 pages
+[0;34m[INFO][0m total pages dans les stores : 96
+
+[1m▶ Vérification logs : aucune collision de vm_id[0m
+
+[1m▶ Vérification priorités recall[0m
+[0;34m[INFO][0m vmid=2301 recall_delay=?
+[0;34m[INFO][0m vmid=2302 recall_delay=?
+[0;34m[INFO][0m vmid=2303 recall_delay=?
+[0;32m[PASS][0m multi-VM OK (7s) — 3 VMs simultanées, aucune collision, tous SUCCÈS
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 18 — Recall LIFO  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 18 — Recall LIFO (VM 2301, 6144 MiB)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage store s0[0m
+[0;34m[INFO][0m store lifo0 démarré sur :9100 (log: /tmp/omega-store-lifo0.log)
+
+[1m▶ Éviction de pages dans le store (mode demo)[0m
+/tmp/omega-agent-lifo-evict.log contents:
+2026-05-26T15:30:23.539267Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9100"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:30:23.539285Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:30:23.539413Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:23.539550Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9100
+2026-05-26T15:30:23.539921Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+[0;34m[INFO][0m pages évincées dans le store : 32
+
+[1m▶ Vérification que le demo a exécuté un recall LIFO[0m
+
+[1m▶ Recall depuis un agent séparé (simule redémarrage après éviction)[0m
+[0;34m[INFO][0m pages dans le store avant recall : 32
+/tmp/omega-agent-lifo-recall.log:
+2026-05-26T15:30:24.273469Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9100"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:30:24.273488Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:30:24.273599Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:24.273846Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9100
+2026-05-26T15:30:24.274184Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+2026-05-26T15:30:24.274193Z  INFO région mémoire allouée base="0x75e628000000" size_bytes=6442450944 num_pages=1572864 backend=Anonymous
+2026-05-26T15:30:24.275173Z  INFO userfaultfd ouvert fd=10
+2026-05-26T15:30:24.275179Z  INFO API userfaultfd négociée features=131071 ioctls=9223372036854775811
+2026-05-26T15:30:24.275189Z  INFO région enregistrée avec userfaultfd addr="0x75e628000000" size=6442450944 ioctls=316
+2026-05-26T15:30:24.275270Z  INFO thread uffd-handler démarré tid=ThreadId(8)
+2026-05-26T15:30:24.275322Z  INFO serveur métriques démarré addr=0.0.0.0:9300
+2026-05-26T15:30:24.968306Z  INFO scheduler vCPU élastique activé vm_id=2301 initial_vcpus=1 max_vcpus=1 overcommit=3 scale_interval=30
+2026-05-26T15:30:24.968318Z  INFO === début du scénario de démonstration === demo_pages=64
+2026-05-26T15:30:24.968320Z  INFO étape 1/5 : écriture des valeurs initiales dans 64 pages
+2026-05-26T15:30:24.969238Z  INFO étape 1/5 : ok
+2026-05-26T15:30:24.969244Z  INFO étape 2/5 : éviction des pages paires
+2026-05-26T15:30:24.969392Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:24.969582Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:24.969674Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:24.970620Z  INFO étape 2/5 : ok evicted=32 elapsed_ms=1
+
+[1m▶ Vérification intégrité du recall[0m
+[0;34m[INFO][0m pages dans le store après recall : 32
+
+[1m▶ Vérification logs recall LIFO[0m
+[0;34m[INFO][0m recall LIFO confirmé dans les logs
+[0;32m[PASS][0m recall LIFO OK — pages évincées et rappelées avec intégrité vérifiée
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 20 — Prefetch stride  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 20 — Prefetch stride (VM 2301, 6144 MiB)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage store pour les pages préfetchées[0m
+[0;34m[INFO][0m store pf0 démarré sur :9100 (log: /tmp/omega-store-pf0.log)
+
+[1m▶ Agent demo avec prefetch activé[0m
+2026-05-26T15:30:32.541964Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9100"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:30:32.541984Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:30:32.542052Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:32.542181Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9100
+2026-05-26T15:30:32.542489Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+2026-05-26T15:30:32.542499Z  INFO région mémoire allouée base="0x74971c000000" size_bytes=6442450944 num_pages=1572864 backend=Anonymous
+2026-05-26T15:30:32.543447Z  INFO userfaultfd ouvert fd=10
+2026-05-26T15:30:32.543452Z  INFO API userfaultfd négociée features=131071 ioctls=9223372036854775811
+2026-05-26T15:30:32.543462Z  INFO région enregistrée avec userfaultfd addr="0x74971c000000" size=6442450944 ioctls=316
+2026-05-26T15:30:32.543465Z  INFO préfetch séquentiel activé lookahead=3 max_cached=64
+2026-05-26T15:30:32.543566Z  INFO thread uffd-handler démarré tid=ThreadId(8)
+2026-05-26T15:30:32.543584Z  INFO serveur métriques démarré addr=0.0.0.0:9300
+2026-05-26T15:30:33.229560Z  INFO scheduler vCPU élastique activé vm_id=2301 initial_vcpus=1 max_vcpus=1 overcommit=3 scale_interval=30
+2026-05-26T15:30:33.229574Z  INFO === début du scénario de démonstration === demo_pages=64
+2026-05-26T15:30:33.229577Z  INFO étape 1/5 : écriture des valeurs initiales dans 64 pages
+2026-05-26T15:30:33.230350Z  INFO étape 1/5 : ok
+2026-05-26T15:30:33.230355Z  INFO étape 2/5 : éviction des pages paires
+2026-05-26T15:30:33.230552Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:33.230727Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:33.230867Z  INFO connecté au store (TCP clair) addr=127.0.0.1:9100
+2026-05-26T15:30:33.232017Z  INFO étape 2/5 : ok evicted=32 elapsed_ms=1
+2026-05-26T15:30:33.232022Z  INFO étape 3/5 : lecture + vérification d'intégrité
+2026-05-26T15:30:33.233289Z  INFO étape 3/5 : ok pages=64 elapsed_ms=1 errors=0
+2026-05-26T15:30:33.233296Z  INFO étape 4/5 : recall LIFO des pages évinvées
+2026-05-26T15:30:33.233298Z  INFO étape 4/5 : ok recalled=0 elapsed_ms=0
+2026-05-26T15:30:33.233300Z  INFO étape 5/5 : résultats pages_evicted=32 pages_recalled=0 faults_caught=96 faults_served=96 fetch_zeros=64 integrity_ok=true
+2026-05-26T15:30:33.233302Z  INFO SUCCÈS : toutes les pages lues avec intégrité correcte
+2026-05-26T15:30:33.233304Z  INFO métriques finales faults=96 served=96 errors=0 evicted=32 fetched=32 recalled=0 zeros=64 local_present=64 alerts=0 migrations=0
+
+[1m▶ Vérification résultat demo[0m
+
+[1m▶ Vérification traces prefetch[0m
+[0;34m[INFO][0m logs prefetch/stride trouvés : 0
+0 lignes
+[0;32m[PASS][0m prefetch stride OK — détection stride et pré-chargement confirmés
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 21 — TLS TOFU  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 21 — TLS TOFU (VM 2301, 6144 MiB)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Démarrage store s0 avec TLS activé[0m
+[0;34m[INFO][0m store s0 TLS démarré
+
+[1m▶ Récupération empreinte TLS du store s0[0m
+[1;33m[WARN][0m empreinte absente du /status — le store peut ne pas exposer tls_fingerprint
+[1;33m[WARN][0m vérification via les logs du store
+[0;34m[INFO][0m empreinte TLS store s0 : 383c7b013f371146
+
+[1m▶ Test 1 : agent avec la bonne empreinte → doit réussir[0m
+2026-05-26T15:30:41.801299Z  INFO agent démarré vm_id=2301 stores=["127.0.0.1:9100"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=1 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=demo
+2026-05-26T15:30:41.801319Z  INFO vérification de la connectivité aux stores...
+2026-05-26T15:30:41.801849Z  INFO connecté au store (TLS) addr=127.0.0.1:9100
+2026-05-26T15:30:41.842906Z  INFO store: PONG ok store_idx=0 addr=127.0.0.1:9100
+2026-05-26T15:30:41.843434Z  INFO GPU détecté sur ce store idx=0 addr=127.0.0.1:9200 gpu_count=1
+2026-05-26T15:30:41.843447Z  INFO région mémoire allouée base="0x783ba4000000" size_bytes=6442450944 num_pages=1572864 backend=Anonymous
+2026-05-26T15:30:41.844418Z  INFO userfaultfd ouvert fd=10
+2026-05-26T15:30:41.844424Z  INFO API userfaultfd négociée features=131071 ioctls=9223372036854775811
+2026-05-26T15:30:41.844433Z  INFO région enregistrée avec userfaultfd addr="0x783ba4000000" size=6442450944 ioctls=316
+2026-05-26T15:30:41.844550Z  INFO thread uffd-handler démarré tid=ThreadId(8)
+2026-05-26T15:30:41.844559Z  INFO serveur métriques démarré addr=0.0.0.0:9300
+2026-05-26T15:30:42.534689Z  INFO scheduler vCPU élastique activé vm_id=2301 initial_vcpus=1 max_vcpus=1 overcommit=3 scale_interval=30
+2026-05-26T15:30:42.534701Z  INFO === début du scénario de démonstration === demo_pages=64
+2026-05-26T15:30:42.534703Z  INFO étape 1/5 : écriture des valeurs initiales dans 64 pages
+2026-05-26T15:30:42.535683Z  INFO étape 1/5 : ok
+2026-05-26T15:30:42.535690Z  INFO étape 2/5 : éviction des pages paires
+2026-05-26T15:30:42.536198Z  INFO connecté au store (TLS) addr=127.0.0.1:9100
+2026-05-26T15:30:42.577450Z  INFO connecté au store (TLS) addr=127.0.0.1:9100
+2026-05-26T15:30:42.618363Z  INFO connecté au store (TLS) addr=127.0.0.1:9100
+2026-05-26T15:30:42.660385Z  INFO étape 2/5 : ok evicted=32 elapsed_ms=124
+[0;32m[PASS][0m connexion TLS avec bonne empreinte : OK
+
+[1m▶ Test 2 : agent avec une fausse empreinte → doit échouer ou avertir[0m
+[0;34m[INFO][0m rejet TLS confirmé avec fausse empreinte
+[0;32m[PASS][0m rejet TLS OK — fausse empreinte refusée
+
+[1m▶ Vérification chiffrement du canal (tcpdump si disponible)[0m
+canal chiffré — aucun bloc de zéros consécutifs détecté
+[0;34m[INFO][0m chiffrement TLS vérifié via capture réseau
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 23 — Disk I/O scheduler  [192.168.123.100, isolé][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 23 — Scheduler I/O disque[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ 1/3 : tests unitaires disk_scheduler[0m
+[1;33m[WARN][0m CLUSTER_MODE=1 — tests unitaires Rust ignorés sur le nœud Proxmox
+[1;33m[WARN][0m Lancer le test 23 localement depuis le dépôt pour valider cargo/disk_scheduler
+
+[1m▶ 2/3 : démarrage agent avec disk-scheduler-enabled[0m
+[1;33m[WARN][0m CLUSTER_MODE=1 — test demo local ignoré; passage au test cluster io.weight
+
+[1m▶ 3/3 : test cluster — io.weight sous charge I/O (VM 2301)[0m
+[0;34m[INFO][0m VM 2301 est 'stopped' sur ram — démarrage...
+[1;33m[WARN][0m qm start 2301 a échoué: generating cloud-init ISO NUMA needs to be enabled for memory hotplug
+[1;33m[WARN][0m échec démarrage VM 2301 sur ram
+[0;31m[FAIL][0m aucune VM de test utilisable — vérifier OMEGA_TEST_VMIDS (2301 2302 2303 2304 2305 2306 2307 2308 2309 2310)
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 30A — Normalisation VMs Omega  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 30 — Conformite VMs Omega[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ VM 2301[0m
+[0;34m[INFO][0m VM 2301 localisée sur ram (192.168.123.101)
+[1;33m[WARN][0m VM 2301 non conforme CPU (vcpus=1, max_config=6, smp='absent') — réparation Omega: cores=6, sockets=1, vcpus=1
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[1;33m[WARN][0m VM 2301: qemu-guest-agent configure mais non joignable depuis le nœud hôte actuel; verifier service qemu-guest-agent dans l'invite et relancer après reboot
+
+[1m▶ VM 2302[0m
+[0;34m[INFO][0m VM 2302 localisée sur rem (192.168.123.102)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2302: agent invite joignable
+
+[1m▶ VM 2303[0m
+[0;34m[INFO][0m VM 2303 localisée sur emilia (192.168.123.100)
+[1;33m[WARN][0m VM 2303: cores*sockets=1; les tests Omega exigent au moins 2 vCPU max pour valider le scale-up
+[1;33m[WARN][0m VM 2303: vcpus=1 >= max_vcpus=1; elle demarre deja au plafond et ne peut pas tester le scale-up
+[1;33m[WARN][0m VM 2303: description omega_max_vcpus=6 incoherent avec la config Proxmox, attendu 1
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[1;33m[WARN][0m VM 2303: -smp ne contient pas maxcpus=1; appliquer la correction puis stop/start la VM pour regenerer la ligne QEMU
+[0;32m[PASS][0m VM 2303: agent invite joignable
+
+[1m▶ VM 2304[0m
+[0;34m[INFO][0m VM 2304 localisée sur ram (192.168.123.101)
+  -smp '1,sockets=1,cores=3,maxcpus=3' \
+[0;32m[PASS][0m VM 2304: agent invite joignable
+
+[1m▶ VM 2305[0m
+[0;34m[INFO][0m VM 2305 localisée sur rem (192.168.123.102)
+  -smp '1,sockets=1,cores=4,maxcpus=4' \
+[0;32m[PASS][0m VM 2305: agent invite joignable
+
+[1m▶ VM 2306[0m
+[0;34m[INFO][0m VM 2306 localisée sur emilia (192.168.123.100)
+  -smp '1,sockets=1,cores=2,maxcpus=2' \
+[0;32m[PASS][0m VM 2306: agent invite joignable
+
+[1m▶ VM 2307[0m
+[0;34m[INFO][0m VM 2307 localisée sur ram (192.168.123.101)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2307: agent invite joignable
+
+[1m▶ VM 2308[0m
+[0;34m[INFO][0m VM 2308 localisée sur rem (192.168.123.102)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2308: agent invite joignable
+
+[1m▶ VM 2309[0m
+[0;34m[INFO][0m VM 2309 localisée sur emilia (192.168.123.100)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2309: agent invite joignable
+
+[1m▶ VM 2310[0m
+[0;34m[INFO][0m VM 2310 localisée sur emilia (192.168.123.100)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2310: agent invite joignable
+[0;31m[FAIL][0m 4 erreur(s) de conformite VM
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 05 — vCPU élastique  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2301 running sur ram
+[0;34m[INFO][0m VM retenue pour le test : 2301
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 5 — vCPU élastique (VM 2301)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Vérifications prérequis[0m
+[0;32m[PASS][0m VM 2301 en cours d'exécution — RAM=6144 MiB cores=6
+
+[1m▶ Remise à 1 vCPU (état de référence)[0m
+
+[1m▶ État initial vCPU[0m
+[0;34m[INFO][0m vCPUs runtime actuels : 1
+
+[1m▶ Démarrage agent avec vCPU initial=1, max=6[0m
+
+[1m▶ Vérification vCPU initial = 1[0m
+[0;34m[INFO][0m vCPUs runtime après démarrage agent : 1
+
+[1m▶ Pool vCPU partagé[0m
+{
+    "total_vcpus": 18,
+    "vms": {
+        "999": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.8336185,
+            "last_updated_secs": 1779809574
+        },
+        "100": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 4.1464515,
+            "last_updated_secs": 1779809555
+        },
+        "400": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779809556
+        },
+        "2301": {
+            "current_vcpus": 1,
+            "requested_vcpus": 6,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779809581
+        }
+    }
+}
+
+[1m▶ Simulation charge CPU forte (stress-ng dans la VM — 120s)[0m
+[0;34m[INFO][0m seuil scale-up=45% | seuil scale-down=15% | intervalle=5s
+[0;31m[FAIL][0m qemu-guest-agent absent/injoignable pour VM 2301 sur 192.168.123.101 — le test 05 exige une charge CPU dans le guest. Vérifier depuis ce nœud: qm guest cmd 2301 ping; puis dans la VM: apt-get install -y qemu-guest-agent stress-ng && systemctl start qemu-guest-agent
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 08 — Migration RAM  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2301 running sur ram
+[0;34m[INFO][0m VM retenue pour le test : 2301
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 8 — Migration RAM (VM 2301)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Vérifications prérequis[0m
+
+[1m▶ Nœud initial de la VM[0m
+[0;34m[INFO][0m VM 2301 sur : ram
+
+[1m▶ Validation des 6 conditions de migration[0m
+[0;34m[INFO][0m 1/6 migration activée : --migration-enabled, intervalle=10s, fenêtre=120s
+[0;34m[INFO][0m 2/6 raison de migration : pression RAM + balloon activé (512/6144 MiB)
+[0;34m[INFO][0m 3/6 cible saine : source_ram=22902 MiB, target=192.168.123.102 target_ram=52886 MiB target_vcpu_free=36
+[0;34m[INFO][0m 4/6 nom Proxmox cible résolu : 192.168.123.102 -> rem
+update VM 2301: -ide2 none
+Removing image: 100% complete...done.
+[0;34m[INFO][0m 5/6 VM migrable : CD-ROM ide2 éjecté
+[0;34m[INFO][0m 5/6 VM migrable : pas de hostpci/CD-ROM local bloquant
+[0;34m[INFO][0m 6/6 seuils/durée : migration_interval=10s, watch=120s, force_fallback=1
+[0;34m[INFO][0m Cible déterministe si Omega ne migre pas seul : 192.168.123.102 (pvesh: rem)
+
+[1m▶ Démarrage agent avec migration activée et seuil d'éviction agressif[0m
+
+[1m▶ Simulation pression mémoire (stress-ng 90s)[0m
+[0;34m[INFO][0m démarrage stress-ng --vm 1 --vm-bytes 85% --timeout 90s
+[1;33m[WARN][0m charge mémoire invitée impossible — qemu-guest-agent ou stress-ng indisponible
+[1;33m[WARN][0m charge mémoire invitée indisponible — fallback pression mémoire hôte sans apt
+[0;34m[INFO][0m stress-ng mémoire hôte lancé (70%, 90s, pid=1620891)
+
+[1m▶ Surveillance éviction + migration pendant 120s[0m
+  [  0s] évictions loggées=7     migration=non  [  5s] évictions loggées=8     migration=non  [ 10s] évictions loggées=10    migration=non  [ 15s] évictions loggées=11    migration=non  [ 20s] évictions loggées=13    migration=non  [ 25s] évictions loggées=15    migration=non  [ 30s] évictions loggées=17    migration=non  [ 35s] évictions loggées=18    migration=non  [ 41s] évictions loggées=20    migration=non  [ 46s] évictions loggées=22    migration=non  [ 51s] évictions loggées=23    migration=non  [ 56s] évictions loggées=25    migration=non  [ 61s] évictions loggées=27    migration=non  [ 66s] évictions loggées=28    migration=non  [ 71s] évictions loggées=30    migration=non  [ 76s] évictions loggées=32    migration=non  [ 81s] évictions loggées=33    migration=non  [ 86s] évictions loggées=35    migration=non

@@ -54,6 +54,12 @@ pub struct CgroupIoController {
     cgroup_root: PathBuf,
 }
 
+impl Default for CgroupIoController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CgroupIoController {
     pub fn new() -> Self {
         Self {

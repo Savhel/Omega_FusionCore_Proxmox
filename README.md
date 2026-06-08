@@ -56,15 +56,20 @@ Les vCPU sont alloués dynamiquement. Une VM démarre avec un minimum et reçoit
 
 Il ne s'agit pas d'un "prêt" direct de vCPU entre VMs : on rééquilibre le temps CPU hôte et les quotas cgroup, puis on migre quand nécessaire.
 
-### 5. Multiplexeur GPU
+### 5. Proxy GPU applicatif et placement GPU global
 
-Un GPU physique est partagé entre toutes les VMs d'un nœud. Chaque VM a un budget VRAM configurable via l'API de contrôle. Le daemon arbitre les accès, expose l'état GPU du nœud, nettoie les budgets après migration et le controller évite d'envoyer une VM GPU vers un nœud qui n'a pas assez de VRAM libre.
+Un GPU physique peut être partagé entre plusieurs VMs par proxy applicatif. La
+VM n'a pas besoin de `/dev/nvidia*` directement: elle soumet un job à
+`omega-gpu-proxy` sur le nœud GPU, avec un budget VRAM logique par VM.
 
-La source de vérité GPU est explicite :
+Le placement GPU global suit trois chemins:
 
-- la capacité GPU du nœud vient du backend DRM réel (`/dev/dri/renderD*` + sysfs VRAM)
-- les budgets GPU des VMs viennent de la configuration Proxmox (`description` / `tags`)
-- le controller ne réinvente pas ces valeurs, il consomme ce que le daemon et Proxmox publient
+- si la VM est déjà sur un nœud GPU sain, elle reste locale;
+- sinon Omega choisit le meilleur nœud GPU selon VRAM libre, RAM, vCPU et pression disque, puis peut demander une migration;
+- si la migration n'est pas possible, la VM utilise le fallback réseau via `omega-gpu-proxy`.
+
+Les tests stricts exigent `backend=torch`, `device=cuda` pour prouver que le
+worker tourne réellement sur CUDA, pas sur le fallback CPU.
 
 ### 6. Scheduler disque local
 
@@ -302,14 +307,16 @@ Le menu couvre l'intégralité du cycle de vie :
  [d]  Déployer               (copie binaires SSH + services systemd + wrapper QEMU)
 
 ── Tests ──────────────────────────────────────
- [A]  Tous les tests — sections 1→5 avec pause entre chaque
+ [A]  Tous les tests — sections 1→6 avec pause entre chaque
+ [P]  Production stricte — tout le projet, aucun skip demandé
  [1]  Section 1 — Isolés    : smoke · réplication · failover · éviction
- [2]  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU · disk I/O
+ [2]  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU
  [3]  Section 3 — Cluster   : vCPU élastique · migration · balloon · compaction
- [4]  Section 4 — GPU       : placement · scheduler round-robin
- [5]  Section 5 — Mixtes    : stress · live migration sous pression · drain nœud
+ [4]  Section 4 — GPU       : placement · scheduler · proxy · CUDA
+ [5]  Section 5 — Mixtes    : stress · live migration · drain · GPU
+ [6]  Section 6 — Physique  : install · réseau VM · Ceph/GPU réel · panne · soak
  [g]  Activer/désactiver les tests GPU (machines physiques avec GPU)
- 00–23 / M1–M7  Lancer un test individuel par numéro
+ 00–36 / M1–M9  Lancer un test individuel par numéro
 ```
 
 **Workflow typique première installation :**
@@ -357,6 +364,30 @@ ssh root@pve3 hostname
 - Ceph RBD pour le stockage des disques VMs (partagé entre nœuds)
 - Rust 1.75+ (compilation sur la machine de dev)
 - Python 3.10+
+
+## Tests importants actuels
+
+| Test | Rôle |
+|------|------|
+| `05` | vCPU élastique sur vraie VM Proxmox |
+| `08` | migration RAM sous pression |
+| `22` | balloon thin-provisioning puis escalade migration |
+| `30` | conformité des VMs Omega avant tests lourds |
+| `31` | scalabilité VMs physiques |
+| `32` | proxy GPU applicatif multi-VM |
+| `33` | métriques production complètes |
+| `34` / `M8` | placement GPU global: local, migration vers nœud GPU ou fallback |
+| `35` / `M9` | fallback GPU réseau CUDA |
+| `36` | concurrence CUDA stricte |
+
+Commandes de santé rapides:
+
+```bash
+systemctl is-active omega-daemon
+systemctl status omega-daemon --no-pager
+curl -fsS http://127.0.0.1:9300/control/status | python3 -m json.tool
+curl -fsS http://127.0.0.1:9300/control/metrics | head
+```
 
 ## Documentation
 

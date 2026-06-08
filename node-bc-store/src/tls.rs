@@ -32,7 +32,8 @@
 //! - Handshake TLS 1.3 : ~0.5 ms (une seule fois par connexion)
 //! - Chiffrement AES-256-GCM : ~0.3 ns/octet = ~1.2 µs/page (4 Ko)
 //! - Surcoût total par page : < 2 µs (vs. latence réseau de 50–500 µs)
-//! → Impact négligeable sur les performances en pratique.
+//!
+//! Impact négligeable sur les performances en pratique.
 //!
 //! # Dépendances requises dans Cargo.toml
 //!

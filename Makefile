@@ -1,7 +1,7 @@
 # Makefile — omega-remote-paging
 # Commandes principales pour compiler, tester et lancer les composants.
 
-.PHONY: all build build-debug build-bridge deb test test-rust test-python test-integration \
+.PHONY: all build build-debug build-bridge deb deploy deploy-deb prepare-image test test-rust test-python test-integration \
         store-b store-c agent-demo controller-status controller-monitor \
         clean fmt clippy help
 
@@ -46,6 +46,21 @@ build-debug:
 deb:
 	@echo "==> Construction paquet Debian..."
 	bash $(ROOT_DIR)/scripts/build-deb.sh
+
+## deploy-deb : construit le .deb et le déploie sur tous les nœuds du cluster (recommandé)
+deploy-deb: deb
+	@echo "==> Déploiement .deb sur le cluster..."
+	SKIP_BUILD=1 bash $(ROOT_DIR)/scripts/deploy-deb.sh
+
+## deploy : (legacy) déploie les binaires individuellement via scp
+deploy: build
+	@echo "==> Déploiement binaires (legacy) sur le cluster..."
+	bash $(ROOT_DIR)/scripts/deploy.sh
+
+## prepare-image : prépare une image VM (QGA garanti, multi-distro) — IMAGE=/chemin.qcow2
+prepare-image:
+	@[ -n "$(IMAGE)" ] || { echo "Usage: make prepare-image IMAGE=/chemin/vers/image.qcow2"; exit 1; }
+	bash $(ROOT_DIR)/scripts/prepare-omega-image.sh --image "$(IMAGE)" $(PREPARE_ARGS)
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 

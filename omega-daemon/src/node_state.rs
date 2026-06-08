@@ -45,6 +45,10 @@ pub struct NodeStatus {
     pub local_vms: Vec<VmStatusEntry>,
     /// État GPU local si le multiplexeur est actif
     pub gpu: Option<GpuNodeStatus>,
+    /// Le nœud peut-il exécuter des VMs KVM ? (présence de /dev/kvm)
+    /// Faux sur un nœud nested sans virtualisation imbriquée exposée → le
+    /// placement doit l'exclure même s'il est joignable.
+    pub kvm_capable: bool,
     /// Timestamp Unix (secondes)
     pub timestamp_secs: u64,
 }
@@ -160,10 +164,9 @@ impl NodeState {
                 })
                 .collect()
         };
-        let disk_stats: std::collections::HashMap<
-            u32,
-            (f64, f64, u32, bool, bool, Option<String>),
-        > = self
+        // (read_mbps, write_mbps, weight, throttled, has_iops_cap, class)
+        type DiskStat = (f64, f64, u32, bool, bool, Option<String>);
+        let disk_stats: std::collections::HashMap<u32, DiskStat> = self
             .disk_io_scheduler
             .vm_snapshot()
             .into_iter()
@@ -259,6 +262,7 @@ impl NodeState {
             disk_pressure_pct: self.disk_io_scheduler.read_node_pressure_pct(),
             local_vms: vm_entries,
             gpu,
+            kvm_capable: std::path::Path::new("/dev/kvm").exists(),
             timestamp_secs: ts,
         }
     }

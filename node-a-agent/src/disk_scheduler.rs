@@ -115,7 +115,7 @@ impl DiskScheduler {
                 for &vmid in &self.vm_ids {
                     if current_class.get(&vmid) != Some(&IoClass::Idle)
                         && current_class.get(&vmid) != Some(&IoClass::Active)
-                        || current_class.get(&vmid).is_some()
+                        || current_class.contains_key(&vmid)
                     {
                         // On remet systématiquement au défaut quand pas de pression
                         if set_io_weight(vmid, IO_WEIGHT_DEFAULT) {

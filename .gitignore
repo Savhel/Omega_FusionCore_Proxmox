@@ -1,1 +1,18 @@
 target/*
+
+# Images VM volumineuses
+*.qcow2
+*.raw
+*.img
+
+# Symlinks externes (lab local)
+qemu-upstream
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Lockfiles d'édition
+.~lock.*

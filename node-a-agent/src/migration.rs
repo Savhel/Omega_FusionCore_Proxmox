@@ -3,10 +3,10 @@
 //! # Critère de migration (comparaison relative)
 //!
 //! Un nœud candidat est retenu quand il est **meilleur que le nœud courant** :
-//!   - RAM   : `target.available_mib > local_available_mib()`
-//!   - vCPU  : `target.vcpu_free > local_vcpu_free` (lu depuis omega-vcpu-pool.json)
-//!   - GPU   : veto absolu — si la VM requiert un GPU et que le nœud cible n'en a pas,
-//!             il est rejeté quelle que soit sa RAM ou ses vCPUs.
+//! - RAM   : `target.available_mib > local_available_mib()`
+//! - vCPU  : `target.vcpu_free > local_vcpu_free` (lu depuis omega-vcpu-pool.json)
+//! - GPU   : veto absolu — si la VM requiert un GPU et que le nœud cible n'en a pas,
+//!   il est rejeté quelle que soit sa RAM ou ses vCPUs.
 //!
 //! Il suffit qu'**un seul** critère soit meilleur (RAM OU vCPU) pour retenir le candidat
 //! (sous réserve que le veto GPU ne s'applique pas).

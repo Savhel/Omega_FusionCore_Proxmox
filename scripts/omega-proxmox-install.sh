@@ -423,6 +423,32 @@ systemctl enable omega-hookscript-watcher.service
 systemctl restart omega-hookscript-watcher.service
 success "service omega-hookscript-watcher actif (toutes les 10s)"
 
+# ─── Isolation iptables inter-VMs (chaîne OMEGA-ISOLATION) ──────────────────
+OMEGA_SUBNET="${OMEGA_NET_ZONE_OMEGA_NET:-10.50.30.0/24}"
+ISOLATION_SCRIPT_SRC="${OMEGA_ISOLATION_SCRIPT_SRC:-/opt/omega-remote-paging/scripts/vm-isolation.sh}"
+if [[ -f "$ISOLATION_SCRIPT_SRC" ]]; then
+    chmod +x "$ISOLATION_SCRIPT_SRC"
+    dpkg -s iptables-persistent >/dev/null 2>&1 || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent 2>/dev/null || true
+    bash "$ISOLATION_SCRIPT_SRC" --action init --subnet "$OMEGA_SUBNET" 2>/dev/null || true
+    bash "$ISOLATION_SCRIPT_SRC" --action save 2>/dev/null || true
+    success "Isolation iptables initialisée ($OMEGA_SUBNET)"
+fi
+
+# ─── Route vers réseau privé VMs (10.50.0.0/16 via pfSense) ─────────────────
+PFSENSE_WAN="${OMEGA_NET_PFSENSE_WAN_IP:-}"
+PRIVATE_NET="10.50.0.0/16"
+if [[ -n "$PFSENSE_WAN" ]]; then
+    ip route add "${PRIVATE_NET}" via "${PFSENSE_WAN}" 2>/dev/null || true
+    # Persistance : post-up sur l'interface qui sort vers pfSense
+    NODE_IFACE="$(ip route get "${PFSENSE_WAN}" 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)"
+    if [[ -n "$NODE_IFACE" ]] && ! grep -q "${PRIVATE_NET}" /etc/network/interfaces 2>/dev/null; then
+        sed -i "/^iface ${NODE_IFACE} inet/a\\    post-up ip route add ${PRIVATE_NET} via ${PFSENSE_WAN} || true\n    pre-down ip route del ${PRIVATE_NET} via ${PFSENSE_WAN} || true" \
+            /etc/network/interfaces 2>/dev/null || true
+    fi
+    success "Route ${PRIVATE_NET} via ${PFSENSE_WAN} configurée"
+fi
+
 # ─── Résumé ───────────────────────────────────────────────────────────────────
 
 echo

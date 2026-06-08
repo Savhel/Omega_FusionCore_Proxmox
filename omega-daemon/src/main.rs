@@ -201,11 +201,14 @@ async fn main() -> Result<()> {
                             ev.avg_usage_pct,
                             ev.avg_throttle,
                         );
-                        // Tentative hotplug immédiate si pression détectée
-                        if ev.avg_usage_pct >= omega_daemon::cgroup_cpu_monitor::USAGE_THRESHOLD
-                            || ev.avg_throttle
-                                >= omega_daemon::cgroup_cpu_monitor::THROTTLE_THRESHOLD
-                        {
+                        // Hotplug seulement si la pression est SOUTENUE (hystérésis via
+                        // needs_more_vcpus → high_load_since ≥ HOTPLUG_STABLE_SECS).
+                        // Un pic JVM/GC isolé ne déclenche plus rien → fin du ping-pong.
+                        let sustained = state
+                            .vcpu_scheduler
+                            .get_vm_state(ev.vm_id)
+                            .map_or(false, |s| s.needs_more_vcpus());
+                        if sustained {
                             apply_hotplug_if_possible(&state, &hotplug, &cpu_ctrl, ev.vm_id);
                         }
                     }
@@ -329,9 +332,7 @@ async fn main() -> Result<()> {
 
     // ─── Tâche 6 : Balloon Monitor — V4 ──────────────────────────────────
     if cfg.monitor_vms {
-        let _qmp_dir = cfg.qemu_pid_dir.replace("qemu-server", "qemu-server"); // même dossier
         let vm_tracker_ref = vm_tracker.clone();
-        let _threshold = cfg.evict_threshold_pct;
         let balloon_state = node_state.clone();
 
         // Le monitor balloon tourne dans un thread dédié (read QMP = bloquant)
@@ -528,7 +529,32 @@ fn ensure_vm_registered(
     conf_dir: &str,
     vm_id: u32,
 ) {
+    let (conf_min_vcpus, conf_max_vcpus) = read_vm_cpu_profile(conf_dir, vm_id).unwrap_or((1, 1));
+
+    // Déjà enregistrée : re-synchroniser le plancher (min) depuis la config Proxmox.
+    // Réactive l'élasticité après correction de `vcpus:` (ex. VM legacy bootant avec
+    // vcpus=cores, corrigée en vcpus=1) SANS redémarrer le daemon — sinon le profil
+    // n'était lu qu'une seule fois et min=max restait figé → aucun downscale possible.
     if state.vcpu_scheduler.has_vm(vm_id) {
+        if let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) {
+            let desired_min = conf_min_vcpus.max(1).min(vm_state.current_vcpus);
+            if desired_min != vm_state.min_vcpus {
+                match state
+                    .vcpu_scheduler
+                    .update_profile(vm_id, desired_min, vm_state.max_vcpus)
+                {
+                    Ok(()) => info!(
+                        vm_id,
+                        old_min = vm_state.min_vcpus,
+                        new_min = desired_min,
+                        "plancher vCPU re-synchronisé depuis la config (élasticité réactivée)"
+                    ),
+                    Err(reason) => {
+                        warn!(vm_id, desired_min, reason, "échec re-synchro plancher vCPU")
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -537,8 +563,6 @@ fn ensure_vm_registered(
         .as_ref()
         .map(|info| info.online_count.max(1))
         .unwrap_or(1);
-
-    let (conf_min_vcpus, conf_max_vcpus) = read_vm_cpu_profile(conf_dir, vm_id).unwrap_or((1, 1));
     let max_vcpus = qmp_vcpus
         .map(|info| info.total_count)
         .unwrap_or(conf_max_vcpus);
@@ -629,6 +653,7 @@ fn parse_vm_cpu_profile(content: &str) -> Option<(usize, usize)> {
     let mut sockets = 1usize;
     let mut cores = 1usize;
     let mut boot_vcpus: Option<usize> = None;
+    let mut omega_min: Option<usize> = None;
 
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("sockets:") {
@@ -648,11 +673,31 @@ fn parse_vm_cpu_profile(content: &str) -> Option<(usize, usize)> {
         } else if let Some(rest) = line.strip_prefix("vcpus:") {
             boot_vcpus = rest.trim().parse::<usize>().ok().filter(|v| *v > 0);
         }
+        // `omega_min_vcpus=N` = plancher DÉCLARATIF (source de vérité). Il vit dans la
+        // description, stockée soit en commentaire `#...` (fichier .conf), soit en
+        // `description: ...` (sortie `qm config`) → on le cherche n'importe où.
+        if let Some(v) = extract_omega_kv(line, "omega_min_vcpus=") {
+            omega_min = Some(v);
+        }
     }
 
     let max_vcpus = sockets.saturating_mul(cores).max(1);
-    let min_vcpus = boot_vcpus.unwrap_or(max_vcpus).clamp(1, max_vcpus);
+    // Priorité : omega_min_vcpus (déclaratif) > champ Proxmox `vcpus:` (boot) > max
+    // (historique). Toujours borné à [1, max_vcpus].
+    let min_vcpus = omega_min
+        .or(boot_vcpus)
+        .unwrap_or(max_vcpus)
+        .clamp(1, max_vcpus);
     Some((min_vcpus, max_vcpus))
+}
+
+/// Extrait l'entier qui suit `key` (ex. `omega_min_vcpus=`) où qu'il apparaisse dans
+/// la ligne, en s'arrêtant au premier non-chiffre. Renvoie None si absent ou 0.
+fn extract_omega_kv(line: &str, key: &str) -> Option<usize> {
+    let idx = line.find(key)?;
+    let after = &line[idx + key.len()..];
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<usize>().ok().filter(|v| *v > 0)
 }
 
 fn read_vm_cpu_profile_from_qm(vm_id: u32) -> Option<(usize, usize)> {
@@ -778,6 +823,28 @@ mod tests {
     fn test_parse_vm_cpu_profile_defaults_min_to_max_without_vcpus_line() {
         let profile = parse_vm_cpu_profile("cores: 2\nsockets: 2\nmemory: 512\n").unwrap();
         assert_eq!(profile, (4, 4));
+    }
+
+    #[test]
+    fn test_parse_vm_cpu_profile_omega_min_vcpus_is_authoritative() {
+        // omega_min_vcpus (déclaratif) prime sur le champ Proxmox `vcpus:`.
+        // Forme `qm config` (description: ...) ET forme .conf (commentaire #...).
+        let qm = parse_vm_cpu_profile(
+            "description: omega_min_vcpus=2 omega_max_vcpus=4\ncores: 4\nsockets: 1\nvcpus: 1\n",
+        )
+        .unwrap();
+        assert_eq!(qm, (2, 4));
+        let conf = parse_vm_cpu_profile(
+            "#omega_min_vcpus=3 omega_max_vcpus=4\ncores: 4\nsockets: 1\nvcpus: 1\n",
+        )
+        .unwrap();
+        assert_eq!(conf, (3, 4));
+        // Borné au plafond cores×sockets même si la valeur déclarée est trop grande.
+        let clamped = parse_vm_cpu_profile(
+            "description: omega_min_vcpus=9\ncores: 4\nsockets: 1\nvcpus: 1\n",
+        )
+        .unwrap();
+        assert_eq!(clamped, (4, 4));
     }
 
     #[test]

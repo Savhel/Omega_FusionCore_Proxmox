@@ -70,6 +70,10 @@ impl AnyStore {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn estimated_bytes(&self) -> u64 {
         (self.len() as u64).saturating_mul(PAGE_SIZE as u64)
     }

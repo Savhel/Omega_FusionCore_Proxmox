@@ -572,7 +572,7 @@ fn detect_backend(external_worker: Option<&str>) -> BackendSnapshot {
                 return BackendSnapshot {
                     kind: "nvidia_smi_detected".to_string(),
                     gpu_available: true,
-                    name: fields.get(0).cloned(),
+                    name: fields.first().cloned(),
                     driver: fields.get(1).cloned(),
                     total_vram_mib: total,
                     note: "GPU NVIDIA détecté. La v1 exécute le job de référence côté proxy; brancher un worker CUDA/PyTorch pour exécution GPU native.".to_string(),

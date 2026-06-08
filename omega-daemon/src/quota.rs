@@ -5,7 +5,8 @@
 //! Sans quota, une VM qui demande 10 Gio pourrait théoriquement accumuler :
 //! - 8 Gio de pages locales (RAM du nœud)
 //! - N Gio de pages distantes sans limite
-//! → dépassement de ce qu'elle a demandé.
+//!
+//! Cela conduit au dépassement de ce qu'elle a demandé.
 //!
 //! # Invariant garanti
 //!

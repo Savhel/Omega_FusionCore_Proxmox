@@ -278,3 +278,42 @@ impl AdaptiveInterval {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_starts_at_base() {
+        let i = AdaptiveInterval::new(10, 1);
+        assert_eq!(i.current(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn adaptive_switches_to_min_under_pressure() {
+        let mut i = AdaptiveInterval::new(10, 1);
+        i.update(true);
+        assert_eq!(i.current(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn adaptive_returns_to_base_when_pressure_clears() {
+        let mut i = AdaptiveInterval::new(10, 1);
+        i.update(true);
+        assert_eq!(i.current(), Duration::from_secs(1));
+        i.update(false);
+        assert_eq!(i.current(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn adaptive_idempotent_updates() {
+        let mut i = AdaptiveInterval::new(10, 1);
+        i.update(true);
+        i.update(true);
+        i.update(true);
+        assert_eq!(i.current(), Duration::from_secs(1));
+        i.update(false);
+        i.update(false);
+        assert_eq!(i.current(), Duration::from_secs(10));
+    }
+}

@@ -37,9 +37,10 @@ Options:
   --sockets N           Sockets QEMU. max_vcpus = cores * sockets. Defaut: 1.
   --disk-max-gib N      Budget disque logique documente. Defaut: 20.
   --gpu-vram-mib N      Budget VRAM documente. Defaut: 0.
-  --cpu TYPE            Type CPU QEMU. Defaut: kvm64.
+  --cpu TYPE            Type CPU QEMU. Defaut: x86-64-v2-AES (baseline v2, migrable).
   --ipconfig0 VALUE     Config IP cloud-init. Defaut: ip=dhcp.
   --nameserver VALUE    DNS cloud-init. Defaut: 8.8.8.8.
+  --vlan-tag N          Tag VLAN 802.1q sur net0 (1-4094). Vide = pas de tag.
   --root-password PASS  Mot de passe root cloud-init. Defaut: root.
   --bootstrap-guest     Installe qemu-guest-agent + stress-ng + SSH via cloud-init.
   --template-prepared   Le template contient deja qemu-guest-agent + stress-ng + SSH.
@@ -90,7 +91,7 @@ qm_set_retry() {
         printf '%s\n' "$out" >&2
         if [[ "$out" == *locked* || "$out" == *"command timed out"* || "$out" == *"File exists"* || "$out" == *"rbd create"* ]]; then
             echo "WARN: qm set VM $vmid échoué (tentative ${attempt}/${max_attempts}) — attente ${delay}s puis retry" >&2
-            qm set "$vmid" --delete ide2 >/dev/null 2>&1 || true
+            qm set "$vmid" --delete scsi1 >/dev/null 2>&1 || true
             pvesm free "${STORAGE}:vm-${vmid}-cloudinit" >/dev/null 2>&1 || true
             sleep "$delay"
             continue
@@ -102,7 +103,7 @@ qm_set_retry() {
 
 cleanup_cloudinit_disk() {
     local vmid="$1"
-    qm set "$vmid" --delete ide2 >/dev/null 2>&1 || true
+    qm set "$vmid" --delete scsi1 >/dev/null 2>&1 || true
     pvesm free "${STORAGE}:vm-${vmid}-cloudinit" >/dev/null 2>&1 || true
 }
 
@@ -141,6 +142,9 @@ verify_vm_profile() {
 
     net0="$(cfg_value "$cfg" net0)"
     [[ "$net0" == virtio=* && "$net0" == *"bridge=${BRIDGE}"* ]] || fail "VM $vmid non conforme: net0='$net0', attendu virtio sur ${BRIDGE}"
+    if [[ -n "$VLAN_TAG" ]]; then
+        [[ "$net0" == *"tag=${VLAN_TAG}"* ]] || fail "VM $vmid non conforme: net0='$net0', attendu tag=${VLAN_TAG}"
+    fi
 
     scsihw="$(cfg_value "$cfg" scsihw)"
     [[ "$scsihw" == virtio-scsi* ]] || fail "VM $vmid non conforme: scsihw='$scsihw', attendu virtio-scsi-*"
@@ -187,10 +191,11 @@ VCPUS=1
 SOCKETS=1
 DISK_MAX_GIB=20
 GPU_VRAM_MIB=0
-CPU_TYPE="kvm64"
+CPU_TYPE="${OMEGA_VM_CPU_TYPE:-x86-64-v2-AES}"  # baseline x86-64-v2 (kafka, binaires modernes) ; modèle fixe → migrable. kvm64 (ancien défaut) n'expose pas v2.
 IPCONFIG0="ip=dhcp"
 NAMESERVER="8.8.8.8"
 ROOT_PASSWORD="root"
+VLAN_TAG=""
 BOOTSTRAP_GUEST=false
 TEMPLATE_PREPARED=false
 SNIPPET_STORAGE="local"
@@ -223,6 +228,7 @@ while [[ $# -gt 0 ]]; do
         --ipconfig0) IPCONFIG0="$2"; shift 2 ;;
         --nameserver) NAMESERVER="$2"; shift 2 ;;
         --root-password) ROOT_PASSWORD="$2"; shift 2 ;;
+        --vlan-tag) VLAN_TAG="$2"; shift 2 ;;
         --bootstrap-guest) BOOTSTRAP_GUEST=true; shift ;;
         --template-prepared) TEMPLATE_PREPARED=true; shift ;;
         --snippet-storage) SNIPPET_STORAGE="$2"; shift 2 ;;
@@ -253,6 +259,12 @@ fi
 
 MAX_VCPUS=$((CORES * SOCKETS))
 [[ "$MAX_VCPUS" -ge 2 ]] || fail "--cores x --sockets doit etre >= 2 pour tester le vCPU elastique"
+if [[ -n "$VLAN_TAG" ]]; then
+    [[ "$VLAN_TAG" =~ ^[0-9]+$ && "$VLAN_TAG" -ge 1 && "$VLAN_TAG" -le 4094 ]] || fail "--vlan-tag doit etre un entier entre 1 et 4094"
+    NET0="virtio,bridge=${BRIDGE},firewall=1,tag=${VLAN_TAG}"
+else
+    NET0="virtio,bridge=${BRIDGE},firewall=1"
+fi
 [[ "$VCPUS" -lt "$MAX_VCPUS" ]] || fail "--vcpus doit etre strictement inferieur a --cores x --sockets (${MAX_VCPUS}) pour permettre le scale-up"
 HOST_MAX_VCPUS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 0)"
 if [[ "$HOST_MAX_VCPUS" =~ ^[0-9]+$ && "$HOST_MAX_VCPUS" -gt 0 && "$MAX_VCPUS" -gt "$HOST_MAX_VCPUS" ]]; then
@@ -300,7 +312,7 @@ for vmid in "${VMID_ARR[@]}"; do
             --hotplug cpu,disk,network \
             --numa 0 \
             --scsihw virtio-scsi-single \
-            --net0 "virtio,bridge=${BRIDGE},firewall=0" \
+            --net0 "${NET0}" \
             --serial0 socket \
             --vga serial0 \
             --tags "$TAGS" \
@@ -329,13 +341,13 @@ for vmid in "${VMID_ARR[@]}"; do
         --hotplug cpu,disk,network \
             --numa 0 \
         --scsihw virtio-scsi-single \
-        --net0 "virtio,bridge=${BRIDGE},firewall=0" \
+        --net0 "${NET0}" \
         --serial0 socket \
         --vga serial0 \
         --tags "$TAGS" \
         --description "$desc" \
         --boot order=scsi0 \
-        --ide2 "${STORAGE}:cloudinit" \
+        --scsi1 "${STORAGE}:cloudinit" \
         --ipconfig0 "$IPCONFIG0" \
         --nameserver "$NAMESERVER" \
         --ciuser "$CIUSER" \
@@ -375,6 +387,8 @@ ssh_pwauth: true
 password: ${ROOT_PASSWORD}
 chpasswd:
   expire: false
+package_update: false
+package_upgrade: false
 ${ssh_keys_yaml}
 ${package_yaml}
 write_files:
@@ -411,20 +425,29 @@ write_files:
     content: |
       [Unit]
       Description=Omega - garantit qemu-guest-agent actif a chaque boot
-      After=multi-user.target
+      After=sysinit.target
+      Before=multi-user.target
 
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/omega-qga-ensure
-      RemainAfterExit=no
-      TimeoutStartSec=120
+      RemainAfterExit=yes
+      TimeoutStartSec=60
 
       [Install]
       WantedBy=multi-user.target
+  - path: /etc/cloud/cloud.cfg.d/99-omega-network-persist.cfg
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Empêche cloud-init de réécrire la config réseau aux boots suivants.
+      # L'IP statique injectée au premier boot est conservée par netplan.
+      network:
+        config: disabled
 bootcmd:
   - [ bash, -lc, "if [ ! -e /var/lib/omega-firstboot-machine-id.done ]; then rm -f /etc/machine-id /var/lib/dbus/machine-id; systemd-machine-id-setup || true; touch /var/lib/omega-firstboot-machine-id.done; fi" ]
 runcmd:
-  - [ bash, -lc, "rm -f /var/lib/dhcp/* /var/lib/NetworkManager/*lease* /var/lib/systemd/network/* 2>/dev/null || true" ]
+  - [ bash, -lc, "rm -f /var/lib/dhcp/* /var/lib/NetworkManager/*lease* 2>/dev/null || true" ]
   - [ bash, -lc, "test -s /etc/machine-id || systemd-machine-id-setup || true" ]
   - [ bash, -lc, "rm -f /var/lib/dbus/machine-id; ln -sf /etc/machine-id /var/lib/dbus/machine-id || true" ]
   - [ bash, -lc, "echo '${CIUSER}:${ROOT_PASSWORD}' | chpasswd" ]
@@ -432,10 +455,27 @@ runcmd:
   - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/99-omega-root-login.conf; systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
   - [ bash, -lc, "systemctl unmask qemu-guest-agent.service qemu-guest-agent.socket 2>/dev/null || true; systemctl enable --now qemu-guest-agent.socket 2>/dev/null || true; systemctl restart qemu-guest-agent.service 2>/dev/null || systemctl start qemu-guest-agent.service 2>/dev/null || true" ]
   - [ bash, -lc, "systemctl daemon-reload; systemctl enable --now omega-qga-ensure.service 2>/dev/null || true" ]
-  - [ bash, -lc, "systemctl restart systemd-networkd 2>/dev/null || true; netplan apply 2>/dev/null || true; command -v dhclient >/dev/null 2>&1 && dhclient -r || true; command -v dhclient >/dev/null 2>&1 && dhclient -v || true" ]
+  - [ bash, -lc, "netplan apply 2>/dev/null || true; systemctl restart systemd-networkd 2>/dev/null || true" ]
 EOF
         qm set "$vmid" --cicustom "user=${SNIPPET_STORAGE}:snippets/${snippet_name}"
     fi
+
+    # Fichier firewall Proxmox par VM : isolation par défaut + accès admin
+    FW_FILE="/etc/pve/firewall/${vmid}.fw"
+    ADMIN_NET="${OMEGA_ADMIN_NET:-192.168.123.0/24}"
+    OMEGA_GW="${OMEGA_NET_VM_GATEWAY:-10.50.30.1}"
+    INFRA_NET="${OMEGA_NET_ZONE_INFRA_NET:-10.50.20.0/24}"
+    cat > "$FW_FILE" <<FWEOF
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[RULES]
+IN ACCEPT -source ${ADMIN_NET} -log nolog
+IN ACCEPT -source ${OMEGA_GW} -log nolog
+IN ACCEPT -source ${INFRA_NET} -log nolog
+FWEOF
 
     echo "Verification profil Omega VM $vmid"
     verify_vm_profile "$vmid"

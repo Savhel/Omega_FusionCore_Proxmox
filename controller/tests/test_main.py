@@ -501,7 +501,7 @@ def test_ensure_vm_gpu_placement_migrates_to_less_loaded_gpu_node(monkeypatch):
     assert calls == [
         (
             "http://node-a:9300/control/migrate",
-            {"vm_id": 101, "target": "pve2", "type": "live"},
+            {"vm_id": 101, "target": "pve2", "type": "live", "reason": "gpu_global_placement"},
         )
     ]
 

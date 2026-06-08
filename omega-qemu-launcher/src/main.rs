@@ -827,9 +827,7 @@ fn write_proxmox_wrapper(args: WriteProxmoxWrapperArgs) -> Result<PathBuf> {
     }
     // Proxmox vérifie la version QEMU avec --version/-version avant chaque démarrage.
     // Le passer directement au vrai binaire pour éviter l'échec de exec-proxmox.
-    lines.push(format!(
-        "if [ \"${{1:-}}\" = \"--version\" ] || [ \"${{1:-}}\" = \"-version\" ]; then exec \"$OMEGA_REAL_QEMU_BIN\" \"$@\"; fi"
-    ));
+    lines.push("if [ \"${1:-}\" = \"--version\" ] || [ \"${1:-}\" = \"-version\" ]; then exec \"$OMEGA_REAL_QEMU_BIN\" \"$@\"; fi".to_string());
     lines.push(format!(
         "exec {} exec-proxmox -- \"$@\"",
         shell_escape_path(&launcher)

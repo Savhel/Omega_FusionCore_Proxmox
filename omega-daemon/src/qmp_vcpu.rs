@@ -32,6 +32,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -61,7 +62,10 @@ pub struct VcpuEntry {
     pub qom_path: String,
 }
 
+// Champs conservés pour le comptage des slots (query_hotpluggable_cpus) et un
+// éventuel retour au placement fin ; non lus depuis le passage à `qm set --vcpus`.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct HotpluggableCpuSlot {
     qom_path: Option<String>,
     cpu_type: String,
@@ -290,70 +294,31 @@ impl QmpVcpuClient {
             });
         }
 
-        // Trouver le prochain slot CPU hors-ligne réellement hotpluggable.
-        let hotpluggable = match self.query_hotpluggable_cpus() {
-            Ok(slots) => slots,
-            Err(e) => {
-                return Ok(HotplugResult::Unavailable {
-                    reason: e.to_string(),
-                })
-            }
-        };
-
-        let Some(cpu_slot) = hotpluggable.iter().find(|slot| slot.qom_path.is_none()) else {
-            warn!(
-                vm_id = self.vm_id,
-                online = info.online_count,
-                max_vcpus = max_vcpus,
-                "aucun slot CPU hotpluggable hors-ligne — démarrer la VM avec -smp maxcpus={}",
-                max_vcpus
-            );
-            return Ok(HotplugResult::NoSlots {
-                current: info.online_count,
-                max: max_vcpus,
+        // Hotplug PROXMOX-AWARE : `qm set --vcpus N` fait le device_add QMP **ET**
+        // met à jour la config (`vcpus: N`). Indispensable pour la live migration :
+        // la destination cold-démarre avec le bon nombre de vCPU (sinon
+        // `Unknown section 'apic' N`). Le device_add QMP brut laissait la config à
+        // l'ancienne valeur → mismatch source/destination.
+        let target = info.online_count + 1;
+        if let Err(e) = self.qm_set_vcpus(target) {
+            warn!(vm_id = self.vm_id, error = %e, "qm set --vcpus (hotplug) échoué");
+            return Ok(HotplugResult::Unavailable {
+                reason: e.to_string(),
             });
-        };
-
-        // Envoyer device_add pour brancher le vCPU
-        let (mut stream, mut reader) = self.connect()?;
-        self.handshake(&mut stream, &mut reader)?;
-
-        self.send(
-            &mut stream,
-            &json!({
-                "execute": "device_add",
-                "arguments": {
-                    "driver": cpu_slot.cpu_type,
-                    "id":     format!("cpu-{}-{}-{}", cpu_slot.socket_id, cpu_slot.core_id, cpu_slot.thread_id),
-                    "socket-id": cpu_slot.socket_id,
-                    "core-id":   cpu_slot.core_id,
-                    "thread-id": cpu_slot.thread_id
-                }
-            }),
-        )?;
-
-        let resp = self.recv_command_response(&mut reader)?;
-
-        if let Some(err) = resp.get("error") {
-            // Certains guests ne supportent pas le hot-unplug → fallback gracieux
-            let msg = err["desc"].as_str().unwrap_or("inconnu").to_string();
-            warn!(vm_id = self.vm_id, error = %msg, "device_add cpu échoué");
-            return Ok(HotplugResult::Unavailable { reason: msg });
         }
 
-        let expected_count = info.online_count + 1;
         let verified_count = match self.query_cpus() {
             Ok(after) => after.online_count,
             Err(e) => {
-                let msg = format!("device_add envoyé mais vérification QMP impossible: {e}");
+                let msg = format!("qm set --vcpus envoyé mais vérification QMP impossible: {e}");
                 warn!(vm_id = self.vm_id, error = %msg, "hotplug vCPU non validé");
                 return Ok(HotplugResult::Unavailable { reason: msg });
             }
         };
-        if verified_count < expected_count {
+        if verified_count < target {
             let msg = format!(
-                "device_add envoyé mais vCPUs online inchangés: avant={} après={} attendu={}",
-                info.online_count, verified_count, expected_count
+                "qm set --vcpus envoyé mais vCPUs online inchangés: avant={} après={} attendu={}",
+                info.online_count, verified_count, target
             );
             warn!(vm_id = self.vm_id, error = %msg, "hotplug vCPU non validé");
             return Ok(HotplugResult::Unavailable { reason: msg });
@@ -361,17 +326,35 @@ impl QmpVcpuClient {
 
         info!(
             vm_id = self.vm_id,
-            socket_id = cpu_slot.socket_id,
-            core_id = cpu_slot.core_id,
-            thread_id = cpu_slot.thread_id,
-            cpu_type = %cpu_slot.cpu_type,
             new_count = verified_count,
-            "vCPU hotplugged via QMP"
+            "vCPU hotplug via qm set --vcpus (config Proxmox synchronisée)"
         );
 
         Ok(HotplugResult::Added {
             new_count: verified_count,
         })
+    }
+
+    /// Applique le nombre de vCPU courant via Proxmox (`qm set <vmid> --vcpus N`).
+    /// Met à jour la config ET fait le hotplug/unplug QMP en une seule opération
+    /// atomique côté Proxmox → migration-safe.
+    fn qm_set_vcpus(&self, target: usize) -> Result<()> {
+        let output = Command::new("qm")
+            .args(["set", &self.vm_id.to_string(), "--vcpus", &target.to_string()])
+            .output()
+            .with_context(|| format!("lancement de qm set --vcpus pour vmid={}", self.vm_id))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "qm set {} --vcpus {} a échoué (code {:?}): {}",
+                self.vm_id,
+                target,
+                output.status.code(),
+                stderr.trim()
+            )
+        }
     }
 
     /// Retire un vCPU à chaud (hot-unplug -1).
@@ -400,55 +383,28 @@ impl QmpVcpuClient {
             });
         }
 
-        // Retirer le vCPU avec l'index le plus élevé (LIFO)
-        let last_online = info
-            .cpus
-            .iter()
-            .filter(|c| c.online)
-            .max_by_key(|c| c.index);
-
-        let Some(cpu) = last_online else {
-            return Ok(HotplugResult::AtMin {
-                current: 0,
-                min: min_vcpus,
+        // Unplug PROXMOX-AWARE : `qm set --vcpus N` retire le vCPU et synchronise la
+        // config → migration-safe (cf. hotplug_add).
+        let target = info.online_count - 1;
+        if let Err(e) = self.qm_set_vcpus(target) {
+            warn!(vm_id = self.vm_id, error = %e, "qm set --vcpus (unplug) échoué");
+            return Ok(HotplugResult::Unavailable {
+                reason: e.to_string(),
             });
-        };
-
-        let cpu_id =
-            device_id_from_qom_path(&cpu.qom_path).unwrap_or_else(|| format!("cpu-{}", cpu.index));
-
-        let (mut stream, mut reader) = self.connect()?;
-        self.handshake(&mut stream, &mut reader)?;
-
-        self.send(
-            &mut stream,
-            &json!({
-                "execute": "device_del",
-                "arguments": { "id": cpu_id }
-            }),
-        )?;
-
-        let resp = self.recv_command_response(&mut reader)?;
-
-        if let Some(err) = resp.get("error") {
-            let msg = err["desc"].as_str().unwrap_or("inconnu").to_string();
-            warn!(vm_id = self.vm_id, error = %msg, "device_del cpu échoué");
-            return Ok(HotplugResult::Unavailable { reason: msg });
         }
 
-        let expected_count = info.online_count - 1;
         let verified_count = match self.query_cpus() {
             Ok(after) => after.online_count,
             Err(e) => {
-                let msg = format!("device_del envoyé mais vérification QMP impossible: {e}");
+                let msg = format!("qm set --vcpus envoyé mais vérification QMP impossible: {e}");
                 warn!(vm_id = self.vm_id, error = %msg, "hot-unplug vCPU non validé");
                 return Ok(HotplugResult::Unavailable { reason: msg });
             }
         };
-        if verified_count > expected_count {
+        if verified_count > target {
             let msg = format!(
-                "device_del envoyé mais vCPUs online non réduits: avant={} après={} attendu={}",
-                info.online_count, verified_count, expected_count
+                "qm set --vcpus envoyé mais vCPUs online non réduits: avant={} après={} attendu={}",
+                info.online_count, verified_count, target
             );
             warn!(vm_id = self.vm_id, error = %msg, "hot-unplug vCPU non validé");
             return Ok(HotplugResult::Unavailable { reason: msg });
@@ -456,10 +412,8 @@ impl QmpVcpuClient {
 
         info!(
             vm_id     = self.vm_id,
-            cpu_id    = %cpu_id,
-            qom_path  = %cpu.qom_path,
             new_count = verified_count,
-            "vCPU retiré via QMP"
+            "vCPU retiré via qm set --vcpus (config Proxmox synchronisée)"
         );
 
         Ok(HotplugResult::Removed {
@@ -468,6 +422,7 @@ impl QmpVcpuClient {
     }
 }
 
+#[allow(dead_code)] // utilisé par les tests ; plus appelé depuis le passage à qm set --vcpus
 fn device_id_from_qom_path(qom_path: &str) -> Option<String> {
     let trimmed = qom_path.trim();
     if trimmed.is_empty() {

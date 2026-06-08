@@ -79,6 +79,7 @@ impl GpuScheduler {
 
         let lock_file = match std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&lock_path)
         {
@@ -148,7 +149,7 @@ impl GpuScheduler {
             }
 
             // Round-robin sur la liste courante
-            rr_idx = rr_idx % gpu_vms.len();
+            rr_idx %= gpu_vms.len();
             let vmid = gpu_vms[rr_idx];
             rr_idx += 1;
 

@@ -1,0 +1,594 @@
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Tests cluster — omega-remote-paging[0m
+[1m[0;34m══════════════════════════════════════════[0m
+[0;34m[INFO][0m Nœuds       : 192.168.123.100 192.168.123.101 192.168.123.102
+[0;34m[INFO][0m Contrôleur  : 192.168.123.100
+[0;34m[INFO][0m Stores      : 192.168.123.100 192.168.123.101 192.168.123.102 (3 nœuds)
+[0;34m[INFO][0m STORES_CSV  : 192.168.123.100:9100,192.168.123.101:9100,192.168.123.102:9100
+[0;34m[INFO][0m STATUS_CSV  : 192.168.123.100:9200,192.168.123.101:9200,192.168.123.102:9200
+[0;34m[INFO][0m VM test      : 2309
+[0;34m[INFO][0m GPU          : false
+[0;34m[INFO][0m Ceph         : true
+[0;34m[INFO][0m Long         : false
+[0;34m[INFO][0m Scale        : false
+[0;34m[INFO][0m Fleet        : false
+[0;34m[INFO][0m Destructif   : false
+[0;34m[INFO][0m Skip         : 00,01,02,03,04,10,18,20,21,23,09,19,22,23C,24,38,26,M2,M4,M6,M7
+[0;34m[INFO][0m Nœuds        : 3 (3 store(s))
+
+[1m  Preflight[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Preflight — omega-remote-paging[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Binaires compilés[0m
+[0;32m[PASS][0m node-a-agent : /home/blhack/Projets/Omega/Proxmox/RAM/omega-remote-paging/target/release/node-a-agent
+[0;32m[PASS][0m node-bc-store : /home/blhack/Projets/Omega/Proxmox/RAM/omega-remote-paging/target/release/node-bc-store
+
+[1m▶ userfaultfd[0m
+[0;32m[PASS][0m 192.168.123.100 : vm.unprivileged_userfaultfd=1
+[0;32m[PASS][0m 192.168.123.101 : vm.unprivileged_userfaultfd=1
+[0;32m[PASS][0m 192.168.123.102 : vm.unprivileged_userfaultfd=1
+
+[1m▶ Outils locaux[0m
+[0;32m[PASS][0m curl trouvé
+[0;32m[PASS][0m nc trouvé
+[0;32m[PASS][0m python3 trouvé
+[0;32m[PASS][0m jq trouvé
+[0;32m[PASS][0m stress-ng trouvé
+
+[1m▶ Stores réseau[0m
+[0;32m[PASS][0m store 192.168.123.100:9100 accessible
+[0;32m[PASS][0m store 192.168.123.101:9100 accessible
+[0;32m[PASS][0m store 192.168.123.102:9100 accessible
+
+[1m▶ HTTP status stores[0m
+[0;32m[PASS][0m status HTTP 192.168.123.100:9200/api/health OK
+    {
+        "api_addr": "192.168.123.100:9200",
+        "disk_pressure_pct": 16.97,
+        "gpu": null,
+        "local_vms": [
+            {
+                "avg_cpu_pct": 1.9334563366521587,
+                "disk_io_control_reason": "io.weight non disponible dans le cgroup VM (backend/cgroup non support\u00e9)",
+[0;32m[PASS][0m status HTTP 192.168.123.101:9200/api/health OK
+    {
+        "api_addr": "192.168.123.101:9200",
+        "disk_pressure_pct": 2.22,
+        "gpu": null,
+        "local_vms": [
+            {
+                "avg_cpu_pct": 3.64285706437723,
+                "disk_io_control_reason": "io.weight non disponible dans le cgroup VM (backend/cgroup non support\u00e9)",
+[0;32m[PASS][0m status HTTP 192.168.123.102:9200/api/health OK
+    {
+        "api_addr": "192.168.123.102:9200",
+        "disk_pressure_pct": 75.31,
+        "gpu": null,
+        "local_vms": [
+            {
+                "avg_cpu_pct": 1.77712782682911,
+                "disk_io_control_reason": "io.weight non disponible dans le cgroup VM (backend/cgroup non support\u00e9)",
+
+[1m▶ Proxmox CLI (sur les nœuds)[0m
+[0;32m[PASS][0m 192.168.123.100 : qm disponible
+[0;32m[PASS][0m 192.168.123.101 : qm disponible
+[0;32m[PASS][0m 192.168.123.102 : qm disponible
+[0;34m[INFO][0m 22 VMs dans le cluster (via 192.168.123.100)
+
+[1m▶ Pool vCPU[0m
+[0;34m[INFO][0m /run/omega-vcpu-pool.json absent (normal si premier démarrage)
+
+[1m▶ Ceph[0m
+[1;33m[WARN][0m /etc/ceph/ceph.conf absent — Ceph non disponible (store RAM sera utilisé)
+
+[0;34m[INFO][0m Preflight terminé.
+[1m  → Lancer les tests cluster : ./run-cluster.sh[0m
+[1;33m[WARN][0m Test 00 (Tests unitaires) — ignoré
+[0;34m[INFO][0m Synchronisation vers 192.168.123.100...
+[0;32m[PASS][0m scripts + binaires synchronisés sur 192.168.123.100
+[1;33m[WARN][0m Test 01 (Smoke test) — ignoré
+[1;33m[WARN][0m Test 02 (Réplication 2 stores) — ignoré
+[1;33m[WARN][0m Test 03 (Failover store) — ignoré
+[1;33m[WARN][0m Test 04 (Éviction daemon) — ignoré
+[1;33m[WARN][0m Test 10 (Multi-VM 3 agents) — ignoré
+[1;33m[WARN][0m Test 18 (Recall LIFO) — ignoré
+[1;33m[WARN][0m Test 20 (Prefetch stride) — ignoré
+[1;33m[WARN][0m Test 21 (TLS TOFU) — ignoré
+[1;33m[WARN][0m Test 23 (Disk I/O scheduler) — ignoré
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 30A — Normalisation VMs Omega  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 30 — Conformite VMs Omega[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ VM 2309[0m
+[0;34m[INFO][0m VM 2309 localisée sur emilia (192.168.123.100)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2309: agent invite joignable
+
+[1m▶ VM 2304[0m
+[0;34m[INFO][0m VM 2304 localisée sur ram (192.168.123.101)
+  -smp '1,sockets=1,cores=3,maxcpus=3' \
+[1;33m[WARN][0m VM 2304: qemu-guest-agent configure mais non joignable depuis le nœud hôte actuel; verifier service qemu-guest-agent dans l'invite et relancer après reboot
+[0;32m[PASS][0m VMs conformes aux prerequis Omega
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 05 — vCPU élastique  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2309 running sur emilia
+[0;34m[INFO][0m VM retenue pour le test : 2309
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 5 — vCPU élastique (VM 2309)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Vérifications prérequis[0m
+[0;32m[PASS][0m VM 2309 en cours d'exécution — RAM=6144 MiB cores=6
+
+[1m▶ Remise à 1 vCPU (état de référence)[0m
+
+[1m▶ État initial vCPU[0m
+[0;34m[INFO][0m vCPUs runtime actuels : 1
+
+[1m▶ Démarrage agent avec vCPU initial=1, max=6[0m
+
+[1m▶ Vérification vCPU initial = 1[0m
+[0;34m[INFO][0m vCPUs runtime après démarrage agent : 2
+[1;33m[WARN][0m scale-up vCPU précoce détecté juste après le démarrage agent (2 vCPUs); on continue car l'état de référence QEMU était bien 1 avant l'agent
+
+[1m▶ Pool vCPU partagé[0m
+{
+    "total_vcpus": 18,
+    "vms": {
+        "400": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779890499
+        },
+        "2304": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779886474
+        },
+        "2301": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779809697
+        },
+        "2306": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.7901056,
+            "last_updated_secs": 1779886433
+        },
+        "100": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 4.4231453,
+            "last_updated_secs": 1779890499
+        },
+        "2309": {
+            "current_vcpus": 1,
+            "requested_vcpus": 6,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779890490
+        },
+        "999": {
+            "current_vcpus": 1,
+            "requested_vcpus": 1,
+            "utilization_pct": 0.88993126,
+            "last_updated_secs": 1779890488
+        },
+        "2302": {
+            "current_vcpus": 1,
+            "requested_vcpus": 6,
+            "utilization_pct": 0.0,
+            "last_updated_secs": 1779811109
+        }
+    }
+}
+
+[1m▶ Simulation charge CPU forte (stress-ng dans la VM — 120s)[0m
+[0;34m[INFO][0m seuil scale-up=85% | seuil scale-down=15% | intervalle=10s
+[1;33m[WARN][0m qemu-guest-agent absent — stress-ng injecté dans le cgroup QEMU
+[0;34m[INFO][0m stress-ng (cgroup=/sys/fs/cgroup/qemu.slice/2309.scope) lancé (pid=3236906)
+
+[1m▶ Surveillance scale-up pendant 120s[0m
+  [ 10s] vCPUs runtime : 6   (max observé : 6)  [ 37s] vCPUs runtime : 6   (max observé : 6)  [ 48s] vCPUs runtime : 6   (max observé : 6)  [ 84s] vCPUs runtime : ?   (max observé : 6)  [119s] vCPUs runtime : ?   (max observé : 6)
+
+[1m▶ Surveillance scale-down (60s sans charge)[0m
+[0;34m[INFO][0m Attente scale-down...
+  [ 32s] vCPUs runtime : ?  [ 69s] vCPUs runtime : ?
+[0;34m[INFO][0m vCPUs runtime finaux : ?
+
+[1m▶ Résultats[0m
+[0;34m[INFO][0m vCPU runtime initial : 1 | max observé sous charge : 6 | final : ?
+
+[1m▶ Logs agent (scale events)[0m
+2026-05-27T14:01:28.730624Z  INFO agent démarré vm_id=2309 stores=["192.168.123.100:9100", "192.168.123.101:9100", "192.168.123.102:9100"] region_mib=6144 vm_requested_mib=6144 vm_vcpus=6 vm_initial_vcpus=1 vcpu_overcommit=3 backend=anonymous mode=daemon
+2026-05-27T14:01:29.421891Z  INFO scheduler vCPU élastique activé vm_id=2309 initial_vcpus=1 max_vcpus=6 overcommit=3 scale_interval=10
+2026-05-27T14:01:30.247601Z  INFO scheduler vCPU élastique démarré vm_id=2309 initial_vcpus=1 requested_vcpus=6 physical_cores=6 total_pool_vcpus=18
+2026-05-27T14:01:50.327338Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - got timeout
+2026-05-27T14:02:06.174533Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - unable to connect to VM 2309 qmp socket - timeout after 51 retries
+2026-05-27T14:02:46.643458Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-cpus-fast' failed - got timeout
+2026-05-27T14:03:02.509789Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - unable to connect to VM 2309 qmp socket - timeout after 51 retries
+2026-05-27T14:03:18.362453Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - unable to connect to VM 2309 qmp socket - timeout after 51 retries
+2026-05-27T14:03:34.283304Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - unable to connect to VM 2309 qmp socket - timeout after 51 retries
+2026-05-27T14:03:51.225691Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - got timeout
+2026-05-27T14:04:07.068233Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+vcpus: hotplug problem - VM 2309 qmp command 'query-machines' failed - unable to connect to VM 2309 qmp socket - timeout after 51 retries
+2026-05-27T14:04:22.873564Z  WARN qm set --vcpus échoué — rollback pool vm_id=2309 error=qm set --vcpus 2 pour VM 2309 : 400 Parameter verification failed.
+[0;32m[PASS][0m vCPU élastique OK — scale-up de 1 à 6 vCPUs détecté
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 08 — Migration RAM  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2309 running sur emilia
+[0;34m[INFO][0m VM retenue pour le test : 2309
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 8 — Migration RAM (VM 2309)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Vérifications prérequis[0m
+
+[1m▶ Nœud initial de la VM[0m
+[0;34m[INFO][0m VM 2309 sur : emilia
+
+[1m▶ Validation des 6 conditions de migration[0m
+[0;34m[INFO][0m 1/6 migration activée : --migration-enabled, intervalle=10s, fenêtre=120s
+[0;34m[INFO][0m 2/6 raison de migration : pression RAM + balloon activé (512/6144 MiB)
+[0;34m[INFO][0m 3/6 cible saine : source_ram=55024 MiB, target=192.168.123.102 target_ram=55180 MiB target_vcpu_free=35
+[0;34m[INFO][0m 4/6 nom Proxmox cible résolu : 192.168.123.102 -> rem
+update VM 2309: -ide2 none
+2026-05-27T15:06:54.640+0100 75bf6affd6c0 -1 librbd::image::PreRemoveRequest: 0x63cf7ed3f400 check_image_watchers: image has watchers - not removing
+Removing image: 0% complete...failed.
+rbd: error: image still has watchers
+rbd rm 'vm-2309-cloudinit' error: rbd: error: image still has watchers
+400 Parameter verification failed.
+ide2: hotplug problem - VM 2309 qmp command 'query-machines' failed - unable to connect to VM 2309 qmp socket - timeout after 51 retries
+
+qm set <vmid> [OPTIONS]
+[0;34m[INFO][0m 5/6 VM migrable : pas de hostpci/CD-ROM local bloquant
+[0;34m[INFO][0m 6/6 seuils/durée : migration_interval=10s, watch=120s, force_fallback=1
+[0;34m[INFO][0m Cible déterministe si Omega ne migre pas seul : 192.168.123.102 (pvesh: rem)
+
+[1m▶ Démarrage agent avec migration activée et seuil d'éviction agressif[0m
+
+[1m▶ Simulation pression mémoire (stress-ng 90s)[0m
+[0;34m[INFO][0m démarrage stress-ng --vm 1 --vm-bytes 85% --timeout 90s
+[0;34m[INFO][0m stress-ng mémoire lancé dans la VM 2309 via qemu-guest-agent (85%, 90s)
+
+[1m▶ Surveillance éviction + migration pendant 120s[0m
+  [  0s] évictions loggées=14    migration=non  [  5s] évictions loggées=16    migration=non  [ 10s] évictions loggées=17    migration=non  [ 15s] évictions loggées=19    migration=non  [ 20s] évictions loggées=20    migration=non  [ 25s] évictions loggées=22    migration=non  [ 30s] évictions loggées=24    migration=non  [ 35s] évictions loggées=26    migration=non  [ 40s] évictions loggées=27    migration=non  [ 45s] évictions loggées=29    migration=non  [ 50s] évictions loggées=31    migration=non  [ 55s] évictions loggées=32    migration=non  [ 60s] évictions loggées=34    migration=non  [ 65s] évictions loggées=36    migration=non  [ 70s] évictions loggées=37    migration=non  [ 75s] évictions loggées=39    migration=non  [ 80s] évictions loggées=41    migration=non  [ 85s] évictions loggées=42    migration=non  [ 90s] évictions loggées=44    migration=non  [ 95s] évictions loggées=46    migration=non  [100s] évictions loggées=47    migration=non  [105s] évictions loggées=49    migration=non  [110s] évictions loggées=51    migration=non  [115s] évictions loggées=52    migration=non
+
+[1m▶ Logs éviction + migration[0m
+2026-05-27T14:06:58.024466Z  INFO mode daemon démarré eviction_threshold_mib=999999 recall_threshold_mib=1024 recall_priority=5 recall_priority_delay_ms=500 fair_recall_batch=6 vm_count=5 migration_enabled=true compaction_enabled=false
+2026-05-27T14:06:58.049380Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=54707 avail_after_mib=54707 threshold_mib=999999
+2026-05-27T14:06:58.556479Z  INFO recall LIFO effectué recalled=6 avail_mib=54707 batch_share=6 priority=5
+2026-05-27T14:07:01.055678Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=54835 avail_after_mib=54835 threshold_mib=999999
+2026-05-27T14:07:04.057332Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=54695 avail_after_mib=54703 threshold_mib=999999
+2026-05-27T14:07:07.050815Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=53637 avail_after_mib=53620 threshold_mib=999999
+2026-05-27T14:07:08.536241Z  INFO recall LIFO effectué recalled=6 avail_mib=53125 batch_share=6 priority=5
+2026-05-27T14:07:10.056545Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52821 avail_after_mib=52821 threshold_mib=999999
+2026-05-27T14:07:13.049813Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52779 avail_after_mib=52771 threshold_mib=999999
+2026-05-27T14:07:16.052820Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52710 avail_after_mib=52702 threshold_mib=999999
+2026-05-27T14:07:18.535213Z  INFO recall LIFO effectué recalled=6 avail_mib=52726 batch_share=6 priority=5
+2026-05-27T14:07:19.049125Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52735 avail_after_mib=52735 threshold_mib=999999
+2026-05-27T14:07:22.055091Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52651 avail_after_mib=52651 threshold_mib=999999
+2026-05-27T14:07:25.441277Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52703 avail_after_mib=52739 threshold_mib=999999
+2026-05-27T14:07:28.152546Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52729 avail_after_mib=52729 threshold_mib=999999
+2026-05-27T14:07:28.672881Z  INFO recall LIFO effectué recalled=6 avail_mib=52729 batch_share=6 priority=5
+2026-05-27T14:07:31.787422Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52894 avail_after_mib=52883 threshold_mib=999999
+2026-05-27T14:07:34.180796Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52752 avail_after_mib=52743 threshold_mib=999999
+2026-05-27T14:07:37.626751Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52934 avail_after_mib=52908 threshold_mib=999999
+2026-05-27T14:07:38.585427Z  INFO recall LIFO effectué recalled=6 avail_mib=52829 batch_share=6 priority=5
+2026-05-27T14:07:40.225510Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52823 avail_after_mib=52885 threshold_mib=999999
+2026-05-27T14:07:44.442370Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52932 avail_after_mib=52770 threshold_mib=999999
+2026-05-27T14:07:46.350549Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=53000 avail_after_mib=52942 threshold_mib=999999
+2026-05-27T14:07:48.839259Z  INFO recall LIFO effectué recalled=6 avail_mib=52968 batch_share=6 priority=5
+2026-05-27T14:07:49.959492Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=53032 avail_after_mib=52836 threshold_mib=999999
+2026-05-27T14:07:52.098760Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52735 avail_after_mib=52735 threshold_mib=999999
+2026-05-27T14:07:56.119947Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=53085 avail_after_mib=53010 threshold_mib=999999
+2026-05-27T14:07:58.230114Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=52989 avail_after_mib=52985 threshold_mib=999999
+2026-05-27T14:07:58.757590Z  INFO recall LIFO effectué recalled=6 avail_mib=52985 batch_share=6 priority=5
+2026-05-27T14:08:02.243429Z  INFO éviction batch terminée evicted=64 failed=0 cap_hit=false avail_before_mib=53246 avail_after_mib=53067 threshold_mib=999999
+
+[1m▶ Migration déterministe par le harness[0m
+[0;34m[INFO][0m Omega n'a pas lancé de migration; le test force qm migrate 2309 rem --online depuis emilia
+[1;33m[WARN][0m migration déterministe live échouée — tentative offline
+can't migrate running VM without --online
+
+[1m▶ Nœud final de la VM[0m
+[0;34m[INFO][0m VM 2309 maintenant sur : emilia
+[0;31m[FAIL][0m migration RAM forcée par le test mais qm migrate a échoué; vérifier /tmp/omega-test08-qm-migrate-2309.log et la santé Ceph/réseau
+[1;33m[WARN][0m Test 09 (Orphan cleaner) — ignoré
+[1;33m[WARN][0m Test 19 (Compaction cluster) — ignoré
+[1;33m[WARN][0m Test 22 (Balloon thin-provisioning) — ignoré
+[1;33m[WARN][0m Test 23C (Disk I/O scheduler cluster) — ignoré
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 30 — Conformité VMs Omega  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 30 — Conformite VMs Omega[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ VM 2309[0m
+[0;34m[INFO][0m VM 2309 localisée sur emilia (192.168.123.100)
+  -smp '1,sockets=1,cores=6,maxcpus=6' \
+[0;32m[PASS][0m VM 2309: agent invite joignable
+
+[1m▶ VM 2304[0m
+[0;34m[INFO][0m VM 2304 localisée sur ram (192.168.123.101)
+  -smp '1,sockets=1,cores=3,maxcpus=3' \
+[1;33m[WARN][0m VM 2304: qemu-guest-agent configure mais non joignable depuis le nœud hôte actuel; verifier service qemu-guest-agent dans l'invite et relancer après reboot
+[0;32m[PASS][0m VMs conformes aux prerequis Omega
+[1;33m[WARN][0m Test 24 (Installation doctor) — ignoré
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test 25 — Réseau VM invitée  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2309 running sur emilia
+[0;34m[INFO][0m VM retenue pour le test : 2309
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test 25 — Réseau VM invitée (VM 2309)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+
+[1m▶ Vérification qemu-guest-agent[0m
+[0;32m[PASS][0m qemu-guest-agent OK
+
+[1m▶ Interfaces et route[0m
+[0;31m[FAIL][0m impossible d'exécuter les commandes réseau via qemu-guest-agent dans la VM 2309
+[1;33m[WARN][0m Test 38 (Déploiement .deb) — ignoré
+[1;33m[WARN][0m Test 26 (Ceph réel) — ignoré
+
+[1m[0;34m  ── Tests mixtes ──────────────────────────────────[0m
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test M1 — RAM + CPU simultanés  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2309 running sur emilia
+[0;34m[INFO][0m VM retenue pour le test : 2309
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test M1 — Mixte RAM + CPU (VM 2309)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+[0;34m[INFO][0m Nœuds       : 192.168.123.100 192.168.123.101 192.168.123.102
+[0;34m[INFO][0m Contrôleur  : 192.168.123.100
+[0;34m[INFO][0m Stores      : 192.168.123.100 192.168.123.101 192.168.123.102 (3 nœuds)
+[0;34m[INFO][0m STORES_CSV  : 192.168.123.100:9100,192.168.123.101:9100,192.168.123.102:9100
+[0;34m[INFO][0m STATUS_CSV  : 192.168.123.100:9200,192.168.123.101:9200,192.168.123.102:9200
+
+[1m▶ Prérequis[0m
+
+[1m▶ Remise à 1 vCPU (état de référence avant le test)[0m
+
+[1m▶ État initial[0m
+[0;34m[INFO][0m VM 2309 sur 192.168.123.100 | vCPUs runtime=1 | RAM libre nœud=55211 Mio
+
+[1m▶ Démarrage agent (éviction agressive + vCPU élastique)[0m
+
+[1m▶ Charge simultanée RAM + CPU dans la VM (90s)[0m
+[0;34m[INFO][0m stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s
+[0;31m[FAIL][0m qemu-guest-agent/stress-ng indisponible dans la VM 2309 — M1 exige une vraie pression RAM+CPU dans l'invité
+[1;33m[WARN][0m Test M2 (CPU+RAM saturés → migration) — ignoré
+[1;33m[WARN][0m Test M4 (Stress cluster complet) — ignoré
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Test M5 — Migration live sous pression  [192.168.123.100][0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;34m[INFO][0m VM 2309 running sur emilia
+[0;34m[INFO][0m VM retenue pour le test : 2309
+
+[1m[0;34m══════════════════════════════════════════[0m
+[1m[0;34m  Test M5 — Migration live sous pression mémoire (VM 2309)[0m
+[1m[0;34m══════════════════════════════════════════[0m
+[0;34m[INFO][0m Nœuds       : 192.168.123.100 192.168.123.101 192.168.123.102
+[0;34m[INFO][0m Contrôleur  : 192.168.123.100
+[0;34m[INFO][0m Stores      : 192.168.123.100 192.168.123.101 192.168.123.102 (3 nœuds)
+[0;34m[INFO][0m STORES_CSV  : 192.168.123.100:9100,192.168.123.101:9100,192.168.123.102:9100
+[0;34m[INFO][0m STATUS_CSV  : 192.168.123.100:9200,192.168.123.101:9200,192.168.123.102:9200
+
+[1m▶ Prérequis[0m
+
+[1m▶ Nœud initial et nœud cible[0m
+[0;34m[INFO][0m VM 2309 : source=192.168.123.100 → cible=192.168.123.102 (pvesh: rem)
+
+[1m▶ Phase 1 : éviction d'un maximum de pages avant migration[0m
+[0;34m[INFO][0m Éviction forcée pendant 30s...
+[0;34m[INFO][0m stress-ng mémoire hôte lancé (70%, 30s, pid=3260367)
+[0;34m[INFO][0m Pages sur les stores avant migration : 960
+
+[1m▶ Phase 2 : migration live pendant que les stores ont des pages[0m
+[0;34m[INFO][0m stress-ng continu pendant la migration (simule activité VM)
+[0;34m[INFO][0m stress-ng mémoire hôte lancé (60%, 120s, pid=3261289)
+update VM 2309: -ide2 none
+[0;34m[INFO][0m CD-ROM ide2 éjecté
+[0;34m[INFO][0m Lancement migration live : qm migrate 2309 rem --online
+2026-05-27 15:16:08 conntrack state migration not supported or disabled, active connections might get dropped
+2026-05-27 15:16:08 use dedicated network address for sending migration traffic (192.168.123.102)
+2026-05-27 15:16:09 starting migration of VM 2309 to node 'rem' (192.168.123.102)
+2026-05-27 15:16:09 starting VM 2309 on remote node 'rem'
+2026-05-27 15:16:11 start remote tunnel
+2026-05-27 15:16:12 ssh tunnel ver 1
+2026-05-27 15:16:12 starting online/live migration on unix:/run/qemu-server/2309.migrate
+2026-05-27 15:16:12 set migration capabilities
+2026-05-27 15:16:12 migration downtime limit: 100 ms
+2026-05-27 15:16:12 migration cachesize: 1.0 GiB
+2026-05-27 15:16:12 set migration parameters
+2026-05-27 15:16:12 start migrate command to unix:/run/qemu-server/2309.migrate
+2026-05-27 15:16:13 migration active, transferred 12.3 MiB of 6.0 GiB VM-state, 468.8 MiB/s
+2026-05-27 15:16:14 migration active, transferred 23.5 MiB of 6.0 GiB VM-state, 11.1 MiB/s
+2026-05-27 15:16:15 migration active, transferred 34.1 MiB of 6.0 GiB VM-state, 10.2 MiB/s
+2026-05-27 15:16:16 migration active, transferred 44.9 MiB of 6.0 GiB VM-state, 11.1 MiB/s
+2026-05-27 15:16:17 migration active, transferred 55.6 MiB of 6.0 GiB VM-state, 36.7 MiB/s
+2026-05-27 15:16:18 migration active, transferred 66.4 MiB of 6.0 GiB VM-state, 33.2 MiB/s
+2026-05-27 15:16:19 migration active, transferred 77.3 MiB of 6.0 GiB VM-state, 10.1 MiB/s
+2026-05-27 15:16:20 migration active, transferred 88.3 MiB of 6.0 GiB VM-state, 11.2 MiB/s
+2026-05-27 15:16:21 migration active, transferred 99.0 MiB of 6.0 GiB VM-state, 9.5 MiB/s
+2026-05-27 15:16:22 migration active, transferred 109.6 MiB of 6.0 GiB VM-state, 9.8 MiB/s
+2026-05-27 15:16:23 migration active, transferred 120.8 MiB of 6.0 GiB VM-state, 23.5 MiB/s
+2026-05-27 15:16:24 migration active, transferred 131.3 MiB of 6.0 GiB VM-state, 12.4 MiB/s
+2026-05-27 15:16:25 migration active, transferred 142.4 MiB of 6.0 GiB VM-state, 10.0 MiB/s
+2026-05-27 15:16:26 migration active, transferred 153.3 MiB of 6.0 GiB VM-state, 239.0 MiB/s
+2026-05-27 15:16:27 migration active, transferred 160.8 MiB of 6.0 GiB VM-state, 1.6 GiB/s
+2026-05-27 15:16:28 migration active, transferred 171.6 MiB of 6.0 GiB VM-state, 10.9 MiB/s
+2026-05-27 15:16:29 migration active, transferred 182.3 MiB of 6.0 GiB VM-state, 21.1 MiB/s
+2026-05-27 15:16:30 migration active, transferred 193.2 MiB of 6.0 GiB VM-state, 13.2 MiB/s
+2026-05-27 15:16:31 migration active, transferred 203.9 MiB of 6.0 GiB VM-state, 23.1 MiB/s
+2026-05-27 15:16:32 migration active, transferred 215.2 MiB of 6.0 GiB VM-state, 265.7 MiB/s
+2026-05-27 15:16:33 migration active, transferred 225.7 MiB of 6.0 GiB VM-state, 95.7 MiB/s
+2026-05-27 15:16:34 migration active, transferred 236.4 MiB of 6.0 GiB VM-state, 333.4 MiB/s
+2026-05-27 15:16:35 migration active, transferred 247.3 MiB of 6.0 GiB VM-state, 10.3 MiB/s
+2026-05-27 15:16:36 migration active, transferred 257.9 MiB of 6.0 GiB VM-state, 124.2 MiB/s
+2026-05-27 15:16:37 migration active, transferred 268.6 MiB of 6.0 GiB VM-state, 243.9 MiB/s
+2026-05-27 15:16:38 migration active, transferred 280.0 MiB of 6.0 GiB VM-state, 86.2 MiB/s
+2026-05-27 15:16:39 migration active, transferred 290.6 MiB of 6.0 GiB VM-state, 36.8 MiB/s
+2026-05-27 15:16:40 migration active, transferred 301.3 MiB of 6.0 GiB VM-state, 11.1 MiB/s
+2026-05-27 15:16:41 migration active, transferred 312.0 MiB of 6.0 GiB VM-state, 18.9 MiB/s
+2026-05-27 15:16:42 migration active, transferred 323.3 MiB of 6.0 GiB VM-state, 36.8 MiB/s
+2026-05-27 15:16:43 migration active, transferred 334.0 MiB of 6.0 GiB VM-state, 11.1 MiB/s
+2026-05-27 15:16:44 migration active, transferred 344.9 MiB of 6.0 GiB VM-state, 41.0 MiB/s
+2026-05-27 15:16:45 migration active, transferred 355.9 MiB of 6.0 GiB VM-state, 150.6 MiB/s
+2026-05-27 15:16:46 migration active, transferred 366.4 MiB of 6.0 GiB VM-state, 273.1 MiB/s
+2026-05-27 15:16:47 migration active, transferred 376.7 MiB of 6.0 GiB VM-state, 9.8 MiB/s
+2026-05-27 15:16:48 migration active, transferred 387.4 MiB of 6.0 GiB VM-state, 12.3 MiB/s
+2026-05-27 15:16:49 migration active, transferred 398.4 MiB of 6.0 GiB VM-state, 11.2 MiB/s
+2026-05-27 15:16:50 migration active, transferred 409.2 MiB of 6.0 GiB VM-state, 180.9 MiB/s
+2026-05-27 15:16:51 migration active, transferred 419.8 MiB of 6.0 GiB VM-state, 10.6 MiB/s
+2026-05-27 15:16:52 migration active, transferred 430.8 MiB of 6.0 GiB VM-state, 91.0 MiB/s
+2026-05-27 15:16:53 migration active, transferred 441.5 MiB of 6.0 GiB VM-state, 54.0 MiB/s
+2026-05-27 15:16:54 migration active, transferred 452.5 MiB of 6.0 GiB VM-state, 103.7 MiB/s
+2026-05-27 15:16:55 migration active, transferred 463.2 MiB of 6.0 GiB VM-state, 146.3 MiB/s
+2026-05-27 15:16:56 migration active, transferred 473.9 MiB of 6.0 GiB VM-state, 113.1 MiB/s
+2026-05-27 15:16:57 migration active, transferred 484.8 MiB of 6.0 GiB VM-state, 13.2 MiB/s
+2026-05-27 15:16:58 migration active, transferred 495.4 MiB of 6.0 GiB VM-state, 11.3 MiB/s
+2026-05-27 15:16:59 migration active, transferred 506.4 MiB of 6.0 GiB VM-state, 10.7 MiB/s
+2026-05-27 15:17:00 migration active, transferred 517.1 MiB of 6.0 GiB VM-state, 12.4 MiB/s
+2026-05-27 15:17:01 migration active, transferred 528.0 MiB of 6.0 GiB VM-state, 8.9 MiB/s
+2026-05-27 15:17:02 migration active, transferred 538.3 MiB of 6.0 GiB VM-state, 10.4 MiB/s
+2026-05-27 15:17:03 migration active, transferred 549.4 MiB of 6.0 GiB VM-state, 12.4 MiB/s
+2026-05-27 15:17:04 migration active, transferred 560.1 MiB of 6.0 GiB VM-state, 13.3 MiB/s
+2026-05-27 15:17:05 migration active, transferred 571.0 MiB of 6.0 GiB VM-state, 55.3 MiB/s
+2026-05-27 15:17:06 migration active, transferred 581.6 MiB of 6.0 GiB VM-state, 10.6 MiB/s
+2026-05-27 15:17:07 migration active, transferred 592.1 MiB of 6.0 GiB VM-state, 9.7 MiB/s
+2026-05-27 15:17:08 migration active, transferred 602.9 MiB of 6.0 GiB VM-state, 22.1 MiB/s
+2026-05-27 15:17:09 migration active, transferred 614.0 MiB of 6.0 GiB VM-state, 48.6 MiB/s
+2026-05-27 15:17:10 migration active, transferred 624.4 MiB of 6.0 GiB VM-state, 10.8 MiB/s
+2026-05-27 15:17:11 migration active, transferred 634.7 MiB of 6.0 GiB VM-state, 10.1 MiB/s
+2026-05-27 15:17:12 migration active, transferred 645.4 MiB of 6.0 GiB VM-state, 11.9 MiB/s
+2026-05-27 15:17:13 migration active, transferred 656.0 MiB of 6.0 GiB VM-state, 11.9 MiB/s
+2026-05-27 15:17:14 migration active, transferred 666.9 MiB of 6.0 GiB VM-state, 12.4 MiB/s
+2026-05-27 15:17:15 migration active, transferred 677.6 MiB of 6.0 GiB VM-state, 12.3 MiB/s
+2026-05-27 15:17:16 migration active, transferred 688.7 MiB of 6.0 GiB VM-state, 11.0 MiB/s
+2026-05-27 15:17:17 migration active, transferred 699.5 MiB of 6.0 GiB VM-state, 10.5 MiB/s
+2026-05-27 15:17:18 migration active, transferred 709.7 MiB of 6.0 GiB VM-state, 12.3 MiB/s
+2026-05-27 15:17:19 migration active, transferred 720.5 MiB of 6.0 GiB VM-state, 11.0 MiB/s
+2026-05-27 15:17:20 migration active, transferred 731.1 MiB of 6.0 GiB VM-state, 19.6 MiB/s
+2026-05-27 15:17:21 migration active, transferred 742.0 MiB of 6.0 GiB VM-state, 11.0 MiB/s
+2026-05-27 15:17:22 migration active, transferred 752.7 MiB of 6.0 GiB VM-state, 11.8 MiB/s
+2026-05-27 15:17:23 migration active, transferred 763.8 MiB of 6.0 GiB VM-state, 11.0 MiB/s
+2026-05-27 15:17:24 migration active, transferred 774.8 MiB of 6.0 GiB VM-state, 11.9 MiB/s
+2026-05-27 15:17:25 migration active, transferred 785.4 MiB of 6.0 GiB VM-state, 11.0 MiB/s
+2026-05-27 15:17:26 migration active, transferred 796.5 MiB of 6.0 GiB VM-state, 14.8 MiB/s
+2026-05-27 15:17:27 migration active, transferred 806.9 MiB of 6.0 GiB VM-state, 70.2 MiB/s
+2026-05-27 15:17:28 migration active, transferred 817.9 MiB of 6.0 GiB VM-state, 181.7 MiB/s
+2026-05-27 15:17:29 migration active, transferred 828.7 MiB of 6.0 GiB VM-state, 36.2 MiB/s
+2026-05-27 15:17:30 migration active, transferred 840.0 MiB of 6.0 GiB VM-state, 19.8 MiB/s
+2026-05-27 15:17:31 migration active, transferred 850.9 MiB of 6.0 GiB VM-state, 81.7 MiB/s
+2026-05-27 15:17:32 migration active, transferred 861.2 MiB of 6.0 GiB VM-state, 231.5 MiB/s
+2026-05-27 15:17:33 migration active, transferred 872.4 MiB of 6.0 GiB VM-state, 11.7 MiB/s
+2026-05-27 15:17:34 migration active, transferred 882.9 MiB of 6.0 GiB VM-state, 131.4 MiB/s
+2026-05-27 15:17:35 migration active, transferred 893.7 MiB of 6.0 GiB VM-state, 392.9 MiB/s
+2026-05-27 15:17:36 migration active, transferred 904.4 MiB of 6.0 GiB VM-state, 11.7 MiB/s
+2026-05-27 15:17:37 migration active, transferred 915.6 MiB of 6.0 GiB VM-state, 10.7 MiB/s
+2026-05-27 15:17:38 migration active, transferred 926.2 MiB of 6.0 GiB VM-state, 11.1 MiB/s
+2026-05-27 15:17:39 migration active, transferred 936.7 MiB of 6.0 GiB VM-state, 10.8 MiB/s
+2026-05-27 15:17:40 migration active, transferred 947.8 MiB of 6.0 GiB VM-state, 10.9 MiB/s
+2026-05-27 15:17:41 migration active, transferred 958.4 MiB of 6.0 GiB VM-state, 11.2 MiB/s
+2026-05-27 15:17:42 migration active, transferred 969.4 MiB of 6.0 GiB VM-state, 10.2 MiB/s
+2026-05-27 15:17:43 migration active, transferred 980.5 MiB of 6.0 GiB VM-state, 9.7 MiB/s
+2026-05-27 15:17:44 migration active, transferred 991.1 MiB of 6.0 GiB VM-state, 11.7 MiB/s
+2026-05-27 15:17:46 migration active, transferred 1009.8 MiB of 6.0 GiB VM-state, 13.0 MiB/s
+2026-05-27 15:17:47 average migration speed: 64.7 MiB/s - downtime 23 ms
+2026-05-27 15:17:47 migration completed, transferred 1020.3 MiB VM-state
+2026-05-27 15:17:47 migration status: completed
+2026-05-27 15:17:50 migration finished successfully (duration 00:01:42)
+
+[1m▶ Résultats migration[0m
+[0;34m[INFO][0m VM 2309 maintenant sur : 192.168.123.102
+[0;34m[INFO][0m Durée migration : 103s
+[0;34m[INFO][0m Statut qm migrate : 0
+
+[1m▶ Phase 3 : vérification intégrité après migration[0m
+[0;34m[INFO][0m Pages sur les stores après migration : 4352
+
+[1m▶ Test accès mémoire post-migration[0m
+[0;32m[PASS][0m M5 OK — migration live réussie en 103s (960 pages sur stores, VM toujours active)
+[1;33m[WARN][0m Test M6 (Rafale démarrages simultanés) — ignoré
+[1;33m[WARN][0m Test M7 (Drain nœud complet) — ignoré
+
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1m  Résumé — cluster 3 nœuds[0m
+[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  SKIP  00 Tests unitaires
+  SKIP  01 Smoke test
+  SKIP  02 Réplication 2 stores
+  SKIP  03 Failover store
+  SKIP  04 Éviction daemon
+  SKIP  10 Multi-VM 3 agents
+  SKIP  18 Recall LIFO
+  SKIP  20 Prefetch stride
+  SKIP  21 TLS TOFU
+  SKIP  23 Disk I/O scheduler
+  [0;32mPASS[0m  30A Normalisation VMs Omega [remote] (23s)
+  [0;32mPASS[0m  05 vCPU élastique [remote] (347s)
+  [0;31mFAIL[0m  08 Migration RAM [remote] (391s)
+  SKIP  09 Orphan cleaner
+  SKIP  19 Compaction cluster
+  SKIP  22 Balloon thin-provisioning
+  SKIP  23C Disk I/O scheduler cluster
+  [0;32mPASS[0m  30 Conformité VMs Omega [remote] (22s)
+  SKIP  24 Installation doctor
+  [0;31mFAIL[0m  25 Réseau VM invitée [remote] (5s)
+  SKIP  38 Déploiement .deb
+  SKIP  06 GPU placement (passer --gpu)
+  SKIP  07 GPU scheduler (passer --gpu)
+  SKIP  27 GPU réel / rendu minimal (passer --gpu)
+  SKIP  32 GPU proxy applicatif (passer --gpu)
+  SKIP  26 Ceph réel
+  [0;31mFAIL[0m  M1 RAM + CPU simultanés [remote] (104s)
+  SKIP  M2 CPU+RAM saturés → migration
+  SKIP  M4 Stress cluster complet
+  [0;32mPASS[0m  M5 Migration live sous pression [remote] (141s)
+  SKIP  M6 Rafale démarrages simultanés
+  SKIP  M7 Drain nœud complet
+  SKIP  M3 GPU+CPU multi-contraintes (passer --gpu)
+  SKIP  28 Partition réseau contrôlée (passer --destructive)
+  SKIP  29 Soak long physique (passer --long)
+  SKIP  31 Scalabilité VMs physiques (passer --scale)
+  SKIP  37 Puissance Omega flotte (passer --fleet)
+
+  [0;32mPASS[0m: 4  [0;31mFAIL[0m: 3  [1;33mSKIP[0m: 30
+
+[0;31m[1m  ✗ 3 test(s) échoué(s)[0m

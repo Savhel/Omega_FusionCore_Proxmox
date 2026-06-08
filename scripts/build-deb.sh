@@ -57,6 +57,16 @@ install -m 755 "${SCRIPT_DIR}/omega-gpu-client.sh" "${INSTALL_ROOT}/scripts/omeg
 install -m 755 "${SCRIPT_DIR}/create-omega-vm.sh" "${INSTALL_ROOT}/scripts/create-omega-vm.sh"
 install -m 755 "${SCRIPT_DIR}/provision-omega-vms-remote.sh" "${INSTALL_ROOT}/scripts/provision-omega-vms-remote.sh"
 install -m 644 "${SCRIPT_DIR}/proxmox_hook.pl" "${INSTALL_ROOT}/scripts/proxmox_hook.pl"
+install -m 755 "${SCRIPT_DIR}/vm-isolation.sh" "${INSTALL_ROOT}/scripts/vm-isolation.sh"
+install -m 755 "${SCRIPT_DIR}/vm-link.sh" "${INSTALL_ROOT}/scripts/vm-link.sh"
+install -m 755 "${SCRIPT_DIR}/vm-internet.sh" "${INSTALL_ROOT}/scripts/vm-internet.sh"
+install -m 755 "${SCRIPT_DIR}/dns-register.sh" "${INSTALL_ROOT}/scripts/dns-register.sh"
+install -m 755 "${SCRIPT_DIR}/setup-network.sh" "${INSTALL_ROOT}/scripts/setup-network.sh"
+install -m 755 "${SCRIPT_DIR}/create-infra-vms.sh" "${INSTALL_ROOT}/scripts/create-infra-vms.sh"
+# Agent de readiness (watchdog) + son installeur — livrés avec le paquet pour que
+# make deploy-deb les pousse aussi (sinon ils restaient hors .deb, à scp manuellement).
+install -m 755 "${SCRIPT_DIR}/omega-qga-watchdog.sh" "${INSTALL_ROOT}/scripts/omega-qga-watchdog.sh"
+install -m 755 "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" "${INSTALL_ROOT}/scripts/install-qga-watchdog-remote.sh"
 
 install -m 755 "${SCRIPT_DIR}/omega-gpu-worker-cpu.py" "${INSTALL_ROOT}/workers/omega-gpu-worker-cpu.py"
 install -m 755 "${SCRIPT_DIR}/omega-gpu-worker-app.py" "${INSTALL_ROOT}/workers/omega-gpu-worker-app.py"

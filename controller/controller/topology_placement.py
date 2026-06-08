@@ -226,7 +226,7 @@ class TopologyAwarePlacementEngine:
         required = self.required_free_mib(vm)
 
         candidates = [
-            n for n in cluster.reachable_nodes
+            n for n in cluster.placeable_nodes
             if n.node_id != source_node
             and n.mem_free_mib >= required
             and self._gpu_ok(n, vm)

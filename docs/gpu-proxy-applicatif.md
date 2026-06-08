@@ -52,6 +52,28 @@ OMEGA_GPU_FALLBACK_NETWORK=1
 `nvidia-smi -L` comme nœud GPU principal. Tu peux forcer le choix avec
 `OMEGA_GPU_PRIMARY_NODE=<node-or-ip>`.
 
+Pour un worker CUDA strict, configure le Python qui voit PyTorch/CUDA:
+
+```bash
+OMEGA_GPU_PYTHON=/opt/omega-gpu-venv/bin/python
+OMEGA_GPU_PROXY_BACKEND_COMMAND=/opt/omega-remote-paging/workers/omega-gpu-worker-app-cuda
+OMEGA_GPU_PROXY_TOTAL_VRAM_MIB=24564
+OMEGA_GPU_PROXY_MAX_CONCURRENT=3
+```
+
+Vérification directe du worker:
+
+```bash
+set -a
+. /etc/omega/cluster.env
+set +a
+/opt/omega-remote-paging/workers/omega-gpu-worker-app-cuda <<'JSON'
+{"kind":"matrix_multiply","payload":{"n":32,"seed":2370,"require_cuda":true}}
+JSON
+```
+
+La sortie doit contenir `backend:"torch"`, `device:"cuda"` et le nom du GPU.
+
 Lancer sur un nœud GPU:
 
 ```bash
@@ -222,6 +244,8 @@ Variables utiles:
 - `OMEGA_GPU_PROXY_TEST_JOB_VRAM_MIB`: VRAM déclarée par job de test;
 - `OMEGA_GPU_PROXY_TEST_VM_COUNT`: nombre de VMs utilisées dans le test multi-VM.
 - `OMEGA_GPU_PROXY_API_TOKEN`: token envoyé au proxy pendant les tests.
+- `OMEGA_GPU_PROXY_REQUIRE_CUDA=1`: force les tests à échouer si le worker retombe en CPU.
+- `OMEGA_GPU_PYTHON`: Python/venv utilisé par le wrapper CUDA du worker.
 
 Si le proxy n'est pas déjà démarré et que `omega-gpu-proxy` a été synchronisé
 dans `OMEGA_BIN_DIR`, le test 32 démarre un proxy local sur `127.0.0.1:9400`.
@@ -236,6 +260,7 @@ dans `OMEGA_BIN_DIR`, le test 32 démarre un proxy local sur `127.0.0.1:9400`.
 - deux VMs peuvent partager le même service GPU par soumission de jobs.
 - le contrôleur global peut choisir `local_gpu`, `migrate_to_gpu` ou
   `remote_proxy` selon l'état réel du cluster.
+- la concurrence CUDA réelle via le test `36` si `backend=torch device=cuda`.
 
 ## Contrôleur GPU global
 
@@ -262,9 +287,24 @@ Variables:
 - `OMEGA_GPU_PRIMARY_NODE`: nœud GPU préféré pour l'API/proxy.
 - `OMEGA_GPU_PROXY_URL`: URL du proxy à utiliser par défaut.
 
-La logique de rangement/anti-fragmentation utilise déjà les capacités RAM, vCPU
-et GPU dans le contrôleur: elle préfère les nœuds capables d'accueillir la VM
-sans casser les budgets, et évite les migrations répétées via cooldown.
+La logique de rangement/anti-fragmentation utilise les capacités RAM, vCPU,
+pression disque et GPU. Elle ne choisit plus seulement le nœud qui a le plus de
+RAM: elle garde une marge VRAM, évite les nœuds sous forte pression disque et
+préfère une cible qui améliore réellement l'état du cluster.
+
+Tests associés:
+
+```bash
+./scripts/omega-lab.sh --gpu
+# puis: 34, 35, 36, M8, M9
+```
+
+| Test | Ce qu'il valide |
+|------|-----------------|
+| `32` | proxy GPU applicatif multi-VM, budgets et refus hors-budget |
+| `34` / `M8` | choix global local/migration/fallback selon l'état des nœuds |
+| `35` / `M9` | VM sans GPU local servie par proxy CUDA réseau |
+| `36` | concurrence CUDA stricte avec plusieurs jobs/VMs |
 
 ## Packaging release
 
@@ -286,12 +326,12 @@ Le paquet installe les binaires, scripts, workers et docs sous
 `/opt/omega-remote-paging`. L'activation Proxmox destructive du wrapper QEMU
 reste explicite via `omega-node-install`.
 
-## Ce que la v1 ne valide pas encore
+## Ce que cette voie ne valide pas encore
 
 - interception transparente des appels CUDA dans la VM;
 - isolation mémoire GPU garantie par driver;
 - priorité préemptive d'un kernel GPU déjà lancé.
 
-Pour valider une exécution CUDA/PyTorch réelle, il faut fournir un
-`--backend-command` qui appelle réellement le GPU côté hôte et qui respecte le
-contrat JSON ci-dessus.
+Pour valider une exécution CUDA/PyTorch réelle, le résultat du test doit
+indiquer `backend=torch`, `device=cuda`. Un résultat `python_cpu_reference`
+signifie que le worker n'utilise pas le venv CUDA attendu.

@@ -152,13 +152,13 @@ pub fn disk_space_mib(path: &str) -> (u64, u64) {
 
     // SAFETY: ret == 0 garantit que stat est initialisé.
     let s = unsafe { stat.assume_init() };
-    let frsize = s.f_frsize as u64;
+    let frsize = s.f_frsize;
     if frsize == 0 {
         return (0, 0);
     }
 
-    let avail = (s.f_bavail as u64).saturating_mul(frsize) / (1024 * 1024);
-    let total = (s.f_blocks as u64).saturating_mul(frsize) / (1024 * 1024);
+    let avail = s.f_bavail.saturating_mul(frsize) / (1024 * 1024);
+    let total = s.f_blocks.saturating_mul(frsize) / (1024 * 1024);
     (avail, total)
 }
 

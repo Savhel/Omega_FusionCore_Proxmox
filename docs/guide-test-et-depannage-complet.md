@@ -11,6 +11,8 @@ Il complète :
 - [retour-experience-cluster-reel.md](./retour-experience-cluster-reel.md)
 - [utilisation-physique.md](./utilisation-physique.md)
 - [fonctionnement-complet.md](./fonctionnement-complet.md)
+- [stockage-archive-cluster.md](./stockage-archive-cluster.md)
+- [plan-network-cellule-adapte.md](./plan-network-cellule-adapte.md)
 
 ---
 
@@ -71,7 +73,8 @@ Règles retenues :
 Sur chaque nœud :
 
 ```bash
-systemctl status omega-daemon
+systemctl is-active omega-daemon
+systemctl status omega-daemon --no-pager
 ss -tlnp | grep -E '9100|9200|9300'
 ```
 
@@ -87,10 +90,20 @@ journalctl -u omega-controller -n 100 --no-pager
 Exemples :
 
 ```bash
-curl -s http://10.10.0.11:9200/api/status | python3 -m json.tool
+curl -s http://10.10.0.11:9200/status | python3 -m json.tool
 curl -s http://10.10.0.11:9300/control/status | python3 -m json.tool
 curl -s http://10.10.0.11:9300/control/metrics
 ```
+
+Commande courte pour savoir si l'agent Omega est réellement actif:
+
+```bash
+systemctl is-active --quiet omega-daemon && echo "omega-daemon actif" || echo "omega-daemon inactif"
+curl -fsS http://127.0.0.1:9300/control/status >/dev/null && echo "API control OK" || echo "API control KO"
+```
+
+Ce n'est pas une commande `sysctl`: `sysctl` vérifie des paramètres kernel. Pour
+Omega, la source de vérité est `systemctl` plus l'endpoint HTTP `9300`.
 
 ---
 

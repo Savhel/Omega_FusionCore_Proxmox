@@ -246,14 +246,14 @@ ENSURE
 QGA_ENSURE_UNIT="$(cat <<'UNIT'
 [Unit]
 Description=Omega - garantit qemu-guest-agent actif a chaque boot
-After=network-online.target multi-user.target
-Wants=network-online.target
+After=sysinit.target
+Before=multi-user.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/omega-qga-ensure
-RemainAfterExit=no
-TimeoutStartSec=120
+RemainAfterExit=yes
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target

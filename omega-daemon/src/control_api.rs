@@ -439,7 +439,7 @@ async fn prometheus_metrics(State(state): State<Arc<NodeState>>) -> String {
          \n\
          # HELP omega_mem_usage_pct Pourcentage d'usage RAM\n\
          # TYPE omega_mem_usage_pct gauge\n\
-         omega_mem_usage_pct{{node=\"{node}\"}} {usage}\n\
+         omega_mem_usage_pct{{node=\"{node}\"}} {usage:.2}\n\
          \n\
          # HELP omega_store_get_total Total des GET_PAGE\n\
          # TYPE omega_store_get_total counter\n\
@@ -451,14 +451,14 @@ async fn prometheus_metrics(State(state): State<Arc<NodeState>>) -> String {
          \n\
          # HELP omega_store_hit_rate_pct Taux de hit du store\n\
          # TYPE omega_store_hit_rate_pct gauge\n\
-         omega_store_hit_rate_pct{{node=\"{node}\"}} {hit_rate}\n",
+         omega_store_hit_rate_pct{{node=\"{node}\"}} {hit_rate:.1}\n",
         node = snap.node_id,
         pages = snap.pages_stored,
         avail = snap.mem_available_kb,
-        usage = format!("{:.2}", snap.mem_usage_pct),
+        usage = snap.mem_usage_pct,
         gets = metrics.get_count,
         puts = metrics.put_count,
-        hit_rate = format!("{:.1}", metrics.hit_rate_pct),
+        hit_rate = metrics.hit_rate_pct,
     );
 
     output.push_str(&state.vcpu_scheduler.prometheus_metrics(&state.node_id));

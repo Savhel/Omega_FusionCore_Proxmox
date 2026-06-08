@@ -61,6 +61,56 @@ OMEGA_SCALE_SOAK_SECS=3600 \
 Le test `30` est volontairement strict: il bloque les VMs qui n'ont pas `vcpus`, `maxcpus`, `hotplug cpu`, agent invite, disque virtio-scsi, reseau virtio et metadata Omega.
 Le test `31` valide le passage a grande echelle: inventaire, conformite rapide, demarrage par lots, surveillance daemons/API et stabilite Proxmox.
 
+### Tests actuels exposés par `scripts/omega-lab.sh`
+
+Le runner interactif est la source principale pour le cluster physique:
+
+```bash
+./scripts/omega-lab.sh --gpu --ceph
+```
+
+Tests cluster importants:
+
+| ID | Rôle |
+|----|------|
+| `05` | vCPU élastique Proxmox avec hotplug CPU |
+| `08` | migration RAM sous pression |
+| `19` | compaction cluster |
+| `22` | balloon thin-provisioning puis migration |
+| `23C` | scheduler disque via cgroup v2 `io.weight` |
+| `24` | doctor installation physique |
+| `25` | réseau invité VM |
+| `26` | Ceph réel |
+| `27` | GPU réel/proxy CUDA minimal |
+| `30` | conformité VMs Omega |
+| `31` | scalabilité VMs physiques |
+| `32` | proxy GPU applicatif multi-VM |
+| `33` | métriques production complètes |
+| `34` | placement GPU global: local, migration ou fallback |
+| `35` | fallback GPU réseau CUDA |
+| `36` | concurrence CUDA stricte |
+
+Tests mixtes:
+
+| ID | Rôle |
+|----|------|
+| `M1` | RAM + CPU simultanés |
+| `M2` | CPU/RAM puis migration |
+| `M3` | GPU + CPU |
+| `M4` | pression cluster complète |
+| `M5` | live migration sous pression |
+| `M6` | rafale de démarrages |
+| `M7` | drain de nœud |
+| `M8` | placement GPU intelligent |
+| `M9` | fallback GPU réseau |
+
+Pour une validation stricte sans accepter de skip volontaire:
+
+```bash
+./scripts/omega-lab.sh --gpu --ceph --long --scale --destructive
+# puis choisir P dans le menu
+```
+
 ---
 
 ## 1. Tests automatisés (CI)

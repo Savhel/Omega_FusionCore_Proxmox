@@ -125,7 +125,7 @@ impl ClockEvictor {
                 m.last_access = Instant::now();
                 m.is_remote = false;
             })
-            .or_insert_with(PageMeta::default);
+            .or_default();
 
         let mut ring = self.clock_ring.lock().unwrap();
         if !ring.contains(page_id) {

@@ -65,6 +65,10 @@ class NodeInfo:
     gpu_backend_name: str = ""
     disk_pressure_pct: float = 0.0
     reachable:        bool = True
+    # Le nœud peut-il exécuter des VMs KVM ? (présence de /dev/kvm, rapportée par le daemon)
+    # Un nœud joignable mais sans KVM (nested sans virt imbriquée) ne doit JAMAIS
+    # être candidat au placement.
+    kvm_capable:      bool = True
     error:            str  = ""
 
     @property
@@ -88,7 +92,7 @@ class NodeInfo:
             timestamp_secs=0, gpu_enabled=False, gpu_total_vram_mib=0,
             gpu_free_vram_mib=0, gpu_reserved_vram_mib=0, gpu_backend_name="",
             disk_pressure_pct=0.0,
-            reachable=False, error=error,
+            reachable=False, kvm_capable=False, error=error,
         )
 
 
@@ -101,6 +105,13 @@ class ClusterState:
     @property
     def reachable_nodes(self) -> list[NodeInfo]:
         return [n for n in self.nodes if n.reachable]
+
+    @property
+    def placeable_nodes(self) -> list[NodeInfo]:
+        """Nœuds éligibles au placement/à l'accueil d'une VM :
+        joignables ET capables KVM (/dev/kvm présent). Un nœud nested sans
+        virtualisation imbriquée est joignable mais non plaçable."""
+        return [n for n in self.nodes if n.reachable and n.kvm_capable]
 
     @property
     def total_mem_free_mib(self) -> int:
@@ -207,6 +218,7 @@ class ClusterStateCollector:
                 gpu_backend_name = gpu.get("backend_name", ""),
                 disk_pressure_pct = data.get("disk_pressure_pct", 0.0),
                 reachable        = True,
+                kvm_capable      = data.get("kvm_capable", True),
             )
 
         except Exception as e:
