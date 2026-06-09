@@ -55,6 +55,10 @@ install -m 755 "${SCRIPT_DIR}/uninstall.sh" "${INSTALL_ROOT}/scripts/uninstall.s
 install -m 755 "${SCRIPT_DIR}/omega-lab.sh" "${INSTALL_ROOT}/scripts/omega-lab.sh"
 install -m 755 "${SCRIPT_DIR}/omega-gpu-client.sh" "${INSTALL_ROOT}/scripts/omega-gpu-client.sh"
 install -m 755 "${SCRIPT_DIR}/create-omega-vm.sh" "${INSTALL_ROOT}/scripts/create-omega-vm.sh"
+# Variante GANDAL (proxys mTLS + monitoring) + générateur de cert — livrées avec le paquet.
+install -m 755 "${SCRIPT_DIR}/create-omega-vm-proxy.sh" "${INSTALL_ROOT}/scripts/create-omega-vm-proxy.sh"
+install -m 755 "${SCRIPT_DIR}/generate-proxy-cert.sh" "${INSTALL_ROOT}/scripts/generate-proxy-cert.sh"
+install -m 755 "${SCRIPT_DIR}/gandal-central-access.sh" "${INSTALL_ROOT}/scripts/gandal-central-access.sh"
 install -m 755 "${SCRIPT_DIR}/provision-omega-vms-remote.sh" "${INSTALL_ROOT}/scripts/provision-omega-vms-remote.sh"
 install -m 644 "${SCRIPT_DIR}/proxmox_hook.pl" "${INSTALL_ROOT}/scripts/proxmox_hook.pl"
 install -m 755 "${SCRIPT_DIR}/vm-isolation.sh" "${INSTALL_ROOT}/scripts/vm-isolation.sh"

@@ -94,7 +94,7 @@ NODES_CSV=""
 ROOT_PASSWORD="root"
 VM_IP_PREFIX=""
 VM_IP_START=101
-VM_VMID_BASE=2300
+VM_VMID_BASE=3000
 VM_GATEWAY=""
 VM_NETMASK=24
 VM_DNS_IP=""
@@ -875,22 +875,27 @@ create_one_vm() {
         fi
     fi
 
-    # Calcul IP fixe par position dans la liste (fonctionne avec n'importe quelle plage de VMIDs)
+    # IP fixe DÉTERMINISTE PAR VMID : ip_last = VM_IP_START + (vmid - VM_VMID_BASE).
+    # (Avant : calcul par POSITION dans la liste → toute nouvelle fournée repartait à
+    #  .101/.102 et écrasait les IP des VMs déjà créées. Bug de collision corrigé.)
+    # Une même VMID donne TOUJOURS la même IP, quelle que soit la liste fournie.
     local ipconfig0_arg="ip=dhcp"
     local nameserver_arg="8.8.8.8"
     if [[ -n "$VM_IP_PREFIX" && -n "$VM_GATEWAY" ]]; then
-        local ip_idx=0
-        local v
-        for v in "${VMID_ARR[@]}"; do
-            [[ "$v" == "$vmid" ]] && break
-            ip_idx=$(( ip_idx + 1 ))
-        done
-        local ip_last=$(( VM_IP_START + ip_idx ))
-        if [[ "$ip_last" -gt 254 ]]; then
-            echo "WARN: IP calculée 10.x.x.${ip_last} invalide pour VM $vmid (position $ip_idx) — fallback DHCP" >&2
+        local ip_last=$(( VM_IP_START + vmid - VM_VMID_BASE ))
+        if [[ "$ip_last" -lt 1 || "$ip_last" -gt 254 ]]; then
+            echo "WARN: IP ${VM_IP_PREFIX}.${ip_last} hors plage pour VM $vmid (base=$VM_VMID_BASE start=$VM_IP_START) — fallback DHCP" >&2
             ipconfig0_arg="ip=dhcp"
         else
-            ipconfig0_arg="ip=${VM_IP_PREFIX}.${ip_last}/${VM_NETMASK},gw=${VM_GATEWAY}"
+            local want_ip="${VM_IP_PREFIX}.${ip_last}"
+            # Garde-fou : refuser si une AUTRE VM du cluster détient déjà cette IP.
+            local holder
+            holder="$(ssh "${SSH_OPTS[@]}" "$REMOTE" \
+                "grep -rlE '^ipconfig0:.*ip=${want_ip}/' /etc/pve/nodes/*/qemu-server/ 2>/dev/null | grep -vE '/${vmid}\\.conf$' | head -1" 2>/dev/null || true)"
+            if [[ -n "$holder" ]]; then
+                fail "IP ${want_ip} déjà utilisée par $(basename "$holder" .conf) — VM $vmid refusée (collision). Corrige VM_VMID_BASE/VM_IP_START ou libère l'IP."
+            fi
+            ipconfig0_arg="ip=${want_ip}/${VM_NETMASK},gw=${VM_GATEWAY}"
         fi
         [[ -n "$VM_DNS_IP" ]] && nameserver_arg="$VM_DNS_IP"
     fi

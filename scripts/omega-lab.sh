@@ -1243,7 +1243,7 @@ do_provision_vms() {
     local net_vlan_tag="${OMEGA_NET_VM_VLAN_TAG:-}"
     local net_ip_prefix="${OMEGA_NET_VM_IP_PREFIX:-}"
     local net_ip_start="${OMEGA_NET_VM_IP_START:-101}"
-    local net_vmid_base="${OMEGA_NET_VM_VMID_BASE:-2300}"
+    local net_vmid_base="${OMEGA_NET_VM_VMID_BASE:-3000}"
     local net_gateway="${OMEGA_NET_VM_GATEWAY:-}"
     local net_netmask="${OMEGA_NET_VM_NETMASK:-24}"
     local net_dns_ip="${OMEGA_NET_VM_DNS_IP:-}"
@@ -1424,7 +1424,7 @@ do_provision_vms() {
     [[ -n "$image_local" ]] && args+=(--image-local "$image_local")
     [[ -f "${SSH_KEY:-}" ]] && args+=(--ssh-key "$SSH_KEY")
     [[ -n "$net_vlan_tag" ]] && args+=(--vm-vlan-tag "$net_vlan_tag")
-    [[ -n "$net_ip_prefix" ]] && args+=(--vm-ip-prefix "$net_ip_prefix" --vm-ip-start "$net_ip_start" --vm-netmask "$net_netmask")
+    [[ -n "$net_ip_prefix" ]] && args+=(--vm-ip-prefix "$net_ip_prefix" --vm-ip-start "$net_ip_start" --vm-netmask "$net_netmask" --vm-vmid-base "$net_vmid_base")
     [[ -n "$net_gateway" ]] && args+=(--vm-gateway "$net_gateway")
     [[ -n "$net_dns_ip" ]] && args+=(--vm-dns-ip "$net_dns_ip")
 
