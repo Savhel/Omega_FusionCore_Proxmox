@@ -64,6 +64,8 @@ install -m 644 "${SCRIPT_DIR}/proxmox_hook.pl" "${INSTALL_ROOT}/scripts/proxmox_
 install -m 755 "${SCRIPT_DIR}/vm-isolation.sh" "${INSTALL_ROOT}/scripts/vm-isolation.sh"
 install -m 755 "${SCRIPT_DIR}/vm-link.sh" "${INSTALL_ROOT}/scripts/vm-link.sh"
 install -m 755 "${SCRIPT_DIR}/vm-internet.sh" "${INSTALL_ROOT}/scripts/vm-internet.sh"
+install -m 755 "${SCRIPT_DIR}/vm-expose.sh" "${INSTALL_ROOT}/scripts/vm-expose.sh"
+install -m 755 "${SCRIPT_DIR}/proxy-domain.sh" "${INSTALL_ROOT}/scripts/proxy-domain.sh"
 install -m 755 "${SCRIPT_DIR}/dns-register.sh" "${INSTALL_ROOT}/scripts/dns-register.sh"
 install -m 755 "${SCRIPT_DIR}/setup-network.sh" "${INSTALL_ROOT}/scripts/setup-network.sh"
 install -m 755 "${SCRIPT_DIR}/create-infra-vms.sh" "${INSTALL_ROOT}/scripts/create-infra-vms.sh"
@@ -71,6 +73,9 @@ install -m 755 "${SCRIPT_DIR}/create-infra-vms.sh" "${INSTALL_ROOT}/scripts/crea
 # make deploy-deb les pousse aussi (sinon ils restaient hors .deb, à scp manuellement).
 install -m 755 "${SCRIPT_DIR}/omega-qga-watchdog.sh" "${INSTALL_ROOT}/scripts/omega-qga-watchdog.sh"
 install -m 755 "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" "${INSTALL_ROOT}/scripts/install-qga-watchdog-remote.sh"
+# Agent cluster-global de répartition des VMs omega (live-migration vers la cible 1/2/2).
+install -m 755 "${SCRIPT_DIR}/omega-distribution-reconciler.sh" "${INSTALL_ROOT}/scripts/omega-distribution-reconciler.sh"
+install -m 755 "${SCRIPT_DIR}/install-distribution-reconciler-remote.sh" "${INSTALL_ROOT}/scripts/install-distribution-reconciler-remote.sh"
 
 install -m 755 "${SCRIPT_DIR}/omega-gpu-worker-cpu.py" "${INSTALL_ROOT}/workers/omega-gpu-worker-cpu.py"
 install -m 755 "${SCRIPT_DIR}/omega-gpu-worker-app.py" "${INSTALL_ROOT}/workers/omega-gpu-worker-app.py"

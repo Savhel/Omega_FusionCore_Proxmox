@@ -95,6 +95,11 @@ ROOT_PASSWORD="root"
 VM_IP_PREFIX=""
 VM_IP_START=101
 VM_VMID_BASE=3000
+# Plage d'allocation dense : on utilise TOUTES les adresses libres de VM_IP_MIN à
+# VM_IP_MAX (défaut .2 à .253 ; .1 = gateway réservée). L'IP n'est plus liée au VMID :
+# chaque nouvelle VM prend la PLUS BASSE adresse libre du /24, donc aucune adresse gaspillée.
+VM_IP_MIN=2
+VM_IP_MAX=253
 VM_GATEWAY=""
 VM_NETMASK=24
 VM_DNS_IP=""
@@ -132,6 +137,8 @@ while [[ $# -gt 0 ]]; do
         --vm-ip-prefix) VM_IP_PREFIX="$2"; shift 2 ;;
         --vm-ip-start) VM_IP_START="$2"; shift 2 ;;
         --vm-vmid-base) VM_VMID_BASE="$2"; shift 2 ;;
+        --vm-ip-min) VM_IP_MIN="$2"; shift 2 ;;
+        --vm-ip-max) VM_IP_MAX="$2"; shift 2 ;;
         --vm-gateway) VM_GATEWAY="$2"; shift 2 ;;
         --vm-netmask) VM_NETMASK="$2"; shift 2 ;;
         --vm-dns-ip) VM_DNS_IP="$2"; shift 2 ;;
@@ -298,6 +305,62 @@ for v in json.load(sys.stdin):
     if v.get('vmid') == int('$vmid'):
         print(v.get('node',''))
         break" 2>/dev/null
+}
+
+# alloc_free_ip <vmid> : renvoie PREFIX.<octet> = plus basse adresse LIBRE dans
+# [VM_IP_MIN..VM_IP_MAX] du sous-réseau VM_IP_PREFIX/24. Utilise toutes les adresses
+# disponibles (pas de gaspillage). Réserve .1 (gateway). Si la VM possède déjà une IP
+# en plage, la conserve (idempotent / adoption). Échoue (rc1) si le /24 est saturé.
+alloc_free_ip() {
+    local vmid="$1"
+    # NB : `|| true` après chaque grep — un grep sans correspondance sort en code 1,
+    # ce qui, avec `set -o pipefail`, ferait échouer la fonction MÊME quand une IP
+    # libre est trouvée (faux « plus aucune adresse libre »). On neutralise donc le
+    # code de sortie des grep ; seul le code de python (libre/saturé) doit compter.
+    ssh "${SSH_OPTS[@]}" "$REMOTE" "{ grep -rhoE '^ipconfig0:.*ip=${VM_IP_PREFIX//./\\.}\.[0-9]+/' /etc/pve/nodes/*/qemu-server/*.conf 2>/dev/null || true; echo '---SELF---'; grep -hoE '^ipconfig0:.*ip=${VM_IP_PREFIX//./\\.}\.[0-9]+/' /etc/pve/nodes/*/qemu-server/${vmid}.conf 2>/dev/null || true; }" \
+      | PREFIX="$VM_IP_PREFIX" IPMIN="$VM_IP_MIN" IPMAX="$VM_IP_MAX" python3 -c '
+import os, re, sys
+prefix = os.environ["PREFIX"]; lo = int(os.environ["IPMIN"]); hi = int(os.environ["IPMAX"])
+used = set([1])                      # .1 = gateway réservée
+self_ip = None
+section = "all"
+pat = re.compile(r"ip=" + re.escape(prefix) + r"\.(\d+)/")
+for line in sys.stdin:
+    line = line.strip()
+    if line == "---SELF---":
+        section = "self"; continue
+    m = pat.search(line)
+    if not m: continue
+    octet = int(m.group(1))
+    if section == "self":
+        self_ip = octet              # IP actuelle de CETTE vm (à conserver)
+    else:
+        used.add(octet)
+# La VM garde son IP si elle en a déjà une dans la plage.
+if self_ip is not None and lo <= self_ip <= hi:
+    print(f"{prefix}.{self_ip}"); sys.exit(0)
+for n in range(lo, hi + 1):
+    if n not in used:
+        print(f"{prefix}.{n}"); sys.exit(0)
+sys.exit(1)
+'
+}
+
+# Liste les VMs omega ACTUELLES du cluster, une par ligne : 'vmid<TAB>pve_node'.
+# Identification = tag 'omega' autonome (même règle que le watchdog), ce qui exclut
+# naturellement les templates (tag 'omega-template') et l'infra (pfSense/DNS non taggés).
+# Sert à compter l'occupation réelle pour répartir les NOUVELLES VMs (1 Emilia/2 Ram/2 Rem).
+list_omega_vms_by_node() {
+    ssh "${SSH_OPTS[@]}" "$REMOTE" "pvesh get /cluster/resources --type vm --output-format json" | \
+        python3 -c "import json,sys,re
+pat=re.compile(r'(^|[;, ])omega([;, ]|\$)')
+for v in json.load(sys.stdin):
+    if v.get('template'): continue
+    tags=v.get('tags') or ''
+    if not pat.search(tags): continue
+    vmid=v.get('vmid'); node=v.get('node') or ''
+    if vmid is not None and node:
+        print('%s\t%s' % (vmid, node))" 2>/dev/null
 }
 
 node_ssh_target() {
@@ -875,28 +938,15 @@ create_one_vm() {
         fi
     fi
 
-    # IP fixe DÉTERMINISTE PAR VMID : ip_last = VM_IP_START + (vmid - VM_VMID_BASE).
-    # (Avant : calcul par POSITION dans la liste → toute nouvelle fournée repartait à
-    #  .101/.102 et écrasait les IP des VMs déjà créées. Bug de collision corrigé.)
-    # Une même VMID donne TOUJOURS la même IP, quelle que soit la liste fournie.
+    # ALLOCATION DENSE : on utilise toutes les adresses libres de VM_IP_MIN..VM_IP_MAX
+    # (.2 à .253). L'IP n'est PLUS dérivée du VMID — chaque VM prend la plus basse adresse
+    # libre du /24. Si la VM possède déjà une IP en plage (adoption), on la conserve.
     local ipconfig0_arg="ip=dhcp"
     local nameserver_arg="8.8.8.8"
     if [[ -n "$VM_IP_PREFIX" && -n "$VM_GATEWAY" ]]; then
-        local ip_last=$(( VM_IP_START + vmid - VM_VMID_BASE ))
-        if [[ "$ip_last" -lt 1 || "$ip_last" -gt 254 ]]; then
-            echo "WARN: IP ${VM_IP_PREFIX}.${ip_last} hors plage pour VM $vmid (base=$VM_VMID_BASE start=$VM_IP_START) — fallback DHCP" >&2
-            ipconfig0_arg="ip=dhcp"
-        else
-            local want_ip="${VM_IP_PREFIX}.${ip_last}"
-            # Garde-fou : refuser si une AUTRE VM du cluster détient déjà cette IP.
-            local holder
-            holder="$(ssh "${SSH_OPTS[@]}" "$REMOTE" \
-                "grep -rlE '^ipconfig0:.*ip=${want_ip}/' /etc/pve/nodes/*/qemu-server/ 2>/dev/null | grep -vE '/${vmid}\\.conf$' | head -1" 2>/dev/null || true)"
-            if [[ -n "$holder" ]]; then
-                fail "IP ${want_ip} déjà utilisée par $(basename "$holder" .conf) — VM $vmid refusée (collision). Corrige VM_VMID_BASE/VM_IP_START ou libère l'IP."
-            fi
-            ipconfig0_arg="ip=${want_ip}/${VM_NETMASK},gw=${VM_GATEWAY}"
-        fi
+        local want_ip
+        want_ip="$(alloc_free_ip "$vmid")" || fail "Plus aucune adresse libre dans ${VM_IP_PREFIX}.${VM_IP_MIN}-${VM_IP_MAX} pour VM $vmid"
+        ipconfig0_arg="ip=${want_ip}/${VM_NETMASK},gw=${VM_GATEWAY}"
         [[ -n "$VM_DNS_IP" ]] && nameserver_arg="$VM_DNS_IP"
     fi
 
@@ -984,8 +1034,14 @@ bad_vmids=()
 declare -A VM_TARGET_NODE=()
 
 # Distribution contrôlée : OMEGA_VM_NODE_DISTRIBUTION="IP:max,IP:max,..."
-# Exemple : "192.168.123.100:1,192.168.123.101:3,192.168.123.102:3"
+# Exemple : "192.168.123.100:1,192.168.123.101:2,192.168.123.102:2" (1 Emilia/2 Ram/2 Rem)
 # Nœuds absents de la liste → OMEGA_VM_NODE_DEFAULT_MAX VMs chacun (défaut: 2)
+#
+# PLACEMENT CONVERGENT (corrigé) : on compte d'abord les VMs omega DÉJÀ présentes sur
+# chaque nœud (occupation réelle du cluster), puis chaque NOUVELLE VM va sur le nœud le
+# plus en-dessous de son quota. Ainsi la cible (1 Emilia/2 Ram/2 Rem) est respectée quel
+# que soit le nombre de VMs créées d'un coup ou une par une. Avant, _node_count repartait
+# de 0 → toute création unitaire tombait sur emilia (1er nœud à quota libre). Bug corrigé.
 declare -A _node_max=()
 declare -A _node_count=()
 for node in "${CLUSTER_NODES[@]}"; do _node_count["$node"]=0; done
@@ -999,26 +1055,43 @@ if [[ -n "${OMEGA_VM_NODE_DISTRIBUTION:-}" ]]; then
 fi
 _default_max="${OMEGA_VM_NODE_DEFAULT_MAX:-2}"
 
-# Assigner les VMIDs aux nœuds en respectant les quotas
-_node_queue=("${CLUSTER_NODES[@]}")
+# 1) Occupation actuelle : compter les VMs omega vivantes par nœud éligible
+#    (inclut celles du batch déjà créées → elles seront adoptées sur place, pas re-placées).
+while IFS=$'\t' read -r _evmid _enode; do
+    [[ -n "$_enode" ]] || continue
+    _essh="$(node_ssh_target "$_enode")"
+    [[ -n "${_node_count[$_essh]+x}" ]] || continue   # nœud hors cluster provisionnable → ignoré
+    _node_count["$_essh"]=$(( ${_node_count[$_essh]} + 1 ))
+done < <(list_omega_vms_by_node)
+
+# 2) Assigner chaque VMID. Une VM déjà existante reste sur son nœud (déjà comptée en 1).
+#    Une nouvelle VM va sur le nœud à plus forte capacité restante (max-count) ; à égalité,
+#    le nœud au quota le plus élevé l'emporte → emilia (quota 1) est servi en DERNIER.
 for vmid in "${VMID_ARR[@]}"; do
     [[ -n "$vmid" ]] || continue
-    # Trouver le premier nœud qui a encore de la capacité
-    assigned=""
-    for node in "${_node_queue[@]}"; do
+    _existing="$(vm_cluster_node "$vmid" || true)"
+    if [[ -n "$_existing" ]]; then
+        VM_TARGET_NODE["$vmid"]="$(node_ssh_target "$_existing")"
+        continue
+    fi
+    assigned=""; _best_slack=-2147483648; _best_max=-1
+    for node in "${CLUSTER_NODES[@]}"; do
         _max="${_node_max[$node]:-$_default_max}"
-        _cur="${_node_count[$node]:-0}"
-        if [[ "$_cur" -lt "$_max" ]]; then
-            assigned="$node"
-            _node_count["$node"]=$(( _cur + 1 ))
-            break
+        _slack=$(( _max - ${_node_count[$node]:-0} ))
+        if [[ "$_slack" -gt "$_best_slack" ]] || \
+           { [[ "$_slack" -eq "$_best_slack" ]] && [[ "$_max" -gt "$_best_max" ]]; }; then
+            _best_slack="$_slack"; _best_max="$_max"; assigned="$node"
         fi
     done
-    # Si tous les nœuds sont pleins, round-robin classique
-    if [[ -z "$assigned" ]]; then
-        assigned="${CLUSTER_NODES[$(( ${#VM_TARGET_NODE[@]} % ${#CLUSTER_NODES[@]} ))]}"
-    fi
+    [[ -n "$assigned" ]] || assigned="${CLUSTER_NODES[0]}"
     VM_TARGET_NODE["$vmid"]="$assigned"
+    _node_count["$assigned"]=$(( ${_node_count[$assigned]:-0} + 1 ))
+done
+
+# Récapitulatif d'occupation cible (existant + nouveau) par nœud vs quota.
+echo "  Occupation cible par nœud (VMs omega vivantes, quota):"
+for node in "${CLUSTER_NODES[@]}"; do
+    echo "    $node : ${_node_count[$node]:-0}/${_node_max[$node]:-$_default_max}"
 done
 
 # Afficher la distribution choisie

@@ -25,10 +25,14 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONF_FILE="${SCRIPT_DIR}/cluster.conf"
 
 # ── Options CLI ───────────────────────────────────────────────────────────────
-DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_FLEET=false; DO_DESTRUCTIVE=false; DO_PROVISION=false; DO_PRODUCTION=false; AUTO=false
+DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_FLEET=false; DO_DESTRUCTIVE=false; DO_PROVISION=false; DO_PRODUCTION=false; AUTO=false; DO_LLM=false; DO_LLM_ACCESS=false; DO_LLM_ACCESS_RECONCILE=false; OMEGA_LAB_DRYRUN=false
 for arg in "$@"; do
     case "$arg" in
         --gpu)         DO_GPU=true  ;;
+        --llm)         DO_LLM=true  ;;
+        --llm-access)  DO_LLM_ACCESS=true ;;
+        --llm-access-reconcile) DO_LLM_ACCESS_RECONCILE=true ;;
+        --dry-run)     OMEGA_LAB_DRYRUN=true ;;
         --ceph)        DO_CEPH=true ;;
         --long)        DO_LONG=true ;;
         --scale)       DO_SCALE=true ;;
@@ -1610,6 +1614,22 @@ do_install_qga_watchdog() {
     [[ -f "${SSH_KEY:-}" ]] && wd_args+=(--ssh-key "$SSH_KEY")
     bash "${SCRIPT_DIR}/install-qga-watchdog-remote.sh" "${wd_args[@]}"
     _ok "Watchdog readiness/conformité installé (VMs: ${vmids:-auto omega}, conformant=${ensure_conformant}, vcpu_max=${vcpu_max})"
+
+    # Agent CLUSTER-GLOBAL de répartition (1 instance sur le contrôleur) : maintient
+    # la distribution cible (OMEGA_VM_NODE_DISTRIBUTION) par live-migration, en continu.
+    local rc_args=(
+        --controller "$CONTROLLER_NODE"
+        --user "$DEPLOY_USER"
+        --interval "${OMEGA_RECONCILE_INTERVAL_SECS:-120}"
+        --distribution "${OMEGA_VM_NODE_DISTRIBUTION:-}"
+        --default-max "${OMEGA_VM_NODE_DEFAULT_MAX:-2}"
+        --max-per-tick "${OMEGA_RECONCILE_MAX_MIGRATIONS_PER_TICK:-1}"
+        --pin-vmids "${OMEGA_RECONCILE_PIN_VMIDS:-}"
+    )
+    [[ "${OMEGA_RECONCILE_DRY_RUN:-0}" == "1" ]] && rc_args+=(--dry-run)
+    [[ -f "${SSH_KEY:-}" ]] && rc_args+=(--ssh-key "$SSH_KEY")
+    bash "${SCRIPT_DIR}/install-distribution-reconciler-remote.sh" "${rc_args[@]}"
+    _ok "Réconciliateur de distribution installé sur ${CONTROLLER_NODE} (cible: ${OMEGA_VM_NODE_DISTRIBUTION:-défaut})"
 }
 
 do_uninstall() {
@@ -3037,6 +3057,156 @@ run_one() {
     esac
 }
 
+# ── GPU LLM : Ollama sur chaque nœud GPU + gateway unifiée (1 commande) ────────
+# Déploie/assure un serveur Ollama-GPU (Docker --gpus all) sur chaque nœud doté
+# d'un GPU, puis une gateway LiteLLM OpenAI-compatible qui route par modèle
+# (gros modèles → grosses cartes) avec load-balancing + fallback santé.
+# Met à jour cluster.env (VRAM réelle, primaire, URL gateway). Idempotent.
+do_gpu_llm() {
+    _need_config || return
+    _hdr "GPU LLM — Ollama par nœud GPU + gateway unifiée"
+
+    local gateway_node="${OMEGA_LLM_GATEWAY_NODE:-${CONTROLLER_NODE}}"
+    local gateway_port="${OMEGA_LLM_GATEWAY_PORT:-4000}"
+
+    # 1. Résoudre les nœuds GPU (OMEGA_GPU_NODES sinon auto-détection nvidia-smi)
+    local gpu_nodes=() n
+    if [[ -n "${OMEGA_GPU_NODES:-}" ]]; then
+        IFS=',' read -r -a gpu_nodes <<< "$OMEGA_GPU_NODES"
+        _info "Nœuds GPU (cluster.conf) : ${OMEGA_GPU_NODES}"
+    else
+        _info "Détection des nœuds GPU (nvidia-smi)…"
+        for n in "${NODES_ARR[@]}"; do
+            if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=5 -o BatchMode=yes "${DEPLOY_USER}@${n}" \
+                 "nvidia-smi -L >/dev/null 2>&1"; then
+                gpu_nodes+=("$n"); _ok "GPU détecté sur ${n}"
+            fi
+        done
+    fi
+    [[ ${#gpu_nodes[@]} -gt 0 ]] || { _err "Aucun nœud GPU détecté (seuls les nœuds avec carte NVIDIA peuvent servir Ollama)"; return 1; }
+
+    # 2. Assurer un serveur Ollama-GPU sur chaque nœud GPU (réutilise un conteneur existant)
+    for n in "${gpu_nodes[@]}"; do
+        _info "Ollama-GPU sur ${n}…"
+        ssh "${SSH_OPTS[@]}" -o ConnectTimeout=12 "${DEPLOY_USER}@${n}" bash -s <<'REOL' || _warn "Ollama-GPU: souci sur ce nœud"
+set -e
+if curl -sf --max-time 4 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+  echo "  ollama déjà présent (réutilisé)"
+else
+  command -v docker >/dev/null || { echo "  docker absent — installez-le"; exit 1; }
+  docker rm -f omega-ollama >/dev/null 2>&1 || true
+  docker run -d --name omega-ollama --restart unless-stopped --gpus all \
+    -p 11434:11434 -v omega_ollama_models:/root/.ollama \
+    -e OLLAMA_HOST=0.0.0.0 -e OLLAMA_KEEP_ALIVE=5m -e OLLAMA_MAX_LOADED_MODELS=2 -e OLLAMA_NUM_PARALLEL=2 \
+    ollama/ollama:latest >/dev/null
+  echo "  omega-ollama démarré"
+fi
+cname=$(docker ps --format '{{.Names}}' | grep -iE 'ollama' | head -1)
+if [ -n "$cname" ]; then
+  docker exec "$cname" nvidia-smi -L >/dev/null 2>&1 && echo "  GPU OK dans le conteneur ($cname)" \
+    || { echo "  NVML KO → restart $cname"; docker restart "$cname" >/dev/null; }
+fi
+REOL
+    done
+
+    # 3. Générer la config gateway depuis les modèles réels + déployer LiteLLM
+    local gpu_csv; gpu_csv=$(IFS=,; echo "${gpu_nodes[*]}")
+    _info "Gateway LiteLLM sur ${gateway_node}:${gateway_port} (config depuis les modèles réels)…"
+    ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 "${DEPLOY_USER}@${gateway_node}" \
+        "OMEGA_GPU_NODES='${gpu_csv}' OMEGA_GW_PORT='${gateway_port}' bash -s" <<'RGW' || { _err "Échec déploiement gateway"; return 1; }
+set -e
+mkdir -p /opt/omega-llm /etc/omega
+CFG=/opt/omega-llm/config.yaml
+echo "model_list:" > "$CFG"
+IFS=',' read -r -a NODES <<< "$OMEGA_GPU_NODES"
+for node in "${NODES[@]}"; do
+  models=$(curl -sf --max-time 6 "http://${node}:11434/api/tags" 2>/dev/null | \
+    python3 -c 'import sys,json;[print(m["name"]) for m in json.load(sys.stdin).get("models",[])]' 2>/dev/null || true)
+  for m in $models; do
+    printf '  - model_name: %s\n    litellm_params: {model: ollama_chat/%s, api_base: http://%s:11434}\n' "$m" "$m" "$node" >> "$CFG"
+  done
+done
+cat >> "$CFG" <<'YML'
+router_settings:
+  routing_strategy: least-busy
+  num_retries: 2
+  allowed_fails: 2
+  cooldown_time: 30
+litellm_settings:
+  drop_params: true
+  request_timeout: 600
+YML
+[ -f /etc/omega/llm-gateway.token ] || echo "sk-omega-$(openssl rand -hex 16)" > /etc/omega/llm-gateway.token
+KEY=$(cat /etc/omega/llm-gateway.token)
+docker pull ghcr.io/berriai/litellm:main-latest >/dev/null 2>&1 || true
+docker rm -f omega-llm-gateway >/dev/null 2>&1 || true
+docker run -d --name omega-llm-gateway --restart unless-stopped -p ${OMEGA_GW_PORT}:4000 \
+  -e LITELLM_MASTER_KEY="$KEY" -v /opt/omega-llm/config.yaml:/app/config.yaml \
+  ghcr.io/berriai/litellm:main-latest --config /app/config.yaml --port 4000 >/dev/null
+for i in $(seq 1 30); do sleep 3; curl -sf "http://127.0.0.1:${OMEGA_GW_PORT}/health/liveliness" >/dev/null 2>&1 && break; done
+echo "  $(grep -c model_name "$CFG") déploiements de modèles configurés"
+RGW
+
+    # 4. Mettre à jour cluster.env (VRAM réelle, primaire, URL gateway) + relancer le proxy
+    local primary="${OMEGA_GPU_PRIMARY_NODE:-${gpu_nodes[0]}}"
+    for n in "${gpu_nodes[@]}"; do
+        ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 "${DEPLOY_USER}@${n}" \
+            "PRIMARY='${primary}' GW='http://${gateway_node}:${gateway_port}' bash -s" <<'RENV' || true
+f=/etc/omega/cluster.env; mkdir -p /etc/omega; touch "$f"
+vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+set_kv(){ grep -q "^$1=" "$f" && sed -i "s|^$1=.*|$1=$2|" "$f" || echo "$1=$2" >> "$f"; }
+[ -n "$vram" ] && set_kv OMEGA_GPU_PROXY_TOTAL_VRAM_MIB "$vram"
+set_kv OMEGA_GPU_PRIMARY_NODE "$PRIMARY"
+set_kv OMEGA_LLM_GATEWAY_URL "$GW"
+set_kv OMEGA_LLM_GATEWAY_TOKEN_FILE /etc/omega/llm-gateway.token
+systemctl restart omega-gpu-proxy 2>/dev/null || true
+RENV
+    done
+
+    # 5. Récapitulatif
+    local key; key=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=6 "${DEPLOY_USER}@${gateway_node}" "cat /etc/omega/llm-gateway.token" 2>/dev/null || true)
+    _ok "GPU LLM prêt (${#gpu_nodes[@]} nœud(s) GPU + gateway unifiée)"
+    echo -e "    Endpoint OpenAI : ${CYAN}http://${gateway_node}:${gateway_port}/v1${RESET}"
+    echo -e "    Token gateway   : ${CYAN}${key:-/etc/omega/llm-gateway.token}${RESET}"
+    echo -en "    Ollama directs  : ${CYAN}"; for n in "${gpu_nodes[@]}"; do echo -n "http://${n}:11434  "; done; echo -e "${RESET}"
+    echo -e "    Test            : ${DIM}curl -s http://${gateway_node}:${gateway_port}/v1/models -H \"Authorization: Bearer ${key:-\$TOKEN}\"${RESET}"
+    echo -e "    Console GANDAL  : ${DIM}OPENAI_BASE_URL=http://${gateway_node}:${gateway_port}/v1  OPENAI_API_KEY=<token>${RESET}"
+}
+
+# ── Accès LLM : ouvrir l'accès des VMs isolées à la gateway (1 commande) ───────
+# Ajoute une règle pfSense étroite : la VM (ou tout le réseau OMEGA) ne peut
+# joindre QUE l'hôte de la gateway LLM, en restant isolée du reste. Réversible.
+do_llm_access() {
+    _need_config || return
+    _hdr "Accès LLM — ouvrir l'accès des VMs isolées à la gateway"
+    local gw_node="${OMEGA_LLM_GATEWAY_NODE:-${CONTROLLER_NODE}}"
+    local gw_port="${OMEGA_LLM_GATEWAY_PORT:-4000}"
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        _ask "VMID, 'all' (réseau OMEGA), ou 'reconcile' (auto: vram>0) [reconcile]"
+        read -r target; target="${target:-reconcile}"
+    fi
+    # 'reconcile' : règle l'accès de TOUTES les VMs vram>0 (sur le contrôleur).
+    if [[ "$target" == "reconcile" ]]; then
+        local extra="${2:-}"   # ex: --dry-run / --prune
+        _info "Réconciliation accès LLM (vram>0 → gateway) sur ${CONTROLLER_NODE}…"
+        ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 "${DEPLOY_USER}@${CONTROLLER_NODE}" "mkdir -p /tmp/omega-llm-recon" 2>/dev/null
+        local rdir="/tmp/omega-llm-recon"
+        rsync "${RSYNC_OPTS[@]}" "${SCRIPT_DIR}/llm-access.sh" "${SCRIPT_DIR}/omega-llm-access-reconciler.sh" \
+            "${CONF_FILE}" "${DEPLOY_USER}@${CONTROLLER_NODE}:${rdir}/" 2>/dev/null
+        ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 "${DEPLOY_USER}@${CONTROLLER_NODE}" \
+            "OMEGA_LLM_GATEWAY_IP='${gw_node}' OMEGA_LLM_GATEWAY_PORT='${gw_port}' OMEGA_CONTROLLER='${CONTROLLER_NODE}' bash ${rdir}/omega-llm-access-reconciler.sh ${extra}"
+        return
+    fi
+    export SSH_KEY DEPLOY_USER OMEGA_CONTROLLER="${CONTROLLER_NODE}" \
+           OMEGA_LLM_GATEWAY_IP="${gw_node}" OMEGA_LLM_GATEWAY_PORT="${gw_port}"
+    if [[ "$target" == "all" ]]; then
+        bash "${SCRIPT_DIR}/llm-access.sh" --all --enable --gateway "$gw_node" --gw-port "$gw_port"
+    else
+        bash "${SCRIPT_DIR}/llm-access.sh" --vmid "$target" --enable --gateway "$gw_node" --gw-port "$gw_port"
+    fi
+}
+
 # ── Menu principal ────────────────────────────────────────────────────────────
 show_menu() {
     clear
@@ -3115,6 +3285,8 @@ show_menu() {
     echo -e "   ${BOLD}[b]${RESET}  Build                  (cargo build --release --workspace)"
     echo -e "   ${BOLD}[d]${RESET}  Déployer               (copier binaires + démarrer services)"
     echo -e "   ${BOLD}[p]${RESET}  Créer les VMs physiques Omega  (IP fixe + VLAN si configurés)"
+    echo -e "   ${BOLD}[L]${RESET}  GPU LLM (Ollama + gateway)     (serveur Ollama GPU sur chaque nœud + gateway OpenAI unifiée :${OMEGA_LLM_GATEWAY_PORT:-4000} — ${GREEN}1 commande${RESET})"
+    echo -e "   ${BOLD}[W]${RESET}  Accès LLM VMs isolées          (VM / 'all' / ${GREEN}'reconcile' auto vram>0${RESET} → gateway uniquement, reste isolée)"
     echo ""
 
     # ── Tests par section ─────────────────────────────────────────────────────
@@ -3173,6 +3345,8 @@ main_loop() {
             b|B) do_build ;;
             d|D) do_deploy ;;
             p)   do_provision_vms ;;
+            L)   do_gpu_llm ;;
+            W)   do_llm_access ;;
             P)   run_production_full ;;
             A)   run_all ;;
             1)   run_section_1 ;;
@@ -3185,7 +3359,7 @@ main_loop() {
             g|G) if $DO_GPU; then DO_GPU=false; _info "Tests GPU désactivés"
                  else DO_GPU=true; _info "Tests GPU activés"
                  fi ;;
-            l|L) if $DO_LONG; then DO_LONG=false; _info "Tests longue durée désactivés"
+            l)   if $DO_LONG; then DO_LONG=false; _info "Tests longue durée désactivés"
                  else DO_LONG=true; _info "Tests longue durée activés"
                  fi ;;
             s|S) if $DO_SCALE; then DO_SCALE=false; _info "Tests scalabilité désactivés"
@@ -3212,6 +3386,20 @@ main_loop() {
         fi
     done
 }
+
+# ── Commande directe : GPU LLM (non-interactif) ───────────────────────────────
+if $DO_LLM; then
+    do_gpu_llm
+    exit $?
+fi
+if $DO_LLM_ACCESS; then
+    do_llm_access all
+    exit $?
+fi
+if $DO_LLM_ACCESS_RECONCILE; then
+    $OMEGA_LAB_DRYRUN && do_llm_access reconcile --dry-run || do_llm_access reconcile
+    exit $?
+fi
 
 # ── Mode auto (CI) ────────────────────────────────────────────────────────────
 if $AUTO; then
