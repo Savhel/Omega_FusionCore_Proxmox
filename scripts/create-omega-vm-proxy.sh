@@ -692,7 +692,7 @@ runcmd:
   - [ bash, -lc, "rm -f /var/lib/dbus/machine-id; ln -sf /etc/machine-id /var/lib/dbus/machine-id || true" ]
   - [ bash, -lc, "echo '${CIUSER}:${ROOT_PASSWORD}' | chpasswd" ]
   - [ bash, -lc, "export DEBIAN_FRONTEND=noninteractive; command -v qemu-ga >/dev/null 2>&1 && command -v stress-ng >/dev/null 2>&1 && test -x /usr/sbin/sshd || (apt-get update && apt-get install -y qemu-guest-agent stress-ng openssh-server)" ]
-  - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/99-omega-root-login.conf; systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
+  - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/00-omega-root-login.conf; systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
   - [ bash, -lc, "systemctl unmask qemu-guest-agent.service qemu-guest-agent.socket 2>/dev/null || true; systemctl enable --now qemu-guest-agent.socket 2>/dev/null || true; systemctl restart qemu-guest-agent.service 2>/dev/null || systemctl start qemu-guest-agent.service 2>/dev/null || true" ]
   - [ bash, -lc, "systemctl daemon-reload; systemctl enable --now omega-qga-ensure.service 2>/dev/null || true" ]
   - [ bash, -lc, "install -d -m 0750 /etc/gandal-proxy/pki/ca /etc/gandal-proxy/pki/proxy" ]

@@ -300,7 +300,7 @@ virt_customize_configure -a "$TARGET" \
     --chmod "0755:/usr/local/sbin/omega-qga-ensure" \
     --upload "${TMP_UNIT}:/etc/systemd/system/omega-qga-ensure.service" \
     --mkdir /etc/ssh/sshd_config.d \
-    --upload "${TMP_SSHD}:/etc/ssh/sshd_config.d/99-omega-root-login.conf" \
+    --upload "${TMP_SSHD}:/etc/ssh/sshd_config.d/00-omega-root-login.conf" \
     --run-command "systemctl enable qemu-guest-agent.service 2>/dev/null || true" \
     --run-command "systemctl enable qemu-guest-agent.socket 2>/dev/null || true" \
     --run-command "systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true" \

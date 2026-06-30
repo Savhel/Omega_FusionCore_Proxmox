@@ -119,7 +119,7 @@ if command -v apt-get >/dev/null 2>&1; then
     apt-get install -y qemu-guest-agent stress-ng openssh-server
 fi
 install -d -m 0755 /etc/ssh/sshd_config.d /usr/local/sbin /etc/systemd/system
-cat >/etc/ssh/sshd_config.d/99-omega-root-login.conf <<'EOF'
+cat >/etc/ssh/sshd_config.d/00-omega-root-login.conf <<'EOF'
 PermitRootLogin yes
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes

@@ -359,6 +359,18 @@ for vmid in "${VMID_ARR[@]}"; do
         --ciuser "$CIUSER" \
         --cipassword "$ROOT_PASSWORD"
 
+    # Le clone/template fournit un disque a la taille de base (~3-4 Gio). On l'agrandit
+    # a la taille demandee (DISK_MAX_GIB) AVANT le boot : cloud-init (growpart +
+    # resize_rootfs ci-dessous) etend alors le FS racine sur tout le disque au premier
+    # demarrage. qm resize n'accepte QUE l'agrandissement -> si deja >= cible, ignore.
+    if [[ "${DISK_MAX_GIB:-0}" -gt 0 ]]; then
+        if qm resize "$vmid" scsi0 "${DISK_MAX_GIB}G" >/dev/null 2>&1; then
+            echo "Disque scsi0 redimensionne a ${DISK_MAX_GIB} Gio"
+        else
+            echo "  (resize disque ignore: deja >= ${DISK_MAX_GIB} Gio ou non applicable)"
+        fi
+    fi
+
     if [[ -n "$SSHKEY" ]]; then
         [[ -f "$SSHKEY" ]] || fail "cle SSH introuvable: $SSHKEY"
         qm set "$vmid" --sshkeys "$SSHKEY"
@@ -395,6 +407,11 @@ chpasswd:
   expire: false
 package_update: false
 package_upgrade: false
+growpart:
+  mode: auto
+  devices: ['/']
+  ignore_growroot_disabled: false
+resize_rootfs: true
 ${ssh_keys_yaml}
 ${package_yaml}
 write_files:
@@ -458,7 +475,7 @@ runcmd:
   - [ bash, -lc, "rm -f /var/lib/dbus/machine-id; ln -sf /etc/machine-id /var/lib/dbus/machine-id || true" ]
   - [ bash, -lc, "echo '${CIUSER}:${ROOT_PASSWORD}' | chpasswd" ]
   - [ bash, -lc, "export DEBIAN_FRONTEND=noninteractive; command -v qemu-ga >/dev/null 2>&1 && command -v stress-ng >/dev/null 2>&1 && test -x /usr/sbin/sshd || (apt-get update && apt-get install -y qemu-guest-agent stress-ng openssh-server)" ]
-  - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/99-omega-root-login.conf; systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
+  - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/00-omega-root-login.conf; systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true" ]
   - [ bash, -lc, "systemctl unmask qemu-guest-agent.service qemu-guest-agent.socket 2>/dev/null || true; systemctl enable --now qemu-guest-agent.socket 2>/dev/null || true; systemctl restart qemu-guest-agent.service 2>/dev/null || systemctl start qemu-guest-agent.service 2>/dev/null || true" ]
   - [ bash, -lc, "systemctl daemon-reload; systemctl enable --now omega-qga-ensure.service 2>/dev/null || true" ]
   - [ bash, -lc, "netplan apply 2>/dev/null || true; systemctl restart systemd-networkd 2>/dev/null || true" ]

@@ -19,6 +19,11 @@ ok()   { echo -e "\033[32m[OK]\033[0m    $*"; }
 
 DOMAIN_SUFFIX="${OMEGA_NET_DNS_DOMAIN:-enspy-gi.gandal}"
 PF_IP="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
+# Hôte Caddy = CETTE machine (la console, où tourne Caddy:80). Le DNS doit pointer
+# le nom ICI : le LAN route bien vers le VLAN30 (10.50.30.x via pfSense). Surtout PAS
+# vers pfSense, dont le port 80 est occupé par son interface d'admin (redirige en 301).
+CADDY_IP="${OMEGA_PROXY_HOST_IP:-$(ip -4 -o addr show 2>/dev/null | grep -oE '10\.50\.30\.[0-9]+' | head -1)}"
+CADDY_IP="${CADDY_IP:-$PF_IP}"
 SITES_DIR="/etc/caddy/sites"
 NAME=""; VM_IP=""; PORT=""; ACTION=""
 
@@ -46,14 +51,19 @@ enable)
     mkdir -p "$SITES_DIR"
     cat > "${SITES_DIR}/${label}.caddy" <<CADDY
 http://${fqdn} {
-	reverse_proxy ${VM_IP}:${PORT}
+	reverse_proxy ${VM_IP}:${PORT} {
+		header_up Host {host}
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Port 80
+		header_up X-Forwarded-Proto http
+	}
 }
 CADDY
     /usr/local/bin/caddy reload --config /etc/caddy/Caddyfile 2>/dev/null \
         || systemctl reload gandal-proxy 2>/dev/null || fail "reload Caddy échoué"
-    # DNS : nom → pfSense (joignable depuis le LAN, qui ne route pas le VLAN30)
-    bash "${SCRIPT_DIR}/dns-register.sh" --name "$label" --ip "$PF_IP" >/dev/null 2>&1 \
-        && ok "DNS ${fqdn} → ${PF_IP}" || echo "  (DNS non enregistré)"
+    # DNS : nom → hôte Caddy (cette console), où le reverse-proxy port 80 répond.
+    bash "${SCRIPT_DIR}/dns-register.sh" --name "$label" --ip "$CADDY_IP" >/dev/null 2>&1 \
+        && ok "DNS ${fqdn} → ${CADDY_IP}" || echo "  (DNS non enregistré)"
     ok "Domaine actif : http://${fqdn} → ${VM_IP}:${PORT}"
     ;;
 disable)

@@ -111,6 +111,14 @@ RESOURCE_ONLY=false
 IMAGE_PREPARED=false
 START=true
 
+# Proxys de sécurité GANDAL (chiffreur + analyseur) installés dans chaque VM après
+# qu'elle ait son IP (additif, non bloquant). Désactivable via --no-security-proxies.
+INSTALL_SECURITY_PROXIES="${OMEGA_INSTALL_SECURITY_PROXIES:-true}"
+SECURITY_BUNDLE_URL="${OMEGA_SECURITY_BUNDLE_URL:-http://192.168.123.100:8010}"
+SECURITY_ANALYSEUR_HOST="${OMEGA_SECURITY_ANALYSEUR_HOST:-192.168.123.100}"
+SECURITY_ANALYSEUR_PORT="${OMEGA_SECURITY_ANALYSEUR_PORT:-5002}"
+SECURITY_CHIFFREUR_URL="${OMEGA_SECURITY_CHIFFREUR_URL:-https://192.168.123.100:5014}"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --controller) CONTROLLER="$2"; shift 2 ;;
@@ -149,6 +157,8 @@ while [[ $# -gt 0 ]]; do
         --resource-only) RESOURCE_ONLY=true; shift ;;
         --image-prepared) IMAGE_PREPARED=true; shift ;;
         --no-start) START=false; shift ;;
+        --security-proxies) INSTALL_SECURITY_PROXIES=true; shift ;;
+        --no-security-proxies) INSTALL_SECURITY_PROXIES=false; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "option inconnue: $1" ;;
     esac
@@ -540,6 +550,24 @@ printf '%s\n' \"\$smp\" | grep -q \"maxcpus=\$max\" || { echo \"bad smp=\$smp ex
 echo \"static OK: cores=\$cores sockets=\$sockets vcpus=\$vcpus maxcpus=\$max memory=\$memory balloon=\$balloon\""
 }
 
+# Garantit l'accès SSH root/mot-de-passe sur une VM, de façon AUTONOME et idempotente.
+# Indispensable au chemin --resource-only (gateway Web GANDAL) qui NE passe PAS par
+# wait_qga_and_bootstrap_remote. Attend le QGA (borné), pose root:<pwd>, écrit le
+# drop-in 00- (prioritaire sur 50-cloud-init=without-password) ET REDÉMARRE ssh pour
+# que le démon EN COURS prenne la config (sinon il reste sur l'ancien without-password).
+ensure_ssh_root_remote() {
+    local node="$1" vmid="$2" password_q
+    printf -v password_q '%q' "$ROOT_PASSWORD"
+    ssh_node "$node" "vmid='$vmid'; root_password=$password_q
+for _ in \$(seq 1 30); do
+    qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 || qm agent \"\$vmid\" ping >/dev/null 2>&1 && break
+    sleep 4
+done
+qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 || qm agent \"\$vmid\" ping >/dev/null 2>&1 || { echo \"ensure_ssh_root: QGA absent VM \$vmid\" >&2; exit 0; }
+qm guest exec \"\$vmid\" -- bash -lc 'echo root:'\"\$root_password\"' | chpasswd; install -d -m 0755 /etc/ssh/sshd_config.d; printf \"PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n\" >/etc/ssh/sshd_config.d/00-omega-root-login.conf; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true' >/dev/null 2>&1 \
+    && echo \"    accès SSH root garanti (VM \$vmid)\" || echo \"    ⚠️  ensure_ssh_root échoué (VM \$vmid)\"" 2>/dev/null
+}
+
 wait_qga_and_bootstrap_remote() {
     local node="$1" vmid="$2" timeout="${3:-3}"
     local password_q
@@ -575,7 +603,7 @@ if ! qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 && ! qm agent \"\$vmid\" ping 
     fi
 fi
 qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 || qm agent \"\$vmid\" ping >/dev/null 2>&1 || { echo \"QGA not ready after activation attempt\" >&2; exit 21; }
-pid_json=\$(qm guest exec \"\$vmid\" -- bash -lc 'echo root:root | chpasswd && command -v stress-ng >/dev/null && systemctl is-active qemu-guest-agent >/dev/null') || exit 22
+pid_json=\$(qm guest exec \"\$vmid\" -- bash -lc 'echo root:root | chpasswd; install -d -m 0755 /etc/ssh/sshd_config.d; printf \"PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n\" >/etc/ssh/sshd_config.d/00-omega-root-login.conf; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true; command -v stress-ng >/dev/null && systemctl is-active qemu-guest-agent >/dev/null') || exit 22
 pid=\$(printf '%s' \"\$pid_json\" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"pid\", \"\"))' 2>/dev/null || true)
 test -n \"\$pid\" || exit 22
 guest_ok=0
@@ -630,7 +658,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y qemu-guest-agent stress-ng openssh-server
 install -d -m 0755 /etc/ssh/sshd_config.d
-printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/99-omega-root-login.conf
+printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/00-omega-root-login.conf
 systemctl enable --now ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl start ssh 2>/dev/null || true
 systemctl unmask qemu-guest-agent.service qemu-guest-agent.socket 2>/dev/null || true; systemctl enable --now qemu-guest-agent.socket 2>/dev/null || true; systemctl restart qemu-guest-agent.service 2>/dev/null || systemctl start qemu-guest-agent.service 2>/dev/null || true
 command -v stress-ng
@@ -982,6 +1010,30 @@ create_one_vm() {
     ssh_node "$node" "cd /opt/omega-remote-paging && '$REMOTE_CREATE'$(quote_args "${create_args[@]}")"
 }
 
+# Installe les proxys de sécurité GANDAL DANS la VM, via QGA (la VM télécharge le
+# bundle depuis le deb-server LAN puis installe — hors-ligne, certs mTLS, services
+# auto). ADDITIF et NON BLOQUANT : tout échec est seulement journalisé.
+install_security_proxies_remote() {
+    local node="$1" vmid="$2" i
+    $INSTALL_SECURITY_PROXIES || return 0
+    echo "  → proxys de sécurité GANDAL (VM $vmid)…"
+    # Attendre que le QGA réponde (boot + cloud-init réseau) — borné, best-effort.
+    # Indispensable en mode --resource-only où aucun bootstrap QGA n'a précédé.
+    for i in $(seq 1 "${OMEGA_SECPROXY_QGA_WAIT_TRIES:-30}"); do
+        ssh_node "$node" "qm agent '$vmid' ping" >/dev/null 2>&1 && break
+        sleep 4
+    done
+    # Déclenchement via systemd-run (unité transitoire PID 1) et NON nohup : l'install
+    # sature le 1-vCPU et peut faire redémarrer qemu-ga ; un nohup, enfant du cgroup de
+    # qemu-ga, mourrait avec lui. systemd-run survit. --collect nettoie l'unité ensuite.
+    ssh_node "$node" "
+        qm guest exec '$vmid' --timeout 30 -- bash -lc 'systemd-run --unit=secproxy-install --collect --no-block --setenv=VM_ID=${vmid} --setenv=DEB_SERVER=${SECURITY_BUNDLE_URL} --setenv=ANALYSEUR_HOST=${SECURITY_ANALYSEUR_HOST} --setenv=ANALYSEUR_PORT=${SECURITY_ANALYSEUR_PORT} --setenv=CHIFFREUR_URL=${SECURITY_CHIFFREUR_URL} bash -c \"curl -fsS ${SECURITY_BUNDLE_URL}/install-security-proxies.sh -o /tmp/sp.sh && bash /tmp/sp.sh >/var/log/sec-proxy-install.log 2>&1\"' >/dev/null 2>&1
+    " 2>/dev/null \
+        && echo "    proxys de sécurité : installation lancée (chiffreur :8400 + analyseur)" \
+        || echo "    ⚠️  proxys de sécurité : déclenchement échoué (VM créée quand même)"
+    return 0
+}
+
 validate_one_vm() {
     local vmid="$1" node
     node="$(vm_cluster_node "$vmid" || true)"
@@ -991,8 +1043,15 @@ validate_one_vm() {
     validate_vm_static_remote "$node" "$vmid" || return 1
     if $RESOURCE_ONLY; then
         echo "guest check ignoré: validation ressources uniquement"
+        # Même en resource-only (chemin du gateway Web GANDAL), on GARANTIT l'accès
+        # SSH root (pwd + drop-in + restart ssh) puis on installe les proxys. Best-effort.
+        if $START; then
+            ensure_ssh_root_remote "$node" "$vmid"
+            install_security_proxies_remote "$node" "$vmid"
+        fi
     elif $START; then
         wait_qga_and_bootstrap_remote "$node" "$vmid" "${OMEGA_PROVISION_QGA_WAIT_SECS:-20}"
+        install_security_proxies_remote "$node" "$vmid"
     fi
 }
 

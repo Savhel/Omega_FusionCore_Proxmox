@@ -14,7 +14,7 @@
 #
 # Variables (défauts depuis cluster.conf si présent) :
 #   --central IP      Serveur central GANDAL. Défaut: 192.168.123.100
-#   --ports CSV       Ports tcp autorisés. Défaut: 5002,5014,8000
+#   --ports CSV       Ports tcp autorisés. Défaut: 5002,5014,8000,8010
 #   --omega-net CIDR  Sous-réseau OMEGA. Défaut: 10.50.30.0/24
 #   --pfsense IP      Gestion pfSense. Défaut: cluster.conf OMEGA_NET_PFSENSE_WAN_IP
 
@@ -28,7 +28,7 @@ info() { echo -e "\033[36m[INF]\033[0m  $*"; }
 
 ACTION=""
 CENTRAL="${OMEGA_GANDAL_CENTRAL_IP:-192.168.123.100}"
-PORTS="${OMEGA_GANDAL_CENTRAL_PORTS:-5002,5014,8000}"
+PORTS="${OMEGA_GANDAL_CENTRAL_PORTS:-5002,5014,8000,8010}"
 OMEGA_NET="${OMEGA_NET_ZONE_OMEGA_NET:-10.50.30.0/24}"
 PFSENSE_IP="${OMEGA_NET_PFSENSE_WAN_IP:-192.168.123.200}"
 PFSENSE_USER="${OMEGA_NET_PFSENSE_SSH_USER:-root}"
