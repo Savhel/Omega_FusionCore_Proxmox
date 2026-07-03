@@ -97,8 +97,25 @@ do
         exec "$py" "${WORKER_DIR}/omega-gpu-worker-app.py"
     fi
 done
+# Dispatch vers un conteneur LXC CUDA : sur ce cluster, torch+userspace CUDA vivent
+# dans un CT (l'hôte n'a pas de venv torch, seulement le driver). On y route le job.
+# Auto-détecté (CT dont le venv torch existe) ou forcé via OMEGA_GPU_WORKER_CT.
+# Robuste aux redéploiements : la valeur du backend peut être réécrite, ce wrapper
+# packagé retrouve toujours le CT tout seul → plus de "Pytorch absent dans python3".
+if command -v pct >/dev/null 2>&1; then
+    CT_PY="${OMEGA_GPU_WORKER_CT_PYTHON:-/opt/gpu-venv/bin/python}"
+    CT_APP="${OMEGA_GPU_WORKER_CT_APP:-/opt/omega-gpu-worker/omega-gpu-worker-app.py}"
+    ct_candidates="${OMEGA_GPU_WORKER_CT:-}"
+    [[ -z "$ct_candidates" ]] && ct_candidates="$(pct list 2>/dev/null | awk 'NR>1{print $1}')"
+    for ct in $ct_candidates; do
+        if pct status "$ct" >/dev/null 2>&1 \
+           && pct exec "$ct" -- test -x "$CT_PY" >/dev/null 2>&1; then
+            exec pct exec "$ct" -- "$CT_PY" "$CT_APP"
+        fi
+    done
+fi
 if [[ "${OMEGA_GPU_WORKER_REQUIRE_CUDA:-0}" == "1" ]]; then
-    echo "CUDA obligatoire mais aucun Python CUDA trouvé. Définir OMEGA_GPU_PYTHON=/chemin/venv/bin/python" >&2
+    echo "CUDA obligatoire mais aucun Python CUDA trouvé (ni venv hôte, ni CT). Définir OMEGA_GPU_PYTHON ou OMEGA_GPU_WORKER_CT" >&2
     exit 127
 fi
 exec /usr/bin/env python3 "${WORKER_DIR}/omega-gpu-worker-app.py"
