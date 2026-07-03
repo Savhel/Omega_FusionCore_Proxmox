@@ -2,6 +2,7 @@
 # omega-lab.sh — Lab interactif : configuration + installation + tests
 #
 # Usage : ./scripts/omega-lab.sh [--gpu] [--ceph] [--long] [--scale] [--fleet] [--destructive] [--provision] [--production] [--auto]
+#         ./scripts/omega-lab.sh --list-categories | --category <RAM|CPU|DISK|GPU|NETWORK|MIGRATION|MIXED|OPS|all>
 #
 # Le script lit scripts/cluster.conf pour la configuration du cluster.
 # Si le fichier n'existe pas ou si les nœuds ne sont pas encore définis,
@@ -17,6 +18,8 @@
 #   --provision cree les VMs physiques configurees avant les tests en mode --auto
 #   --production validation complete stricte: GPU/Ceph/long/scale/destructif, aucun skip accepte
 #   --auto   toutes les sections sans pause (mode CI)
+#   --list-categories  affiche les tests classés par ressource (RAM/CPU/DISK/GPU/…)
+#   --category NAME    lance une/des catégorie(s) : --category RAM · --category "CPU GPU" · --category all
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,8 +29,13 @@ CONF_FILE="${SCRIPT_DIR}/cluster.conf"
 
 # ── Options CLI ───────────────────────────────────────────────────────────────
 DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_FLEET=false; DO_DESTRUCTIVE=false; DO_PROVISION=false; DO_PRODUCTION=false; AUTO=false; DO_LLM=false; DO_LLM_ACCESS=false; DO_LLM_ACCESS_RECONCILE=false; OMEGA_LAB_DRYRUN=false
+RUN_CATEGORY=""; LIST_CATEGORIES=false; _want_cat=false
 for arg in "$@"; do
+    if [[ "$_want_cat" == true ]]; then RUN_CATEGORY="$arg"; _want_cat=false; continue; fi
     case "$arg" in
+        --list-categories|--categories) LIST_CATEGORIES=true ;;
+        --category=*)  RUN_CATEGORY="${arg#*=}" ;;
+        --category|--cat) _want_cat=true ;;
         --gpu)         DO_GPU=true  ;;
         --llm)         DO_LLM=true  ;;
         --llm-access)  DO_LLM_ACCESS=true ;;
@@ -3004,9 +3012,9 @@ run_production_full() {
 }
 
 # ── Test individuel ───────────────────────────────────────────────────────────
-run_one() {
-    _need_config || return
-    _sync
+# _dispatch_one : lance UN test par ID, sans (re)synchroniser — appelé par run_one
+# (qui sync une fois) ET par run_category (qui sync une fois pour toute la catégorie).
+_dispatch_one() {
     case "${1^^}" in
         00) _run_local    "00" "Tests unitaires Rust"       "00-unit-tests.sh" ;;
         01) _run_isolated "01" "Smoke test"                 "01-smoke-test.sh" ;;
@@ -3055,6 +3063,82 @@ run_one() {
         M9) _run_cluster  "M9" "Fallback GPU réseau"        "35-gpu-network-fallback.sh"      "${TEST_VMIDS_ARR[0]}" ;;
         *)  _warn "ID de test inconnu : $1" ;;
     esac
+}
+
+run_one() {
+    _need_config || return
+    _sync
+    _dispatch_one "$1"
+}
+
+# ── Tests classés par catégorie de ressource (RAM / CPU / DISK / GPU / …) ──────
+# Regroupe les tests EXISTANTS par capacité Omega testée, pour valider un domaine
+# à la fois. Un même test peut appartenir à plusieurs catégories (ex. la migration
+# RAM valide à la fois le paging et la migration). Les IDs sont ceux de _dispatch_one.
+declare -A CATEGORY_TESTS=(
+    [UNIT]="00"
+    [CPU]="05"
+    [RAM]="02 04 08 18 19 20 22"
+    [DISK]="23 26"
+    [GPU]="06 07 27 32 34 35 36"
+    [NETWORK]="21 25 28"
+    [MIGRATION]="03 M2 M5 M7"
+    [MIXED]="M1 M3 M4 M6"
+    [OPS]="01 09 10 24 30 33 31"
+)
+CATEGORY_ORDER=(UNIT CPU RAM DISK GPU NETWORK MIGRATION MIXED OPS)
+
+_category_label() {
+    case "$1" in
+        UNIT)      echo "Tests unitaires Rust/Python (aucune VM requise)";;
+        CPU)       echo "CPU — vCPU élastique (hotplug/downscale sous charge)";;
+        RAM)       echo "RAM — paging distant, réplication, éviction, recall, compaction, prefetch, balloon, migration mémoire";;
+        DISK)      echo "DISK — scheduler I/O local (cgroups v2/PSI), Ceph réel";;
+        GPU)       echo "GPU — proxy jobs CUDA, placement global, fallback réseau, concurrence, rendu réel";;
+        NETWORK)   echo "RÉSEAU — TLS TOFU, réseau VM invitée, partition réseau";;
+        MIGRATION) echo "MIGRATION — failover store, CPU+RAM→migration, live-migration sous pression, drain de nœud";;
+        MIXED)     echo "MIXTE — pression combinée RAM+CPU+GPU (rafales, stress cluster)";;
+        OPS)       echo "OPS — smoke, orphelins, multi-VM, install-doctor, conformité, métriques, scale";;
+        *)         echo "$1";;
+    esac
+}
+
+# Affiche la classification (menu / --list-categories)
+list_categories() {
+    _hdr "Tests classés par catégorie de ressource"
+    echo ""
+    local c
+    for c in "${CATEGORY_ORDER[@]}"; do
+        printf "  ${BOLD}%-10s${RESET} %s\n" "$c" "$(_category_label "$c")"
+        printf "  ${DIM}%-10s → tests : %s${RESET}\n\n" "" "${CATEGORY_TESTS[$c]}"
+    done
+    echo -e "  Lancer une catégorie : ${CYAN}omega-lab.sh --category RAM${RESET}"
+    echo -e "  Plusieurs            : ${CYAN}omega-lab.sh --category \"CPU GPU\"${RESET}"
+    echo -e "  Toutes (dans l'ordre): ${CYAN}omega-lab.sh --category all${RESET}"
+}
+
+# Lance tous les tests d'une ou plusieurs catégories, puis affiche le résumé.
+run_category() {
+    _need_config || return
+    _sync
+    local cats=("$@") cat ids id
+    if [[ "${#cats[@]}" -eq 1 && ( "${cats[0],,}" == "all" ) ]]; then
+        cats=("${CATEGORY_ORDER[@]}")
+    fi
+    reset_results
+    for cat in "${cats[@]}"; do
+        cat="${cat^^}"
+        ids="${CATEGORY_TESTS[$cat]:-}"
+        if [[ -z "$ids" ]]; then
+            _warn "Catégorie inconnue : $cat (disponibles : ${CATEGORY_ORDER[*]})"
+            continue
+        fi
+        _hdr "══ Catégorie ${cat} — $(_category_label "$cat") ══"
+        for id in $ids; do
+            _dispatch_one "$id"
+        done
+    done
+    show_results
 }
 
 # ── GPU LLM : Ollama sur chaque nœud GPU + gateway unifiée (1 commande) ────────
@@ -3293,6 +3377,7 @@ show_menu() {
     echo -e "  ${BOLD}${MAG}── Tests ─────────────────────────────────────────────────────${RESET}"
     echo -e "   ${BOLD}[A]${RESET}  Tout — sections 1→7 avec pause entre chaque"
     echo -e "   ${BOLD}[P]${RESET}  Production stricte — tout le projet, aucun skip, GPU/Ceph/long/scale/destructif"
+    echo -e "   ${BOLD}[k]${RESET}  Par catégorie de ressource — RAM · CPU · DISK · GPU · RÉSEAU · MIGRATION · MIXTE · OPS"
     echo -e "   ${BOLD}[1]${RESET}  Section 1 — Isolés    : smoke · réplication · failover · éviction"
     echo -e "   ${BOLD}[2]${RESET}  Section 2 — Store+    : recall LIFO · prefetch · TLS TOFU"
     echo -e "   ${BOLD}[3]${RESET}  Section 3 — Cluster   : vCPU · migration · balloon · compaction"
@@ -3349,6 +3434,12 @@ main_loop() {
             W)   do_llm_access ;;
             P)   run_production_full ;;
             A)   run_all ;;
+            k|K) list_categories
+                 read -rp "  Catégorie(s) à lancer (ex: RAM, ou \"CPU GPU\", ou all) : " _kcat
+                 if [[ -n "$_kcat" ]]; then
+                     read -r -a _kcats <<< "${_kcat//,/ }"
+                     run_category "${_kcats[@]}"
+                 fi ;;
             1)   run_section_1 ;;
             2)   run_section_2 ;;
             3)   run_section_3 ;;
@@ -3386,6 +3477,18 @@ main_loop() {
         fi
     done
 }
+
+# ── Commande directe : catégories de tests (RAM/CPU/DISK/GPU/…) ───────────────
+if $LIST_CATEGORIES; then
+    list_categories
+    exit 0
+fi
+if [[ -n "$RUN_CATEGORY" ]]; then
+    # accepte "RAM", "CPU GPU", ou "all" ; découpe sur espaces/virgules
+    read -r -a _cats <<< "${RUN_CATEGORY//,/ }"
+    run_category "${_cats[@]}"
+    [[ $TOTAL_FAIL -eq 0 ]] && exit 0 || exit 1
+fi
 
 # ── Commande directe : GPU LLM (non-interactif) ───────────────────────────────
 if $DO_LLM; then
