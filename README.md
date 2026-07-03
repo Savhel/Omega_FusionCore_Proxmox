@@ -43,6 +43,8 @@ Si un nœud est saturé en RAM, en CPU ou en GPU réservé, ou si une VM a trop 
 
 Les disques sont sur Ceph RBD (partagés), donc seule la RAM est transférée.
 
+**Réconciliateur de distribution** (`scripts/omega-distribution-reconciler.sh`, timer systemd sur le contrôleur) : un agent cluster-global maintient EN CONTINU la répartition cible des VMs par nœud (quota `OMEGA_VM_NODE_DISTRIBUTION`, p.ex. 1 emilia / 2 ram / 2 rem ; l'excédent est réparti à parts égales, emilia le plus léger). À chaque tick il compte l'occupation réelle et live-migre au plus une VM d'un nœud sur-cible vers un nœud sous-cible — de façon qu'aucun nœud ne reste surchargé pendant que les autres sont libres. Il ne détruit jamais de VM ; réduire la flotte reste une action humaine.
+
 ### 4. Scheduler vCPU élastique
 
 Les vCPU sont alloués dynamiquement. Une VM démarre avec un minimum et reçoit des cœurs supplémentaires (hotplug) quand sa charge augmente, jusqu'à son plafond. Si le nœud sature, le daemon suit désormais trois étapes :
@@ -403,3 +405,4 @@ curl -fsS http://127.0.0.1:9300/control/metrics | head
 | `docs/utilisation-physique.md` | Commandes opérationnelles |
 | `docs/metrics.md` | Métriques Prometheus disponibles |
 | `docs/protocol.md` | Protocole TCP binaire détaillé |
+| `docs/GPU-usage-et-session-2026-06-30.md` | Les 3 voies d'accès GPU (proxy par jobs, Jupyter/SSH, LLM Ollama), token, concurrence |

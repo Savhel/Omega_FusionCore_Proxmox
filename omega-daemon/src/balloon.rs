@@ -437,6 +437,19 @@ impl BalloonManager {
         if stats.actual_bytes == 0 || max_mem_mib == 0 {
             return None;
         }
+        // Garde-fou : certains invités (pfSense/FreeBSD) rapportent des stats
+        // virtio-balloon incohérentes — `available_bytes` > `actual_bytes`, ce qui est
+        // physiquement impossible et donnait un available_pct délirant (ex. 3.4e11 %)
+        // ET faisait piloter le balloon sur des données fausses. On IGNORE ces VMs.
+        if stats.available_bytes > stats.actual_bytes {
+            debug!(
+                vmid,
+                available_bytes = stats.available_bytes,
+                actual_bytes = stats.actual_bytes,
+                "stats balloon incohérentes (available>actual) — VM ignorée (invité non fiable)"
+            );
+            return None;
+        }
 
         let max_mem_bytes = max_mem_mib * 1024 * 1024;
         // RAM minimale garantie au guest (50% de max_mem par défaut)

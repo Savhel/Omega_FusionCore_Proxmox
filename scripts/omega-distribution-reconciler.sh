@@ -28,7 +28,7 @@ set -euo pipefail
 : "${OMEGA_RECONCILE_NODES:=}"
 : "${OMEGA_RECONCILE_LOG:=/var/log/omega/distribution-reconciler.log}"
 : "${OMEGA_RECONCILE_DRY_RUN:=0}"             # 1 = n'exécute pas les migrations, log seulement
-: "${OMEGA_RECONCILE_MIGRATE_TIMEOUT_SECS:=300}"
+: "${OMEGA_RECONCILE_MIGRATE_TIMEOUT_SECS:=600}"  # réseau lent : une migration ~2min, marge x3
 
 DRY_RUN="$OMEGA_RECONCILE_DRY_RUN"
 for arg in "$@"; do
@@ -247,8 +247,10 @@ PLAN="$(
 )"
 
 # ── Exécution des décisions ──────────────────────────────────────────────────
-echo "$PLAN" | grep -E '^RECAP ' | sed 's/^RECAP /  occupation: /' | while read -r l; do log "$l"; done
-echo "$PLAN" | grep -E '^INFO ' | sed 's/^INFO /  /' | while read -r l; do log "$l"; done
+# `|| true` : un grep SANS correspondance (ex. aucune ligne INFO) renvoie 1 et, sous
+# `set -euo pipefail`, AVORTAIT tout le script avant les migrations (bug d'équilibrage).
+{ echo "$PLAN" | grep -E '^RECAP ' | sed 's/^RECAP /  occupation: /' || true; } | while read -r l; do log "$l"; done
+{ echo "$PLAN" | grep -E '^INFO ' | sed 's/^INFO /  /' || true; } | while read -r l; do log "$l"; done
 
 if echo "$PLAN" | grep -q '^NOOP '; then
     reason="$(echo "$PLAN" | grep -m1 '^NOOP ' | awk '{print $2}')"
@@ -259,21 +261,37 @@ fi
 migrations_done=0
 while read -r kw vmid dst st src; do
     [[ "$kw" == "MIGRATE" ]] || continue
-    online_flag=""
-    [[ "$st" == "running" ]] && online_flag="--online"
+    online_val=0
+    [[ "$st" == "running" ]] && online_val=1
     if [[ "$DRY_RUN" == "1" ]]; then
-        log "[dry-run] migrerait VM $vmid : $src → $dst ${online_flag:-(cold)}"
+        log "[dry-run] migrerait VM $vmid : $src → $dst $([[ $online_val == 1 ]] && echo --online || echo '(cold)')"
         continue
     fi
-    log "migration VM $vmid : $src → $dst ${online_flag:-(cold)}"
-    if timeout "$OMEGA_RECONCILE_MIGRATE_TIMEOUT_SECS" \
-         qm migrate "$vmid" "$dst" $online_flag --with-local-disks 0 >>"$OMEGA_RECONCILE_LOG" 2>&1; then
-        log "  ✓ VM $vmid migrée sur $dst"
+    log "migration VM $vmid : $src → $dst $([[ $online_val == 1 ]] && echo --online || echo '(cold)')"
+    # `qm migrate` DOIT tourner sur le nœud SOURCE (sinon « target is local node »).
+    # IMPÉRATIF : on l'exécute en BLOQUANT sur $src via ssh et on lit son VRAI code de
+    # sortie. L'ancien `pvesh create .../migrate` rendait la main dès le LANCEMENT de la
+    # tâche (async) → on comptait « ✓ » avant la fin réelle et on ne voyait jamais les
+    # échecs (« Broken pipe ») survenant PENDANT la tâche → faux succès + retriggers.
+    # Ici, qm migrate ne rend la main qu'à la FIN → succès/échec réels.
+    mig_args=(--with-local-disks 0)
+    [[ "$online_val" == "1" ]] && mig_args+=(--online 1)
+    mig_rc=0
+    if [[ "$src" == "$(hostname)" ]]; then
+        timeout "$OMEGA_RECONCILE_MIGRATE_TIMEOUT_SECS" \
+            qm migrate "$vmid" "$dst" "${mig_args[@]}" >>"$OMEGA_RECONCILE_LOG" 2>&1 || mig_rc=$?
+    else
+        timeout "$OMEGA_RECONCILE_MIGRATE_TIMEOUT_SECS" \
+            ssh -o ConnectTimeout=10 -o BatchMode=yes "root@$src" \
+            "qm migrate $vmid $dst ${mig_args[*]}" >>"$OMEGA_RECONCILE_LOG" 2>&1 || mig_rc=$?
+    fi
+    if [[ "$mig_rc" -eq 0 ]]; then
+        log "  ✓ VM $vmid réellement migrée sur $dst"
         migrations_done=$((migrations_done + 1))
     else
-        # Live impossible (ex. GPU passthrough/local) → on tente à froid si la VM est éteinte,
-        # sinon on laisse pour le prochain tick (jamais de destruction).
-        log "  ✗ migration VM $vmid échouée (probablement non-migrable à chaud : GPU/local) — réessai au prochain tick"
+        # Échec réel (non-migrable à chaud GPU/local, ou coupure réseau) → jamais de
+        # destruction ; on laisse pour le prochain tick.
+        log "  ✗ migration VM $vmid échouée (rc=$mig_rc) — réessai au prochain tick"
     fi
 done < <(echo "$PLAN" | grep -E '^MIGRATE ')
 

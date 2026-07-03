@@ -51,6 +51,9 @@ pub const MAX_VMS_PER_SLOT: usize = 3;
 /// Seuil de steal time déclenchant une migration prioritaire (%).
 pub const STEAL_THRESHOLD_PCT: f64 = 10.0;
 
+/// Intervalle mini entre deux warnings "steal élevé" pour une même VM (anti-spam log).
+pub const STEAL_WARN_INTERVAL_SECS: u64 = 60;
+
 /// Seuil d'utilisation CPU déclenchant un hotplug de vCPU (%).
 pub const HOTPLUG_TRIGGER_PCT: f64 = 80.0;
 
@@ -118,6 +121,8 @@ pub struct VmVcpuState {
     pub high_load_since: Option<u64>,
     /// Timestamp de la dernière mise à jour
     pub updated_at: u64,
+    /// Dernière émission du warning "steal élevé" (anti-spam log : 1/min max par VM).
+    pub last_steal_warn_at: u64,
 }
 
 impl VmVcpuState {
@@ -135,6 +140,7 @@ impl VmVcpuState {
             low_load_since: None,
             high_load_since: None,
             updated_at: now_secs(),
+            last_steal_warn_at: 0,
         }
     }
 
@@ -598,12 +604,21 @@ impl VcpuScheduler {
             }
             state.updated_at = now_secs();
 
+            // Anti-spam : update_vm_metrics est appelé plusieurs fois/seconde ; sans
+            // throttle ce warn saturait le journal (et le disque, néfaste sur SMR).
+            // On n'émet qu'au plus une fois par minute et par VM tant que la pression dure.
             if state.has_steal_pressure() {
-                warn!(
-                    vm_id,
-                    steal_pct,
-                    "steal time élevé — nœud surchargé, migration prioritaire recommandée"
-                );
+                let now = now_secs();
+                if now.saturating_sub(state.last_steal_warn_at) >= STEAL_WARN_INTERVAL_SECS {
+                    state.last_steal_warn_at = now;
+                    warn!(
+                        vm_id,
+                        steal_pct,
+                        "steal time élevé — nœud surchargé, migration prioritaire recommandée"
+                    );
+                }
+            } else {
+                state.last_steal_warn_at = 0; // pression retombée → réarme le warn immédiat
             }
         }
     }
