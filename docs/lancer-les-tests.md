@@ -123,7 +123,7 @@ un nœud vers la VM (le transfert par chunks QGA corrompt les gros binaires → 
 # bundle prêt sur emilia : /opt/omega-remote-paging/sng-bundle.tgz (stress-ng 0.15.06 + libs, bookworm)
 sshpass -p root scp -o StrictHostKeyChecking=no /opt/omega-remote-paging/sng-bundle.tgz root@<VM_IP>:/tmp/
 sshpass -p root ssh -o StrictHostKeyChecking=no root@<VM_IP> \
-    'tar xzf /opt/omega-remote-paging/sng-bundle.tgz -C / && ldconfig && stress-ng --version'
+    'tar xzf /tmp/sng-bundle.tgz -C / && ldconfig && stress-ng --version'
 ```
 
 ---
