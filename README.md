@@ -367,6 +367,53 @@ ssh root@pve3 hostname
 - Rust 1.75+ (compilation sur la machine de dev)
 - Python 3.10+
 
+## Lancer les tests (depuis n'importe quelle machine du réseau)
+
+Le harnais est `scripts/omega-lab.sh`. La config du cluster est **`scripts/cluster.conf`**
+(versionnée, portable) : mêmes IPs/VMs pour toutes les machines. Seul prérequis par
+machine : **l'accès SSH root aux 3 nœuds**.
+
+**Prérequis (par machine) :**
+```bash
+# 1. Clé SSH omega à l'emplacement standard (ou laisser SSH_KEY="" et utiliser root)
+#    cluster.conf a SSH_KEY="" → chaque machine utilise ~/.ssh/omega_ed25519 si présent,
+#    sinon le SSH par défaut (agent / mot de passe root).
+ssh-copy-id -i ~/.ssh/omega_ed25519 root@192.168.123.100   # + .101 et .102
+# 2. Vérifier l'accès aux 3 nœuds (ne doit pas demander de mot de passe)
+for n in 100 101 102; do ssh root@192.168.123.$n hostname; done
+```
+
+**Classes de tests (par ressource) :**
+```bash
+scripts/omega-lab.sh --list-categories          # liste les catégories
+scripts/omega-lab.sh --category RAM             # une catégorie
+scripts/omega-lab.sh --category "CPU GPU"       # plusieurs
+scripts/omega-lab.sh --category all             # toutes, dans l'ordre
+scripts/omega-lab.sh --test 34                  # un test précis (ou "34 35 36")
+```
+Catégories : `UNIT CPU RAM DISK GPU NETWORK MIGRATION MIXED OPS`.
+
+**VM de test** (`OMEGA_TEST_VMIDS` dans cluster.conf) : utiliser les **VM jetables
+`omega-test`** (`3009, 3030, 3031`), **jamais** les VM d'étudiants. Les tests de charge
+ont besoin du binaire `stress` dans l'invité (`3009`/`3030` l'ont déjà). Si une VM de
+test ne répond plus (QGA mort après un stress lourd), la **rebooter** ou en prendre une
+autre saine — voir l'inventaire ci-dessous. Elles sont pinnées au réconciliateur pour
+ne pas migrer en plein test (`OMEGA_RECONCILE_PIN_VMIDS`).
+
+**GPU** : un seul nœud a l'environnement CUDA complet (CT-torch) = **rem (192.168.123.102)**.
+`cluster.conf` pointe `OMEGA_GPU_PRIMARY_NODE`/`OMEGA_GPU_PROXY_URL` dessus. La VRAM du
+proxy est auto-détectée à l'install (`nvidia-smi`). Pour rendre emilia/ram aussi
+CUDA-capables, répliquer le CT-torch (cf `docs/GPU-usage-*`).
+
+**Limites connues (pas des bugs Omega)** :
+- **Pas d'accès Internet** sur le cluster → les étapes DNS/Internet/apt (test `25`) et
+  `apt` dans l'invité échouent. Pousser les binaires depuis une machine connectée.
+- **`28`** (partition réseau) est **destructif** → ne tourne qu'avec `OMEGA_DESTRUCTIVE=1`.
+- **`31`** (scalabilité) exige une flotte provisionnée (`--scale`, ~500 VMs).
+- **`M7`** (drain massif) peut échouer si le réseau/les cibles ne peuvent absorber toutes
+  les VMs d'un coup (Broken pipe sous charge). **`M1`** peut affamer le QGA d'une très
+  petite VM via son éviction agressive.
+
 ## Tests importants actuels
 
 | Test | Rôle |
@@ -390,6 +437,20 @@ systemctl status omega-daemon --no-pager
 curl -fsS http://127.0.0.1:9300/control/status | python3 -m json.tool
 curl -fsS http://127.0.0.1:9300/control/metrics | head
 ```
+
+## Notes d'exploitation
+
+- **Wrapper QEMU** : `/usr/bin/kvm` doit pointer vers `kvm-omega` (paging transparent).
+  Une MAJ du paquet `qemu-system-x86` le réverte ; un path-unit `omega-kvm-wrapper.path`
+  le ré-asserte automatiquement. Vérifier : `readlink -f /usr/bin/kvm` (→ `.../kvm-omega`).
+  Le wrapper ne s'applique qu'aux VMs **démarrées après** son activation.
+- **Mot de passe root des VMs** : garanti à **chaque boot** via cloud-init `bootcmd`
+  (`root:root`), indépendant du guest agent. Une VM sans mot de passe = créée avant ce
+  correctif → la rebooter (ou `qm guest exec <vmid> -- bash -lc 'echo root:root | chpasswd'`).
+- **Node exporter Prometheus** sur **`:9103`** (et non `:9101`, qui entre en collision
+  avec les stores de test). Cible de scrape à ajuster en conséquence.
+- **Config GPU** après déploiement : la VRAM du proxy est auto-détectée (`nvidia-smi`) ;
+  le backend CUDA route vers le CT-torch. Vérifier : `curl -s :9400/gpu/status` (token requis).
 
 ## Documentation
 
