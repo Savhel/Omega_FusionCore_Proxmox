@@ -456,6 +456,7 @@ curl -fsS http://127.0.0.1:9300/control/metrics | head
 
 | Fichier | Contenu |
 |---------|---------|
+| **`docs/lancer-les-tests.md`** | **Guide équipe : lancer les tests depuis n'importe quelle machine (prérequis SSH, catégories, VM de test, dépannage)** |
 | `docs/installation.md` | Déploiement pas à pas sur le cluster |
 | `docs/developpement-et-deploiement.md` | Workflow dev → lab → prod |
 | `docs/architecture.md` | Flux de données détaillés |
