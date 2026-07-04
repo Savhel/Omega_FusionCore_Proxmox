@@ -559,11 +559,14 @@ ensure_ssh_root_remote() {
     local node="$1" vmid="$2" password_q
     printf -v password_q '%q' "$ROOT_PASSWORD"
     ssh_node "$node" "vmid='$vmid'; root_password=$password_q
-for _ in \$(seq 1 30); do
+for _ in \$(seq 1 60); do
     qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 || qm agent \"\$vmid\" ping >/dev/null 2>&1 && break
     sleep 4
 done
-qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 || qm agent \"\$vmid\" ping >/dev/null 2>&1 || { echo \"ensure_ssh_root: QGA absent VM \$vmid\" >&2; exit 0; }
+# Non silencieux : si le QGA ne répond pas (≈240s), on LOGUE clairement (le mot de
+# passe reste garanti par le bootcmd cloud-init root:root à chaque boot — ceci n'est
+# qu'un chemin secondaire immédiat). On n'échoue pas le provisioning pour autant.
+qm guest cmd \"\$vmid\" ping >/dev/null 2>&1 || qm agent \"\$vmid\" ping >/dev/null 2>&1 || { echo \"⚠️  ensure_ssh_root: QGA injoignable VM \$vmid après ~240s — mot de passe root repose sur le bootcmd cloud-init (root:root au boot)\" >&2; exit 0; }
 qm guest exec \"\$vmid\" -- bash -lc 'echo root:'\"\$root_password\"' | chpasswd; install -d -m 0755 /etc/ssh/sshd_config.d; printf \"PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n\" >/etc/ssh/sshd_config.d/00-omega-root-login.conf; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true' >/dev/null 2>&1 \
     && echo \"    accès SSH root garanti (VM \$vmid)\" || echo \"    ⚠️  ensure_ssh_root échoué (VM \$vmid)\"" 2>/dev/null
 }

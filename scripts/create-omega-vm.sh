@@ -469,6 +469,13 @@ write_files:
         config: disabled
 bootcmd:
   - [ bash, -lc, "if [ ! -e /var/lib/omega-firstboot-machine-id.done ]; then rm -f /etc/machine-id /var/lib/dbus/machine-id; systemd-machine-id-setup || true; touch /var/lib/omega-firstboot-machine-id.done; fi" ]
+  # Mot de passe root + login SSH GARANTIS à CHAQUE boot (bootcmd, pas runcmd) :
+  # runcmd ne rejoue pas sur un clone-lié « déjà vu » par cloud-init, et le fallback
+  # QGA est best-effort → root:root n'était pas fiable. bootcmd tourne à tous les boots,
+  # sans QGA ni dépendance à l'instance-id. sshd lira le drop-in à son démarrage normal.
+  - [ bash, -lc, "echo 'root:${ROOT_PASSWORD}' | chpasswd 2>/dev/null || true" ]
+  - [ bash, -lc, "echo '${CIUSER}:${ROOT_PASSWORD}' | chpasswd 2>/dev/null || true" ]
+  - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/00-omega-root-login.conf 2>/dev/null || true" ]
 runcmd:
   - [ bash, -lc, "rm -f /var/lib/dhcp/* /var/lib/NetworkManager/*lease* 2>/dev/null || true" ]
   - [ bash, -lc, "test -s /etc/machine-id || systemd-machine-id-setup || true" ]
