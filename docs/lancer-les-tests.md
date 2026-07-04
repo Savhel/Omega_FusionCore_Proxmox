@@ -75,23 +75,55 @@ scripts/omega-lab.sh --test "34 35 36"
 
 ## 3. Les VM de test
 
-`cluster.conf` → `OMEGA_TEST_VMIDS="3009,3030,3031,5051"` : ce sont des **VM jetables
-`omega-test`**, saines (guest agent OK) et équipées du binaire `stress`.
+`cluster.conf` → `OMEGA_TEST_VMIDS="3009,5051,3030,3031"` : **VM jetables `omega-test`**,
+saines (guest agent OK), IP sur le VLAN 30 :
+
+| VMID | Nœud | IP (VLAN 30) | Charge |
+|---|---|---|---|
+| **3009** | ram | 10.50.30.110 | **stress-ng** + stress |
+| **5051** | emilia | 10.50.30.25 | **stress-ng** + stress |
+| 3030 | ram | 10.50.30.22 | stress |
+| 3031 | emilia | 10.50.30.24 | stress |
 
 - **Ne jamais utiliser une VM d'étudiant** (3000-3019 : xcsm, moodle, mutuelle, database…)
   comme VM de test — les tests les stressent / reconfigurent.
-- Ces VM de test sont **pinnées** au réconciliateur (`OMEGA_RECONCILE_PIN_VMIDS`) pour
-  ne pas migrer en plein test.
-- Les tests de charge ont besoin du binaire `stress` **dans l'invité**. Le VLAN omega est
-  isolé (pas d'internet) → `apt` n'y marche pas. Pour équiper une nouvelle VM de test,
-  pousser le binaire depuis une machine connectée (voir `docs/GPU-usage-*` pour la
-  méthode base64/QGA, ou copier `/usr/local/bin/stress` depuis 3009).
+- Elles sont **pinnées** au réconciliateur (`OMEGA_RECONCILE_PIN_VMIDS`) → pas de migration en plein test.
 
-**Si une VM de test ne répond plus** (le guest agent meurt après un stress lourd) :
+**Si une VM ne répond plus** (guest agent mort après un stress lourd) : la rebooter
+(`ssh root@<node> "qm reboot <vmid>"`, l'arrêt omega prend ~2 min) ou basculer sur une
+autre VM saine (`OMEGA_TEST_VMIDS`).
+
+### Accès SSH aux VM (VLAN 30)
+
+Les VM sont sur le réseau privé `10.50.30.0/24`, routé par **pfSense**. Depuis une
+machine du LAN `192.168.123.x` :
 ```bash
-# la rebooter (l'arrêt omega prend ~2 min, c'est normal)
-ssh root@<node> "qm reboot <vmid>"
-# ou basculer sur une autre VM saine : éditer OMEGA_TEST_VMIDS dans cluster.conf
+sudo ip route add 10.50.30.0/24 via 192.168.123.200    # une fois (les nœuds l'ont déjà)
+ssh root@10.50.30.110        # 3009 — mot de passe : root
+```
+> Si le login SSH est **lent** (banner), c'est le reverse-DNS : dans la VM,
+> `printf 'UseDNS no\n' >/etc/ssh/sshd_config.d/10-omega-fast.conf && systemctl reload ssh`.
+
+### Générer une charge dans une VM
+
+```bash
+# en SSH dans la VM :
+stress    --cpu 4 --timeout 60s                       # CPU
+stress    --vm 2 --vm-bytes 1G --timeout 90s          # RAM
+stress-ng --cpu 0 --vm 1 --vm-bytes 70% --timeout 90s # combiné (si stress-ng présent)
+# ou via le guest agent depuis un nœud (sans SSH) :
+ssh root@192.168.123.101 "qm guest exec 3009 -- stress --cpu 4 --timeout 60s"
+```
+
+### Installer stress-ng dans une nouvelle VM de test
+
+`apt` ne marche pas (VLAN isolé). Voie fiable = **scp du bundle** (binaire + libs) depuis
+un nœud vers la VM (le transfert par chunks QGA corrompt les gros binaires → SIGBUS) :
+```bash
+# bundle prêt sur emilia : /opt/omega-remote-paging/sng-bundle.tgz (stress-ng 0.15.06 + libs, bookworm)
+sshpass -p root scp -o StrictHostKeyChecking=no /opt/omega-remote-paging/sng-bundle.tgz root@<VM_IP>:/tmp/
+sshpass -p root ssh -o StrictHostKeyChecking=no root@<VM_IP> \
+    'tar xzf /opt/omega-remote-paging/sng-bundle.tgz -C / && ldconfig && stress-ng --version'
 ```
 
 ---
