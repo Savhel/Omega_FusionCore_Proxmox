@@ -190,6 +190,35 @@ impl CgroupCpuController {
             return Some(direct);
         }
 
+        // Fallback ROBUSTE (indépendant du scope) : lire le cgroup RÉEL du process QEMU
+        // via son PID. INDISPENSABLE quand la VM tourne via le wrapper omega
+        // (omega-qemu-launcher) : QEMU n'atterrit alors PAS dans qemu.slice/<vmid>.scope
+        // mais dans le scope de session de l'appelant (ex. user.slice/.../session-N.scope)
+        // → les chemins déduits du vmid ci-dessus échouent → le daemon ne voyait aucune
+        // charge CPU par-VM → PAS de hotplug vCPU. En lisant /proc/<pid>/cgroup on trouve
+        // le bon cgroup quel que soit l'emplacement.
+        if let Some(path) = self.cgroup_from_pidfile(vm_id) {
+            return Some(path);
+        }
+
+        None
+    }
+
+    /// Cgroup v2 réel du process QEMU d'une VM, déduit de son PID (pidfile Proxmox).
+    fn cgroup_from_pidfile(&self, vm_id: u32) -> Option<PathBuf> {
+        let pid = fs::read_to_string(format!("/run/qemu-server/{}.pid", vm_id))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())?;
+        // /proc/<pid>/cgroup (v2) : une ligne "0::/qemu.slice/<vmid>.scope"
+        let content = fs::read_to_string(format!("/proc/{}/cgroup", pid)).ok()?;
+        let rel = content
+            .lines()
+            .find_map(|l| l.strip_prefix("0::"))?
+            .trim_start_matches('/');
+        let path = self.cgroup_root.join(rel);
+        if path.join("cpu.stat").exists() {
+            return Some(path);
+        }
         None
     }
 

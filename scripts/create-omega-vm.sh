@@ -467,6 +467,15 @@ write_files:
       # L'IP statique injectée au premier boot est conservée par netplan.
       network:
         config: disabled
+  - path: /etc/udev/rules.d/99-omega-cpu-online.rules
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Onlinise AUTOMATIQUEMENT tout vCPU ajouté à chaud (hotplug) par le daemon Omega.
+      # Sans ça, un CPU hotplug apparaît OFFLINE dans l'invité → le guest ne l'utilise
+      # pas → la charge ne s'étale pas → l'utilisation par vCPU chute → l'élasticité
+      # vCPU ne grimpe pas jusqu'au max et reverte. Cette règle rend le scale-up réel.
+      SUBSYSTEM=="cpu", ACTION=="add", TEST=="online", ATTR{online}=="0", ATTR{online}="1"
 bootcmd:
   - [ bash, -lc, "if [ ! -e /var/lib/omega-firstboot-machine-id.done ]; then rm -f /etc/machine-id /var/lib/dbus/machine-id; systemd-machine-id-setup || true; touch /var/lib/omega-firstboot-machine-id.done; fi" ]
   # Mot de passe root + login SSH GARANTIS à CHAQUE boot (bootcmd, pas runcmd) :
@@ -476,6 +485,9 @@ bootcmd:
   - [ bash, -lc, "echo 'root:${ROOT_PASSWORD}' | chpasswd 2>/dev/null || true" ]
   - [ bash, -lc, "echo '${CIUSER}:${ROOT_PASSWORD}' | chpasswd 2>/dev/null || true" ]
   - [ bash, -lc, "install -d -m 0755 /etc/ssh/sshd_config.d; printf 'PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' >/etc/ssh/sshd_config.d/00-omega-root-login.conf 2>/dev/null || true" ]
+  # Recharge la règle udep CPU + onlinise tout CPU déjà présent mais offline (au cas où
+  # un vCPU aurait été hotplug avant l'application de la règle).
+  - [ bash, -lc, "udevadm control --reload-rules 2>/dev/null; udevadm trigger --subsystem-match=cpu 2>/dev/null; for f in /sys/devices/system/cpu/cpu[0-9]*/online; do echo 1 > \"$f\" 2>/dev/null || true; done" ]
 runcmd:
   - [ bash, -lc, "rm -f /var/lib/dhcp/* /var/lib/NetworkManager/*lease* 2>/dev/null || true" ]
   - [ bash, -lc, "test -s /etc/machine-id || systemd-machine-id-setup || true" ]
