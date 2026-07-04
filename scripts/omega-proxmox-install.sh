@@ -278,6 +278,42 @@ fi
 ln -sfn "$WRAPPER_PATH" /usr/bin/kvm
 success "Symlink /usr/bin/kvm → ${WRAPPER_PATH} actif"
 
+# ─── Durabilité : ré-asserte le wrapper si /usr/bin/kvm dérive ────────────────
+# Une MAJ du paquet qemu-system-x86 réécrit /usr/bin/kvm vers le vrai binaire → le
+# wrapper est débranché (déjà arrivé). Un path-unit systemd le remet automatiquement,
+# sans toucher à apt. Garde-fou : ne repointe que si kvm.real est bien le vrai qemu.
+cat > "${INSTALL_DIR}/omega-ensure-kvm-wrapper" <<EOSCRIPT
+#!/bin/sh
+WRAP="${WRAPPER_PATH}"
+REAL="${OMEGA_REAL_KVM}"
+[ -x "\$WRAP" ] || exit 0
+[ "\$(readlink -f /usr/bin/kvm 2>/dev/null)" = "\$WRAP" ] && exit 0
+if readlink -f "\$REAL" 2>/dev/null | grep -q qemu-system; then
+    ln -sfn "\$WRAP" /usr/bin/kvm
+    logger -t omega-kvm-wrapper "wrapper QEMU ré-asserté (/usr/bin/kvm -> \$WRAP)"
+fi
+EOSCRIPT
+chmod 755 "${INSTALL_DIR}/omega-ensure-kvm-wrapper"
+cat > /etc/systemd/system/omega-kvm-wrapper.service <<EOSVC
+[Unit]
+Description=Omega - re-asserte le wrapper QEMU (/usr/bin/kvm)
+[Service]
+Type=oneshot
+ExecStart=${INSTALL_DIR}/omega-ensure-kvm-wrapper
+EOSVC
+cat > /etc/systemd/system/omega-kvm-wrapper.path <<'EOPATH'
+[Unit]
+Description=Omega - surveille /usr/bin/kvm (remis si une MAJ qemu reverte le wrapper)
+[Path]
+PathChanged=/usr/bin/kvm
+Unit=omega-kvm-wrapper.service
+[Install]
+WantedBy=multi-user.target
+EOPATH
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now omega-kvm-wrapper.path 2>/dev/null || true
+success "Garde-fou durabilité wrapper actif (omega-kvm-wrapper.path)"
+
 # ─── 3. Hookscript Proxmox ────────────────────────────────────────────────────
 
 step "Installation du hookscript Proxmox"
@@ -305,6 +341,18 @@ NODE_ADDR="$(hostname -I | awk '{print $1}')"
 NODE_ID="$(hostname -s)"
 [[ -n "$OMEGA_GPU_PRIMARY_NODE" ]] || OMEGA_GPU_PRIMARY_NODE="$NODE_ID"
 [[ -n "$OMEGA_GPU_PROXY_URL" ]] || OMEGA_GPU_PROXY_URL="http://${OMEGA_GPU_PRIMARY_NODE}:9400"
+
+# Auto-détection de la VRAM totale si non fournie (0) et GPU présent. Sinon le proxy
+# déclare 0 MiB après CHAQUE déploiement (le défaut est 0) → les tests de placement GPU
+# (34/35) et toute allocation de budget échouent ("aucun nœud GPU avec budget"), alors
+# que le GPU est bien là. Auto-guérison via nvidia-smi ; reste overridable par la variable.
+if [[ "${OMEGA_GPU_PROXY_TOTAL_VRAM_MIB:-0}" -eq 0 ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    _detected_vram="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+    if [[ "$_detected_vram" =~ ^[0-9]+$ && "$_detected_vram" -gt 0 ]]; then
+        OMEGA_GPU_PROXY_TOTAL_VRAM_MIB="$_detected_vram"
+        info "VRAM GPU auto-détectée : ${OMEGA_GPU_PROXY_TOTAL_VRAM_MIB} MiB (nvidia-smi)"
+    fi
+fi
 ensure_token_file "$OMEGA_GPU_PROXY_API_TOKEN_FILE"
 
 set_env_var OMEGA_NODE_ID "$NODE_ID"

@@ -20,9 +20,17 @@ step "Prérequis"
 require_cluster
 
 step "Remise à 1 vCPU (état de référence avant le test)"
-stop_vm_for_reconfig "$VMID"
-qm set "$VMID" --vcpus 1 >/dev/null
-start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID avec 1 vCPU runtime"
+# Hot-unplug SANS arrêt : un stop/restart d'une VM omega déclenche les hooks de paging
+# (~2 min) → échec/timeout du redémarrage. Les VM omega ont hotplug=cpu, donc le hot-set
+# suffit. Stop/restart seulement en secours si le hot-set n'aboutit pas.
+if qm set "$VMID" --vcpus 1 >/dev/null 2>&1 && sleep 3 && \
+   [[ "$(vm_runtime_vcpus "$VMID" 2>/dev/null || echo 0)" == "1" ]]; then
+    info "vCPU ramené à 1 à chaud (sans redémarrage)"
+else
+    stop_vm_for_reconfig "$VMID"
+    qm set "$VMID" --vcpus 1 >/dev/null
+    start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID avec 1 vCPU runtime"
+fi
 sleep 5
 for _ in $(seq 1 30); do
     guest_agent_ready "$VMID" && break
@@ -80,8 +88,17 @@ fi
 step "Charge simultanée RAM + CPU dans la VM (90s)"
 info "stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s"
 ensure_guest_packages "$VMID" stress-ng qemu-guest-agent || true
-qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null 2>&1 || \
-    fail "qemu-guest-agent/stress-ng indisponible dans la VM $VMID — M1 exige une vraie pression RAM+CPU dans l'invité"
+# Charge combinée RAM+CPU. Fallback 'stress' (classique, libc seul) si stress-ng absent
+# du guest (VLAN omega isolé → apt KO) : 'stress' gère aussi --cpu + --vm dans un seul
+# appel. Lancé détaché (setsid) + nice pour saturer sans affamer le QGA ; --vm-bytes en
+# octets absolus calculés depuis MemTotal (70%).
+if qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null 2>&1; then
+    :
+elif qm guest exec "$VMID" -- /bin/sh -c 'command -v stress >/dev/null 2>&1 || exit 1; kb=$(awk "/MemTotal/{print \$2}" /proc/meminfo); vb=$(( kb*1024*70/100 )); setsid nice -n 19 stress --cpu 4 --vm 1 --vm-bytes "$vb" --timeout 90s </dev/null >/dev/null 2>&1 & echo started' 2>/dev/null | grep -q started; then
+    info "charge RAM+CPU via 'stress' (fallback détaché, sans stress-ng)"
+else
+    fail "qemu-guest-agent/stress(-ng) indisponible dans la VM $VMID — M1 exige une vraie pression RAM+CPU dans l'invité"
+fi
 
 step "Surveillance simultanée évictions + vCPUs pendant 100s"
 t0=$SECONDS
