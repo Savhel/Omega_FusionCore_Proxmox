@@ -30,12 +30,16 @@ CONF_FILE="${SCRIPT_DIR}/cluster.conf"
 # ── Options CLI ───────────────────────────────────────────────────────────────
 DO_GPU=false; DO_CEPH=false; DO_LONG=false; DO_SCALE=false; DO_FLEET=false; DO_DESTRUCTIVE=false; DO_PROVISION=false; DO_PRODUCTION=false; AUTO=false; DO_LLM=false; DO_LLM_ACCESS=false; DO_LLM_ACCESS_RECONCILE=false; OMEGA_LAB_DRYRUN=false
 RUN_CATEGORY=""; LIST_CATEGORIES=false; _want_cat=false
+RUN_TEST=""; _want_test=false
 for arg in "$@"; do
     if [[ "$_want_cat" == true ]]; then RUN_CATEGORY="$arg"; _want_cat=false; continue; fi
+    if [[ "$_want_test" == true ]]; then RUN_TEST="$arg"; _want_test=false; continue; fi
     case "$arg" in
         --list-categories|--categories) LIST_CATEGORIES=true ;;
         --category=*)  RUN_CATEGORY="${arg#*=}" ;;
         --category|--cat) _want_cat=true ;;
+        --test=*)      RUN_TEST="${arg#*=}" ;;
+        --test)        _want_test=true ;;
         --gpu)         DO_GPU=true  ;;
         --llm)         DO_LLM=true  ;;
         --llm-access)  DO_LLM_ACCESS=true ;;
@@ -3487,6 +3491,13 @@ if [[ -n "$RUN_CATEGORY" ]]; then
     # accepte "RAM", "CPU GPU", ou "all" ; découpe sur espaces/virgules
     read -r -a _cats <<< "${RUN_CATEGORY//,/ }"
     run_category "${_cats[@]}"
+    [[ $TOTAL_FAIL -eq 0 ]] && exit 0 || exit 1
+fi
+if [[ -n "$RUN_TEST" ]]; then
+    # un ou plusieurs IDs de test (ex: --test 02  ou  --test "02 08 22")
+    reset_results
+    for _tid in ${RUN_TEST//,/ }; do run_one "$_tid"; done
+    show_results
     [[ $TOTAL_FAIL -eq 0 ]] && exit 0 || exit 1
 fi
 
