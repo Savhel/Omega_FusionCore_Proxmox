@@ -88,17 +88,21 @@ fi
 step "Charge simultanée RAM + CPU dans la VM (90s)"
 info "stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s"
 ensure_guest_packages "$VMID" stress-ng qemu-guest-agent || true
-# Charge combinée RAM+CPU. Fallback 'stress' (classique, libc seul) si stress-ng absent
-# du guest (VLAN omega isolé → apt KO) : 'stress' gère aussi --cpu + --vm dans un seul
-# appel. Lancé détaché (setsid) + nice pour saturer sans affamer le QGA ; --vm-bytes en
-# octets absolus calculés depuis MemTotal (70%).
-if qm guest exec "$VMID" -- stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s &>/dev/null 2>&1; then
-    :
-elif qm guest exec "$VMID" -- /bin/sh -c 'command -v stress >/dev/null 2>&1 || exit 1; kb=$(awk "/MemTotal/{print \$2}" /proc/meminfo); vb=$(( kb*1024*70/100 )); setsid nice -n 19 stress --cpu 4 --vm 1 --vm-bytes "$vb" --timeout 90s </dev/null >/dev/null 2>&1 & echo started' 2>/dev/null | grep -q started; then
-    info "charge RAM+CPU via 'stress' (fallback détaché, sans stress-ng)"
-else
-    fail "qemu-guest-agent/stress(-ng) indisponible dans la VM $VMID — M1 exige une vraie pression RAM+CPU dans l'invité"
-fi
+# L'agent d'éviction AGRESSIVE de M1 page-out la mémoire du guest — dont le QGA lui-même
+# → le QGA devient TRANSITOIREMENT injoignable (il est recallé à l'accès, mais un essai
+# unique peut tomber au mauvais moment). La charge étant DÉTACHÉE (setsid), il suffit d'UN
+# lancement réussi dans une fenêtre où le QGA répond : on réessaie donc (stress-ng puis
+# fallback 'stress' — 'stress' gère aussi --cpu + --vm ; nice pour ne pas achever le QGA).
+charge_ok=0
+for _attempt in $(seq 1 20); do
+    if qm guest exec "$VMID" -- /bin/sh -c 'command -v stress-ng >/dev/null 2>&1 || exit 1; setsid stress-ng --vm 1 --vm-bytes 70% --cpu 0 --timeout 90s </dev/null >/dev/null 2>&1 & echo started' 2>/dev/null | grep -q started; then
+        info "charge RAM+CPU (stress-ng détaché) lancée (tentative $_attempt)"; charge_ok=1; break
+    elif qm guest exec "$VMID" -- /bin/sh -c 'command -v stress >/dev/null 2>&1 || exit 1; kb=$(awk "/MemTotal/{print \$2}" /proc/meminfo); vb=$(( kb*1024*70/100 )); setsid nice -n 19 stress --cpu 4 --vm 1 --vm-bytes "$vb" --timeout 90s </dev/null >/dev/null 2>&1 & echo started' 2>/dev/null | grep -q started; then
+        info "charge RAM+CPU via 'stress' (fallback détaché) lancée (tentative $_attempt)"; charge_ok=1; break
+    fi
+    sleep 3
+done
+[[ "$charge_ok" -eq 1 ]] || fail "qemu-guest-agent/stress(-ng) indisponible dans la VM $VMID après 20 tentatives — M1 exige une vraie pression RAM+CPU dans l'invité"
 
 step "Surveillance simultanée évictions + vCPUs pendant 100s"
 t0=$SECONDS
