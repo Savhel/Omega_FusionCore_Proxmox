@@ -1010,6 +1010,24 @@ vm_cpu_stress() {
         info "stress-ng lancé dans la VM $vmid via qemu-guest-agent"
         return
     fi
+    # Fallback 'stress' (classique, libc seul) — utile quand stress-ng est absent du
+    # guest et que le VLAN omega isolé empêche apt (le binaire 'stress' est poussé
+    # dans la VM par une autre voie). Même charge CPU, options équivalentes.
+    # NB : stress-ng --cpu 0 = « tous les CPU, en suivi » ; 'stress' fige le nombre
+    # de workers au lancement. On lance donc PLUS de workers que le plafond vCPU
+    # possible (${OMEGA_STRESS_CPU_WORKERS:-8}) pour saturer chaque cœur AJOUTÉ par
+    # hotplug — sinon un seul worker sur 2 vCPU tombe sous le seuil et le scale
+    # s'arrête à 2 puis redescend.
+    # DÉTACHÉ (setsid + &) : qm guest exec est synchrone et bornerait la charge à son
+    # propre timeout ; en détachant, l'appel rend la main tout de suite et 'stress'
+    # tourne en continu ${dur}s dans le guest pendant que le test observe le scale.
+    # nice -n 19 : stress consomme tout le CPU IDLE (util ~100% → déclenche le scale-up)
+    # mais cède au qemu-guest-agent (priorité normale) → le QGA reste joignable même
+    # quand la VM démarre à 1 vCPU (sinon 'stress --cpu N' l'affame et le ping échoue).
+    if qm guest exec "$vmid" -- /bin/sh -c "command -v stress >/dev/null 2>&1 || exit 1; setsid nice -n 19 stress --cpu ${OMEGA_STRESS_CPU_WORKERS:-4} --timeout ${dur}s </dev/null >/dev/null 2>&1 & echo started" 2>/dev/null | grep -q started; then
+        info "stress (--cpu ${OMEGA_STRESS_CPU_WORKERS:-4}, nice, détaché) lancé dans la VM $vmid via qemu-guest-agent"
+        return
+    fi
     warn "qemu-guest-agent absent — stress-ng injecté dans le cgroup QEMU"
     # Proxmox 8 : /sys/fs/cgroup/qemu.slice/<vmid>.scope/
     # Proxmox 7 : /sys/fs/cgroup/machine.slice/qemu-<vmid>.scope/
@@ -1035,7 +1053,19 @@ vm_mem_stress() {
         info "stress-ng mémoire lancé dans la VM $vmid via qemu-guest-agent (${bytes}, ${dur}s)"
         return 0
     fi
-    warn "charge mémoire invitée impossible — qemu-guest-agent ou stress-ng indisponible"
+    # Fallback 'stress' : --vm-bytes n'accepte pas les % → on convertit depuis la RAM
+    # réelle du guest (MemTotal). Ex. "85%" → octets. Sinon on passe la valeur telle quelle.
+    if qm guest exec "$vmid" -- /bin/sh -c "command -v stress >/dev/null 2>&1 || exit 1
+pct='${bytes}'
+case \"\$pct\" in
+  *%) n=\${pct%\%}; kb=\$(awk '/MemTotal/{print \$2}' /proc/meminfo); vb=\$(( kb*1024*n/100 ));;
+  *)  vb='${bytes}';;
+esac
+setsid stress --vm 1 --vm-bytes \"\$vb\" --timeout ${dur}s </dev/null >/dev/null 2>&1 & echo started" 2>/dev/null | grep -q started; then
+        info "stress (--vm, détaché) mémoire lancé dans la VM $vmid via qemu-guest-agent (${bytes}, ${dur}s)"
+        return 0
+    fi
+    warn "charge mémoire invitée impossible — qemu-guest-agent ou stress(-ng) indisponible"
     return 1
 }
 

@@ -86,10 +86,21 @@ if [[ "$VM_CORES" -le 1 || "$VM_SMP" != *"maxcpus=${VM_CORES}"* ]]; then
 fi
 
 step "Remise à 1 vCPU (état de référence)"
-stop_vm_for_reconfig "$VMID"
-qm set "$VMID" --vcpus 1 >/dev/null
-start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID avec 1 vCPU initial"
-sleep 5
+# Hot-unplug à 1 vCPU SANS arrêt : un stop/restart d'une VM omega déclenche les hooks
+# de paging (memfd, ~2 min) + reboot → le qemu-guest-agent reste indisponible bien
+# au-delà de la fenêtre d'attente du test → FAUX échec « QGA absent » (sur toute VM).
+# Les VM omega ont hotplug=cpu, donc `qm set --vcpus 1` à chaud suffit. On ne retombe
+# sur un stop/restart que si le hot-set n'aboutit pas (VM réellement non hotpluggable).
+if qm set "$VMID" --vcpus 1 >/dev/null 2>&1 && sleep 3 && \
+   [[ "$(vm_runtime_vcpus "$VMID" 2>/dev/null || echo 0)" == "1" ]]; then
+    info "vCPU ramené à 1 à chaud (sans redémarrage — QGA préservé)"
+else
+    warn "hot-set vCPU=1 impossible → arrêt/reconfig/redémarrage (VM non hotpluggable)"
+    stop_vm_for_reconfig "$VMID"
+    qm set "$VMID" --vcpus 1 >/dev/null
+    start_vm_with_hostpci_repair "$VMID" >/dev/null || fail "impossible de redémarrer la VM $VMID avec 1 vCPU initial"
+    sleep 5
+fi
 
 step "État initial vCPU"
 vcpus_init="$(vm_runtime_vcpus "$VMID" || true)"
@@ -140,7 +151,9 @@ fi
 step "Simulation charge CPU forte (stress-ng dans la VM — ${STRESS_SECS}s)"
 info "seuil scale-up=${HIGH_THRESHOLD}% | seuil scale-down=${LOW_THRESHOLD}% | intervalle=${SCALE_INTERVAL}s"
 qga_ready=0
-for _ in $(seq 1 30); do
+# Fenêtre large (défaut 120 × 2s = 240s) : couvre le boot lent d'une VM omega si un
+# stop/restart a quand même eu lieu (chemin de secours ci-dessus).
+for _ in $(seq 1 "${OMEGA_QGA_WAIT_TRIES:-120}"); do
     if guest_agent_ready "$VMID"; then
         qga_ready=1
         break
