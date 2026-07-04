@@ -183,12 +183,19 @@ echo ""
 
 kill "$STRESS_PID" 2>/dev/null || true
 
-step "Surveillance scale-down (60s sans charge)"
+# Le downscale exige DOWNSCALE_STABLE_SECS (~60s) de faible charge AVANT d'agir : une
+# fenêtre fixe de 60s le manquait de justesse. On observe jusqu'à ${OMEGA_SCALEDOWN_WAIT}
+# (défaut 180s) et on s'arrête dès le retour au plancher.
+scaledown_secs="${OMEGA_SCALEDOWN_WAIT:-180}"
+step "Surveillance scale-down (jusqu'à ${scaledown_secs}s sans charge)"
 info "Attente scale-down..."
 t0=$SECONDS
-while [[ $(elapsed $t0) -lt 60 ]]; do
+vcpus_min_after=$vcpus_max
+while [[ $(elapsed $t0) -lt "$scaledown_secs" ]]; do
     vcpus_now="$(vm_runtime_vcpus "$VMID" || true)"
-    printf "\r  [%3ds] vCPUs runtime : %s" "$(elapsed $t0)" "${vcpus_now:-?}"
+    [[ "${vcpus_now:-9}" =~ ^[0-9]+$ && "$vcpus_now" -lt "$vcpus_min_after" ]] && vcpus_min_after=$vcpus_now
+    printf "\r  [%3ds] vCPUs runtime : %s   (min observé : %s)" "$(elapsed $t0)" "${vcpus_now:-?}" "$vcpus_min_after"
+    [[ "${vcpus_now:-9}" == "${vcpus_init:-1}" ]] && { echo ""; info "scale-down atteint (${vcpus_max}→${vcpus_now}) après ~$(elapsed $t0)s"; break; }
     sleep 5
 done
 echo ""
@@ -197,9 +204,14 @@ vcpus_final="$(vm_runtime_vcpus "$VMID" || true)"
 info "vCPUs runtime finaux : ${vcpus_final:-?}"
 
 step "Résultats"
-info "vCPU runtime initial : $vcpus_init | max observé sous charge : $vcpus_max | final : ${vcpus_final:-?}"
+info "vCPU runtime initial : $vcpus_init | max sous charge : $vcpus_max | min après charge : $vcpus_min_after | final : ${vcpus_final:-?}"
 
 [[ "$vcpus_max" -gt "${vcpus_init:-1}" ]] || fail "aucun scale-up runtime observé sous charge (l'UI Proxmox restera à ${vcpus_init} CPU)"
+if [[ "${vcpus_min_after:-9}" -le "${vcpus_init:-1}" ]]; then
+    pass "scale-down OK — retour de ${vcpus_max} à ${vcpus_min_after} vCPU après disparition de la charge"
+else
+    warn "scale-down non observé dans la fenêtre (${vcpus_max}→${vcpus_min_after}) — le daemon peut être encore dans son délai d'hystérésis (DOWNSCALE_STABLE_SECS)"
+fi
 
 step "Logs agent (scale events)"
 grep -i "vcpu\|scale\|ajust" "$LOG_AGENT" | head -20 || warn "aucun log vCPU trouvé"
