@@ -36,7 +36,7 @@ print(cur)
 
 discover_gpu_nodes() {
     if [[ -n "$GPU_NODES" ]]; then
-        tr ',' ' ' <<<"$GPU_NODES"
+        tr ',' '\n' <<<"$GPU_NODES"
         return
     fi
     local n total
