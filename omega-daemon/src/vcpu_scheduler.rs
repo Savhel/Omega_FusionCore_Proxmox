@@ -162,9 +162,15 @@ impl VmVcpuState {
     }
 
     pub fn needs_more_vcpus(&self) -> bool {
+        // Deux signaux de « besoin de plus de vCPU », l'un OU l'autre (soutenu) :
+        //  - utilisation par vCPU ≥ seuil (charge CPU franche), OU
+        //  - THROTTLING (has_steal_pressure) : la VM est bridée par son quota cpu.max
+        //    (= son nb de vCPU actuel) alors qu'elle en demande plus. C'est LE signal
+        //    décisif d'une VM CPU-bound plafonnée — l'utilisation mesurée est alors
+        //    capée sous 100 %/vCPU et pouvait à tort ne pas déclencher le hotplug.
         !self.at_max_vcpus()
-            && self.utilization_pct() >= HOTPLUG_TRIGGER_PCT
             && self.high_load_duration_secs() >= HOTPLUG_STABLE_SECS
+            && (self.utilization_pct() >= HOTPLUG_TRIGGER_PCT || self.has_steal_pressure())
     }
 
     /// Depuis combien de secondes la VM est en forte charge soutenue.
@@ -595,7 +601,13 @@ impl VcpuScheduler {
             // Symétrique : minuteur de FORTE charge soutenue pour l'hystérésis hotplug.
             // Un micro-pic isolé met high_load_since puis le reset au tick suivant →
             // jamais ≥ HOTPLUG_STABLE_SECS → pas de hotplug intempestif.
-            if !state.at_max_vcpus() && utilization >= HOTPLUG_TRIGGER_PCT {
+            // Le minuteur de forte charge s'arme sur util ≥ seuil OU throttling soutenu
+            // (steal_pct = throttle*100). Sans le throttle, une VM plafonnée par cpu.max
+            // (util capée ~90 % mais bruitée) voyait high_load_since se remettre à zéro
+            // et n'atteignait jamais HOTPLUG_STABLE_SECS → aucun hotplug.
+            if !state.at_max_vcpus()
+                && (utilization >= HOTPLUG_TRIGGER_PCT || steal_pct >= STEAL_THRESHOLD_PCT)
+            {
                 if state.high_load_since.is_none() {
                     state.high_load_since = Some(now_secs());
                 }
@@ -669,11 +681,16 @@ impl VcpuScheduler {
 
     /// VMs candidates à la migration (steal élevé ou nœud saturé).
     pub fn vms_needing_migration(&self) -> Vec<(u32, String)> {
+        // Migration = ESCALADE quand le hotplug local n'est plus possible : on ne migre
+        // une VM sous pression que si elle est DÉJÀ à son max de vCPU. En-dessous, le
+        // hotplug (vms_needing_hotplug) répond au besoin — migrer serait prématuré et
+        // priverait la VM de l'élasticité locale (cf comportement observé : VM à 1 vCPU
+        // throttlée envoyée en migration au lieu d'être scalée).
         self.vms
             .read()
             .unwrap()
             .values()
-            .filter(|s| s.has_steal_pressure())
+            .filter(|s| s.has_steal_pressure() && s.at_max_vcpus())
             .map(|s| (s.vm_id, format!("steal {:.1}%", s.steal_pct)))
             .collect()
     }
@@ -949,6 +966,42 @@ mod tests {
     }
 
     #[test]
+    fn test_throttled_vm_below_max_hotplugs_not_migrates() {
+        // Régression (juil. 2026) : une VM à 1 vCPU bridée par cpu.max (=1 cœur) et
+        // THROTTLÉE sous charge était routée vers la MIGRATION (via steal) au lieu d'un
+        // hotplug, alors qu'elle est en-dessous de son max. Elle doit HOTPLUGGER ; la
+        // migration ne s'applique qu'AU MAX de vCPU.
+        let s = make_scheduler(4);
+        s.admit_vm(1, 1, 4); // current=1, max=4 (peut encore hotplugger)
+        // util modérée (capée par le quota) MAIS throttle 16% → steal_pct=16 ≥ seuil.
+        s.update_vm_metrics(1, 60.0, 16.0);
+        {
+            let mut vms = s.vms.write().unwrap();
+            vms.get_mut(&1).unwrap().high_load_since =
+                Some(now_secs().saturating_sub(HOTPLUG_STABLE_SECS + 1));
+        }
+        // Doit demander un hotplug…
+        assert!(
+            s.vms_needing_hotplug().contains(&1),
+            "une VM throttlée sous son max doit hotplugger"
+        );
+        // …et NE PAS être proposée à la migration (elle peut encore scaler localement).
+        assert!(
+            !s.vms_needing_migration().iter().any(|(id, _)| *id == 1),
+            "pas de migration tant que le hotplug local est possible"
+        );
+
+        // À l'inverse : une VM DÉJÀ au max et throttlée → migration (plus de hotplug local).
+        s.admit_vm(2, 2, 2); // current=2=max
+        s.update_vm_metrics(2, 180.0, 16.0);
+        assert!(
+            s.vms_needing_migration().iter().any(|(id, _)| *id == 2),
+            "au max de vCPU, la pression throttle escalade en migration"
+        );
+        assert!(!s.vms_needing_hotplug().contains(&2));
+    }
+
+    #[test]
     fn test_hotplug_requires_sustained_load_not_brief_spike() {
         // Hystérésis : un pic bref (forte util mais high_load_since tout récent) ne doit
         // PAS hotplugger — c'est ce qui causait le ping-pong sur les micro-pics JVM/GC.
@@ -1150,10 +1203,16 @@ mod tests {
 
     #[test]
     fn test_steal_pressure_detected() {
+        // Une VM AU MAX de vCPU et sous pression steal est candidate à la migration
+        // (plus de hotplug local possible). Cf test_throttled_vm_below_max_* pour le
+        // cas sous-max (hotplug, pas migration).
         let s = make_scheduler(2);
-        s.admit_vm(1, 2, 4);
+        s.admit_vm(1, 2, 2); // current=2=max → l'escalade migration s'applique
         s.update_vm_metrics(1, 50.0, 15.0); // steal 15% > STEAL_THRESHOLD_PCT
 
+        // Le signal steal brut est détecté…
+        assert!(s.get_vm_state(1).unwrap().has_steal_pressure());
+        // …et route vers la migration puisqu'on est au max.
         let candidates = s.vms_needing_migration();
         assert!(candidates.iter().any(|(id, _)| *id == 1));
     }

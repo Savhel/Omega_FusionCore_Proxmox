@@ -538,19 +538,27 @@ fn ensure_vm_registered(
     if state.vcpu_scheduler.has_vm(vm_id) {
         if let Some(vm_state) = state.vcpu_scheduler.get_vm_state(vm_id) {
             let desired_min = conf_min_vcpus.max(1).min(vm_state.current_vcpus);
-            if desired_min != vm_state.min_vcpus {
+            // Re-synchroniser AUSSI le plafond (max) depuis la config. Sans ça, une VM
+            // enregistrée avec un max bas (ex. cores=1 au boot, ou pendant une reconfig)
+            // gardait max_vcpus figé → `at_max_vcpus()` toujours vrai → AUCUN hotplug
+            // possible même après avoir relevé `cores` (l'ancien code ne re-synchronisait
+            // que le min). On borne à ≥ current pour respecter l'invariant d'update_profile.
+            let desired_max = conf_max_vcpus.max(vm_state.current_vcpus).max(desired_min);
+            if desired_min != vm_state.min_vcpus || desired_max != vm_state.max_vcpus {
                 match state
                     .vcpu_scheduler
-                    .update_profile(vm_id, desired_min, vm_state.max_vcpus)
+                    .update_profile(vm_id, desired_min, desired_max)
                 {
                     Ok(()) => info!(
                         vm_id,
                         old_min = vm_state.min_vcpus,
                         new_min = desired_min,
-                        "plancher vCPU re-synchronisé depuis la config (élasticité réactivée)"
+                        old_max = vm_state.max_vcpus,
+                        new_max = desired_max,
+                        "profil vCPU re-synchronisé depuis la config (élasticité réactivée)"
                     ),
                     Err(reason) => {
-                        warn!(vm_id, desired_min, reason, "échec re-synchro plancher vCPU")
+                        warn!(vm_id, desired_min, desired_max, reason, "échec re-synchro profil vCPU")
                     }
                 }
             }
@@ -656,6 +664,13 @@ fn parse_vm_cpu_profile(content: &str) -> Option<(usize, usize)> {
     let mut omega_min: Option<usize> = None;
 
     for line in content.lines() {
+        // S'ARRÊTER à la première section de SNAPSHOT (`[snapname]`). Dans un .conf
+        // Proxmox la config LIVE est en tête, les snapshots suivent en sections `[...]`
+        // qui répètent cores/vcpus/… Sans ce break, on prenait la DERNIÈRE valeur (celle
+        // d'un snapshot, ex. cores:1) → max_vcpus figé à 1 → at_max → AUCUN hotplug.
+        if line.starts_with('[') {
+            break;
+        }
         if let Some(rest) = line.strip_prefix("sockets:") {
             sockets = rest
                 .trim()
@@ -823,6 +838,17 @@ mod tests {
     fn test_parse_vm_cpu_profile_defaults_min_to_max_without_vcpus_line() {
         let profile = parse_vm_cpu_profile("cores: 2\nsockets: 2\nmemory: 512\n").unwrap();
         assert_eq!(profile, (4, 4));
+    }
+
+    #[test]
+    fn test_parse_vm_cpu_profile_ignores_snapshot_sections() {
+        // Régression : une config avec SNAPSHOT répète cores/vcpus dans une section
+        // `[snap]`. On ne doit lire QUE la config live (en tête) : ici cores:4 → max=4,
+        // pas le cores:1 du snapshot (qui figeait max=1 → aucun hotplug).
+        let conf = "cores: 4\nsockets: 1\nvcpus: 1\nmemory: 6144\n\
+                    [avant_test]\ncores: 1\nvcpus: 1\nmemory: 2048\n";
+        let profile = parse_vm_cpu_profile(conf).unwrap();
+        assert_eq!(profile, (1, 4), "doit lire la config live (cores:4), pas le snapshot");
     }
 
     #[test]
