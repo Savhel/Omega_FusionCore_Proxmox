@@ -340,6 +340,10 @@ OMEGA_SCALE_TIMEOUT_SECS='${OMEGA_SCALE_TIMEOUT_SECS:-1800}' \
 OMEGA_GPU_PRIMARY_NODE='${OMEGA_GPU_PRIMARY_NODE:-}' \
 OMEGA_GPU_NODES='${OMEGA_GPU_NODES:-}' \
 OMEGA_GPU_PROXY_URL='${OMEGA_GPU_PROXY_URL:-}' \
+OMEGA_GPU_JUPYTER_URL='${OMEGA_GPU_JUPYTER_URL:-}' \
+OMEGA_GPU_JUPYTER_TOKEN='${OMEGA_GPU_JUPYTER_TOKEN:-}' \
+OMEGA_OLLAMA_URL='${OMEGA_OLLAMA_URL:-}' \
+OMEGA_OLLAMA_MODEL='${OMEGA_OLLAMA_MODEL:-}' \
 OMEGA_GPU_PROXY_LISTEN='${OMEGA_GPU_PROXY_LISTEN:-0.0.0.0:9400}' \
 OMEGA_GPU_PROXY_BACKEND_COMMAND='${OMEGA_GPU_PROXY_BACKEND_COMMAND:-/tmp/omega-tests-bins/omega-gpu-worker-app.py}' \
 OMEGA_GPU_PROXY_BACKEND_TIMEOUT_SECS='${OMEGA_GPU_PROXY_BACKEND_TIMEOUT_SECS:-900}' \
@@ -600,6 +604,18 @@ EOF
 Valide la concurrence GPU CUDA.
 Le script lance plusieurs jobs matrix_multiply CUDA depuis plusieurs VMIDs et exige que le proxy respecte les budgets, refuse le hors-budget et exécute réellement sur backend=torch device=cuda.
 Un échec indique souvent une mauvaise configuration OMEGA_GPU_PYTHON, un max_concurrent trop bas ou un worker qui retombe en CPU.
+EOF
+            ;;
+        39) cat <<'EOF'
+Valide la 2e voie d'accès GPU d'Omega : l'ENTRAÎNEMENT via Jupyter du LXC GPU partagé.
+Le script vérifie que le service JupyterLab répond, que son token protège bien l'accès, puis qu'une VM omega atteint Jupyter à travers le réseau (pfSense).
+Un échec indique le LXC d'entraînement éteint/absent, un mauvais token, ou un routage VM→LXC bloqué. Config : OMEGA_GPU_JUPYTER_URL / OMEGA_GPU_JUPYTER_TOKEN.
+EOF
+            ;;
+        40) cat <<'EOF'
+Valide la 3e voie d'accès GPU d'Omega : l'INFÉRENCE LLM via le serveur Ollama.
+Le script vérifie qu'Ollama répond, qu'au moins un modèle est chargé, qu'une VRAIE inférence GPU aboutit, puis qu'une VM omega atteint l'API Ollama à travers le réseau.
+Un échec indique le serveur Ollama éteint, aucun modèle (ollama pull), une inférence qui échoue (GPU/VRAM), ou un routage VM→Ollama bloqué. Config : OMEGA_OLLAMA_URL / OMEGA_OLLAMA_MODEL.
 EOF
             ;;
         37) cat <<'EOF'
@@ -2855,6 +2871,8 @@ run_section_4() {
     _run_cluster "34" "GPU placement global" "34-gpu-placement-global.sh" "${TEST_VMIDS_ARR[0]}"
     _run_cluster "35" "GPU fallback réseau"  "35-gpu-network-fallback.sh" "${TEST_VMIDS_ARR[0]}"
     _run_cluster "36" "GPU concurrence CUDA" "36-gpu-concurrency-cuda.sh" "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "39" "GPU entraînement (Jupyter)" "39-gpu-training-jupyter.sh" "${TEST_VMIDS_ARR[0]}"
+    _run_cluster "40" "GPU LLM (Ollama)" "40-gpu-llm-ollama.sh"        "${TEST_VMIDS_ARR[0]}"
 }
 
 run_section_5() {
@@ -2900,6 +2918,8 @@ run_section_6() {
         _run_cluster "34" "GPU placement global"  "34-gpu-placement-global.sh" "${TEST_VMIDS_ARR[0]}"
         _run_cluster "35" "GPU fallback réseau"   "35-gpu-network-fallback.sh" "${TEST_VMIDS_ARR[0]}"
         _run_cluster "36" "GPU concurrence CUDA"  "36-gpu-concurrency-cuda.sh" "${TEST_VMIDS_ARR[0]}"
+        _run_cluster "39" "GPU entraînement (Jupyter)" "39-gpu-training-jupyter.sh" "${TEST_VMIDS_ARR[0]}"
+        _run_cluster "40" "GPU LLM (Ollama)" "40-gpu-llm-ollama.sh"        "${TEST_VMIDS_ARR[0]}"
     else
         _warn "Tests 27/32/34/35/36 ignorés — relancer avec --gpu"
         for t in 27 32 34 35 36; do RESULTS["$t"]="SKIP"; ((TOTAL_SKIP++)) || true; done
@@ -3052,6 +3072,8 @@ _dispatch_one() {
         34) _run_cluster  "34" "GPU placement global"        "34-gpu-placement-global.sh"  "${TEST_VMIDS_ARR[0]}" ;;
         35) _run_cluster  "35" "GPU fallback réseau"         "35-gpu-network-fallback.sh"  "${TEST_VMIDS_ARR[0]}" ;;
         36) _run_cluster  "36" "GPU concurrence CUDA"        "36-gpu-concurrency-cuda.sh"  "${TEST_VMIDS_ARR[0]}" ;;
+        39) _run_cluster "39" "GPU entraînement (Jupyter)" "39-gpu-training-jupyter.sh" "${TEST_VMIDS_ARR[0]}" ;;
+        40) _run_cluster "40" "GPU LLM (Ollama)"           "40-gpu-llm-ollama.sh"       "${TEST_VMIDS_ARR[0]}" ;;
         37) _run_cluster  "37" "Puissance Omega flotte"      "37-fleet-omega-power.sh"     "${OMEGA_FLEET_VMIDS:-${OMEGA_PROVISION_VMIDS:-${OMEGA_TEST_VMIDS}}}" "${OMEGA_FLEET_VM_COUNT:-50}" "${OMEGA_FLEET_CHAOS_VM_COUNT:-75}" "${OMEGA_FLEET_DURATION_SECS:-900}" ;;
         28) _run_cluster  "28" "Partition réseau"           "28-network-partition.sh"     "${NODES_ARR[1]:-}" ;;
         29) _run_cluster  "29" "Soak long physique"         "29-long-run-soak.sh"         "${TEST_VMIDS_ARR[0]}" "${OMEGA_SOAK_SECS:-1800}" ;;
@@ -3084,7 +3106,7 @@ declare -A CATEGORY_TESTS=(
     [CPU]="05"
     [RAM]="02 04 08 18 19 20 22"
     [DISK]="23 26"
-    [GPU]="06 07 27 32 34 35 36"
+    [GPU]="06 07 27 32 34 35 36 39 40"
     [NETWORK]="21 25 28"
     [MIGRATION]="03 M2 M5 M7"
     [MIXED]="M1 M3 M4 M6"
